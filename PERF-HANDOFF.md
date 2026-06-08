@@ -4,16 +4,28 @@ Goal: close the gap to the Go/Rust ports (~7–10 s suite) from where we are now
 
 ## Where we are (branch `perf/typechecker-allocation`, 134/134)
 
-| metric | baseline | after 68% cut | **after B (pvar)** |
+| metric | orig baseline | 68% cut (branch start) | **after B+C+D (now)** |
 |---|---:|---:|---:|
-| allocation / inference | 2344 B | 742 B | **~701 B** (min-of-5) |
-| isolated typecheck (min-of-5) | ~2.9 s | ~2.23 s | **~2.11 s** |
+| allocation / inference | 2344 B | 742 B | **~385 B** (min-of-5) |
+| isolated typecheck (min-of-5, interleaved) | ~2.9 s | (branch start) | **~38% faster than branch start** |
+
+Cumulative this branch (B+C+D): **742 → ~385 B/inf (−48%)**; matched-pair same-session
+alloc 823 → 372 (−55%); isolated typecheck min-of-5 ~1.68 s → ~1.03 s (−38%). 134/134
+throughout, inferences=431741 invariant held at every step.
 
 Update log (this branch, newest first):
-- **B (compact pvar/absvector) — DONE & committed.** Pure-array `Vmt` layout
-  (length at `[1]`, KL elt i at `[i+2]`, no `n` hash key). −42 B/inf min-of-5,
-  ~6% faster isolated typecheck, 134/134, inferences=431741 unchanged. NOTE the
-  real-base change had to ALSO update `install_native_prolog`'s
+- **D (pvar pooling on backtrack) — DONE & committed** (`fc38255`). Freelist recycles
+  the 2-slot pvar table when `gc` reclaims a failed branch's ticket (LIFO; success
+  never pools). −137 B/inf (522→385). Inference count byte-identical → no exercised
+  unification path perturbed. Residual escape hazard (findall snapshotting unbound
+  pvars) documented inline in `prims.lua`; re-validate before reusing the pool.
+- **C (native unification core) — DONE & committed** (`e39d106`). Native Lua
+  `bind!`/`bindv`/`unwind`/`occurs-check?`/`lzy=`/`lzy=!`/`newpv`/`gc` in
+  `install_native_prolog`, calling each other directly (no F-table dispatch, no
+  KL `trap-error`-wrapped `pvar?`). −179 B/inf (701→522), ~14% faster isolated.
+- **B (compact pvar/absvector) — DONE & committed** (`cddfefd`). Pure-array `Vmt`
+  layout (length at `[1]`, KL elt i at `[i+2]`, no `n` hash key). −42 B/inf, ~6%
+  faster, inferences unchanged. Real-base change ALSO updated `install_native_prolog`'s
   `is_pvar`/`lazyderef`/`deref` (tag at `[2]`, ticket at `[3]`, binding `v[t+2]`).
 - **A (lambda → array tables) — DISPROVEN, dropped.** Implemented + validated
   134/134 but measured +1350 B/inf WORSE (cross-checked `-joff`). Tables only beat
