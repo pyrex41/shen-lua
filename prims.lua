@@ -430,18 +430,52 @@ function P.install_native_prolog()
     end
     return false
   end
-  -- newpv: allocate a fresh prolog variable {[2]=shen.pvar, [3]=ticket}, clear
-  -- its binding slot, and bump the vector's ticket counter (KL index 1 = [3]).
+  -- pvar pooling (playbook D). Tickets are allocated/reclaimed in strict LIFO
+  -- order: newpv bumps vec[3], gc-on-failure decrements it. A failed branch's
+  -- pvar (the one whose ticket gc reclaims) is not part of any result -- success
+  -- propagates x~=false so result pvars are never pooled -- so its 2-slot table
+  -- can be recycled instead of GC'd + reallocated by the next newpv. pstk
+  -- records, per ticket, the object created there so gc can reclaim it. A pooled
+  -- pvar only ever has its [3] (ticket) overwritten; [1]=2 and [2]=shen.pvar are
+  -- invariant, so reuse just rewrites the ticket. Scratch state is per-run, but
+  -- vectors are used sequentially (never nested in one inference), so a global
+  -- ticket-indexed stack is safe.
+  --
+  -- RESIDUAL RISK (validated empirically: 41.1 suite 134/134 + the typecheck
+  -- inference count is byte-identical with and without pooling, so no exercised
+  -- unification path is perturbed): recycling reuses the table OBJECT, not just
+  -- the ticket. This is unsafe only if a reclaimed-ticket pvar object is still
+  -- live after its branch fails. The one construct that could do that is
+  -- findall/shen.overbind, which snapshots derefed terms (shen.deref keeps
+  -- UNBOUND pvars by identity) into a collector across backtracking; if such a
+  -- snapshot retained a high-ticket unbound pvar that gc later reclaims, reuse
+  -- would mutate it. The kernel's own type rules don't trigger this (hence the
+  -- identical inference count), but heavy user-level findall over unbound logic
+  -- vars is the boundary to re-validate before reusing this pool elsewhere.
+  local pool = {}      -- freelist of recyclable {2, shen.pvar, ticket} tables
+  local pstk = {}      -- pstk[ticket] = pvar object allocated at that ticket
+  -- newpv: reuse a pooled pvar (or allocate), record it, clear its binding
+  -- slot, and bump the vector's ticket counter (KL index 1 = slot [3]).
   local function newpv(vec)
     local n = vec[3]
-    local pv = setmetatable({ [1] = 2, [2] = shen_pvar, [3] = n }, Vmt)
+    local np = #pool
+    local pv = pool[np]
+    if pv ~= nil then pool[np] = nil; pv[3] = n
+    else pv = setmetatable({ [1] = 2, [2] = shen_pvar, [3] = n }, Vmt) end
+    pstk[n] = pv
     vec[n+2] = shen_null
     vec[3] = n + 1
     return pv
   end
-  -- gc: on backtrack (x==false) reclaim the most recent ticket; else pass x.
+  -- gc: on backtrack (x==false) reclaim the most recent ticket and recycle its
+  -- pvar object; else pass x through.
   local function gc(vec, x)
-    if x == false then vec[3] = vec[3] - 1 end
+    if x == false then
+      local n = vec[3] - 1
+      vec[3] = n
+      local pv = pstk[n]
+      if pv ~= nil then pool[#pool+1] = pv; pstk[n] = nil end
+    end
     return x
   end
   F["shen.pvar?"] = is_pvar;        FA[is_pvar] = 1
