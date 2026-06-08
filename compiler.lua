@@ -149,13 +149,14 @@ end
 -- KL cons cells are immutable, so sharing the constant is safe.
 -- ------------------------------------------------------------------
 C.KDATA = {}
+
+-- Original spine-only const hoisting (kept for backward behavior on explicit (cons ...) forms).
 local function const_count(form, env)
-  -- returns number of nodes if constant, or nil
   local t = type(form)
   if t=="number" or t=="string" or t=="boolean" then return 1 end
   if form == NIL then return 1 end
   if is_symbol(form) then
-    if env[form.name] then return nil end       -- bound variable: not constant
+    if env[form.name] then return nil end
     return 1
   end
   if is_cons(form) and is_symbol(car(form)) and car(form).name=="cons"
@@ -168,10 +169,10 @@ local function const_count(form, env)
   return nil
 end
 local function const_build(form)
-  if is_cons(form) then  -- (cons A B)
+  if is_cons(form) then
     return cons(const_build(car(cdr(form))), const_build(car(cdr(cdr(form)))))
   end
-  return form  -- atoms, symbols, NIL evaluate to themselves
+  return form
 end
 local function try_const(form, env)
   if not (is_cons(form) and is_symbol(car(form)) and car(form).name=="cons") then return nil end
@@ -180,6 +181,35 @@ local function try_const(form, env)
     local v = const_build(form)
     local idx = #C.KDATA + 1
     C.KDATA[idx] = v
+    return "KDATA[" .. idx .. "]"
+  end
+  return nil
+end
+
+-- General literal data hoisting for arbitrary cons trees (e.g. embedded source
+-- forms passed to shen.record-kl in 41.1 stlib, giant tables, etc.).
+-- Any tree of cons cells + atoms + unbound symbols is "literal data".
+local function is_lit(form, env)
+  local t = type(form)
+  if t=="number" or t=="string" or t=="boolean" then return true end
+  if form == NIL then return true end
+  if is_symbol(form) then return not env[form.name] end
+  if is_cons(form) then
+    return is_lit(form[1], env) and is_lit(form[2], env)
+  end
+  return false
+end
+local function lit_count(form)
+  if not is_cons(form) then return 1 end
+  return 1 + lit_count(form[1]) + lit_count(form[2])
+end
+local function try_lit_const(form, env)
+  if not is_cons(form) then return nil end
+  if not is_lit(form, env) then return nil end
+  local n = lit_count(form)
+  if n >= 24 then
+    local idx = #C.KDATA + 1
+    C.KDATA[idx] = form   -- the runtime cons tree is the value; safe to share
     return "KDATA[" .. idx .. "]"
   end
   return nil
@@ -204,6 +234,9 @@ function cexpr(form, env)
       return "MKLIST({" .. table.concat(parts, ", ") .. "}, " .. cexpr(tail, env) .. ")"
     end
   end
+  -- General large literal data (catches embedded source trees in stlib etc.)
+  local k = try_lit_const(form, env)
+  if k then return k end
   if is_symbol(head) and not env[head.name] then
     local op = head.name
     if op == "if" or op == "cond" or op == "let" or op == "do"
@@ -281,7 +314,13 @@ function ctail(form, env)
       local forms = to_array(cdr(form))
       local s = {}
       for i=1,#forms-1 do
-        s[#s+1] = "local _ = " .. cexpr(forms[i], env) .. ";"
+        local es = cexpr(forms[i], env)
+        -- Always turn intermediate do values into a statement via IIFE.
+        -- This is guaranteed valid Lua syntax for any expression (var, call, etc.)
+        -- and introduces no new named locals in the enclosing function scope.
+        -- Critical for giant do-chains in 41.1 stlib.initialise-* and
+        -- shen.initialise-lambda-forms.
+        s[#s+1] = "(function() return " .. es .. " end)();"
       end
       s[#s+1] = ctail(forms[#forms], env)
       return table.concat(s, " ")

@@ -4,10 +4,30 @@ local R = require("runtime")
 local C = require("compiler")
 local P = require("prims")
 
-local KLDIR = (os.getenv("SHEN_KL_DIR") or "/home/claude/shen-c/shen/src/kl") .. "/"
-local FILES = {"toplevel","core","sys","dict","sequent","yacc","reader","prolog",
- "track","load","writer","macros","declarations","types","t-star","init",
- "extension-features","extension-factorise-defun"}
+local function find_kldir()
+  local env = os.getenv("SHEN_KL_DIR")
+  if env and env ~= "" then return env end
+  -- Preferred: the 41.1 kernel the user asked for
+  local candidates = {
+    "../cl-source/ShenOSKernel-41.1/klambda",
+    "../ShenOSKernel-41.1/klambda",
+    -- legacy shen-c (22.4) that you may have cloned for comparison
+    "../shen-c/shen/src/kl",
+    "../shen-c/klambda",
+  }
+  for _,c in ipairs(candidates) do
+    local f = io.open(c .. "/toplevel.kl", "r")
+    if f then f:close(); return c end
+  end
+  return "../cl-source/ShenOSKernel-41.1/klambda"  -- will fail with a clear open error later
+end
+local KLDIR = find_kldir() .. "/"
+local FILES = {
+  "toplevel","core","sys","dict","sequent","yacc","reader","prolog",
+  "track","load","writer","macros","declarations","types","t-star","init",
+  "extension-features","extension-expand-dynamic","extension-launcher",
+  "compiler","stlib"
+}
 
 -- ---- standard streams ----------------------------------------------------
 -- *stoutput*/*sterror* write to stdout/stderr; *stinput* reads stdin bytes.
@@ -20,7 +40,18 @@ P.GLOBALS["*sterror*"]  = err_stream
 P.GLOBALS["*stinput*"]  = in_stream
 P.GLOBALS["*home-directory*"] = ""
 
+-- ---- platform metadata (required by 41.1+ kernel) -------------------------
+P.GLOBALS["*language*"]       = "Lua"
+P.GLOBALS["*implementation*"] = "LuaJIT"
+P.GLOBALS["*port*"]           = "shen-lua"
+P.GLOBALS["*porters*"]        = "shen-lua contributors"
+P.GLOBALS["*os*"]             = (package.config and package.config:sub(1,1) == "\\") and "Windows" or "Unix"
+P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes from init.kl ("41.1")
+
 -- ---- load the kernel -----------------------------------------------------
+-- Loads the 21 .kl files that make up Shen 41.1 (core + stlib + extensions).
+-- Set SHEN_KL_DIR or place the klambda/ tree in one of the searched locations
+-- (including a legacy ../shen-c clone for the old 22.4 files if desired).
 local function load_kernel(verbose)
   local all = {}
   for _,nm in ipairs(FILES) do
