@@ -367,9 +367,94 @@ function P.install_native_prolog()
       return x
     end
   end
-  F["shen.pvar?"] = is_pvar;       FA[is_pvar] = 1
-  F["shen.lazyderef"] = lazyderef; FA[lazyderef] = 2
-  F["shen.deref"] = deref;         FA[deref] = 2
+  -- Native unification core (extends the native deref family). These are the
+  -- hottest compiled-KL Prolog primitives; as KL each call pays F-table
+  -- dispatch + per-step `<-address`/`shen.pvar?` (which in KL wraps a
+  -- trap-error!) indirection. The native versions are tight Lua that call each
+  -- other directly (no F-table round-trip) -- this is what shen-c's overwrite.c
+  -- does. Semantics mirror klambda/prolog.kl EXACTLY (binding trail via the
+  -- prolog vector, occurs check, freeze/thaw CPS continuations). None of these
+  -- functions touch shen.*infs*, so the inference count is unchanged.
+  --
+  -- A continuation (KL `freeze`) is thawed after a successful bind; it may be a
+  -- BIND-thunk table (from compiled KL callers) or a plain Lua closure (built
+  -- by native lzy= below), so thaw handles both.
+  local function thaw(c)
+    if getmt(c) == Thunk then return runthunk(c) end
+    if type(c) == "function" then return c() end
+    return APP(c)
+  end
+  -- bindv: prolog-vector[ Var's ticket ] := Val  (KL <-address Var 1 = Var[3])
+  local function bindv(var, val, vec) vec[var[3]+2] = val; return vec end
+  -- unwind: undo a binding on backtrack, returning the (false) result through.
+  local function unwind(var, vec, x) vec[var[3]+2] = shen_null; return x end
+  -- bind!: bind, run the continuation; if it fails (false) undo the binding.
+  local function bind_(var, val, vec, cont)
+    bindv(var, val, vec)
+    local w = thaw(cont)
+    if w == false then return unwind(var, vec, w) end
+    return w
+  end
+  local function occurs(var, x)
+    if equal(var, x) then return true end
+    if is_cons(x) then
+      return occurs(var, x[1]) or occurs(var, x[2])
+    end
+    return false
+  end
+  -- lzy=  : lazy unification (no occurs check). X and Y are already lazyderef'd
+  -- by the caller / by the recursive step. The tail continuation is a Lua
+  -- closure (KL `freeze`) that lazyderefs the tails when thawed.
+  local lzy
+  lzy = function(x, y, v, cont)
+    if equal(x, y) then return thaw(cont) end
+    if is_pvar(x) then return bind_(x, y, v, cont) end
+    if is_pvar(y) then return bind_(y, x, v, cont) end
+    if is_cons(x) and is_cons(y) then
+      local xt, yt = x[2], y[2]
+      return lzy(lazyderef(x[1], v), lazyderef(y[1], v), v,
+                 function() return lzy(lazyderef(xt, v), lazyderef(yt, v), v, cont) end)
+    end
+    return false
+  end
+  -- lzy=! : lazy unification WITH occurs check (mirrors shen.lzy=!).
+  local lzyoc
+  lzyoc = function(x, y, v, cont)
+    if equal(x, y) then return thaw(cont) end
+    if is_pvar(x) and not occurs(x, deref(y, v)) then return bind_(x, y, v, cont) end
+    if is_pvar(y) and not occurs(y, deref(x, v)) then return bind_(y, x, v, cont) end
+    if is_cons(x) and is_cons(y) then
+      local xt, yt = x[2], y[2]
+      return lzyoc(lazyderef(x[1], v), lazyderef(y[1], v), v,
+                   function() return lzyoc(lazyderef(xt, v), lazyderef(yt, v), v, cont) end)
+    end
+    return false
+  end
+  -- newpv: allocate a fresh prolog variable {[2]=shen.pvar, [3]=ticket}, clear
+  -- its binding slot, and bump the vector's ticket counter (KL index 1 = [3]).
+  local function newpv(vec)
+    local n = vec[3]
+    local pv = setmetatable({ [1] = 2, [2] = shen_pvar, [3] = n }, Vmt)
+    vec[n+2] = shen_null
+    vec[3] = n + 1
+    return pv
+  end
+  -- gc: on backtrack (x==false) reclaim the most recent ticket; else pass x.
+  local function gc(vec, x)
+    if x == false then vec[3] = vec[3] - 1 end
+    return x
+  end
+  F["shen.pvar?"] = is_pvar;        FA[is_pvar] = 1
+  F["shen.lazyderef"] = lazyderef;  FA[lazyderef] = 2
+  F["shen.deref"] = deref;          FA[deref] = 2
+  F["shen.bindv"] = bindv;          FA[bindv] = 3
+  F["shen.unwind"] = unwind;        FA[unwind] = 3
+  F["shen.bind!"] = bind_;          FA[bind_] = 4
+  F["shen.occurs-check?"] = occurs; FA[occurs] = 2
+  F["shen.lzy="] = lzy;             FA[lzy] = 4
+  F["shen.lzy=!"] = lzyoc;          FA[lzyoc] = 4
+  F["shen.newpv"] = newpv;          FA[newpv] = 1
+  F["shen.gc"] = gc;                FA[gc] = 2
 end
 
 -- ---- loader / eval -------------------------------------------------------
