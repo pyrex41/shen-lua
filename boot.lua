@@ -7,11 +7,18 @@ local P = require("prims")
 local function find_kldir()
   local env = os.getenv("SHEN_KL_DIR")
   if env and env ~= "" then return env end
-  -- Preferred: the 41.1 kernel the user asked for
+
+  -- 1. Vendored kernel inside this repo (preferred, makes the clone self-contained)
+  if io.open("klambda/toplevel.kl", "r") then
+    return "klambda"
+  end
+
+  -- 2. Common external locations (useful when developing against a full
+  --    ShenOSKernel checkout or the legacy shen-c reference implementation)
   local candidates = {
     "../cl-source/ShenOSKernel-41.1/klambda",
     "../ShenOSKernel-41.1/klambda",
-    -- legacy shen-c (22.4) that you may have cloned for comparison
+    -- legacy shen-c (22.4) clone for comparison / older certification
     "../shen-c/shen/src/kl",
     "../shen-c/klambda",
   }
@@ -19,7 +26,9 @@ local function find_kldir()
     local f = io.open(c .. "/toplevel.kl", "r")
     if f then f:close(); return c end
   end
-  return "../cl-source/ShenOSKernel-41.1/klambda"  -- will fail with a clear open error later
+
+  -- Last resort: assume the vendored location (will produce a clear error)
+  return "klambda"
 end
 local KLDIR = find_kldir() .. "/"
 local FILES = {
@@ -50,8 +59,9 @@ P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes f
 
 -- ---- load the kernel -----------------------------------------------------
 -- Loads the 21 .kl files that make up Shen 41.1 (core + stlib + extensions).
--- Set SHEN_KL_DIR or place the klambda/ tree in one of the searched locations
--- (including a legacy ../shen-c clone for the old 22.4 files if desired).
+-- The 41.1 KLambda sources are vendored under `klambda/` so the repository
+-- is self-contained. You can still override with SHEN_KL_DIR (e.g. to point
+-- at a full ShenOSKernel checkout during development).
 local function load_kernel(verbose)
   local all = {}
   for _,nm in ipairs(FILES) do

@@ -44,9 +44,10 @@ Data representation (chosen so hot paths stay trace-JIT-friendly):
 ## Requirements
 
 * **LuaJIT 2.1** (Lua 5.1 semantics). On Debian/Ubuntu: `apt-get install luajit`.
-* A checkout of the **ShenOSKernel 41.1** `klambda/` directory (the 21 `.kl` files).
-  This repo defaults to looking for them at `../cl-source/ShenOSKernel-41.1/klambda`
-  relative to the shen-lua directory; override with `SHEN_KL_DIR`.
+* Nothing else — the **Shen 41.1 KLambda sources** (`klambda/`) are vendored in this
+  repository for a self-contained clone-and-run experience. You can still point
+  `SHEN_KL_DIR` at an external checkout if you are working against a different
+  ShenOSKernel tree.
 
 No build step is needed — the kernel is compiled from `.kl` to Lua **on boot**. 
 
