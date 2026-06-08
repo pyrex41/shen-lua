@@ -6,7 +6,8 @@
 --   symbols  -> interned tables {name=..} with metatable Symbol (identity ==)
 --   ()       -> the unique value NIL (empty list)
 --   cons     -> {h, t} with metatable Cons
---   vectors  -> table {n=size, [0..n-1]} (KL absvector, 0-indexed raw store)
+--   vectors  -> pure-array table, metatable Vmt: [1]=size, [i+2]=KL elt i
+--              (KL absvector, 0-indexed raw store; no `n` hash key)
 --   functions-> Lua functions (with .arity attached where known)
 --   exception-> {msg=string} with metatable Excn
 
@@ -42,6 +43,17 @@ local function is_cons(x) return getmetatable(x) == Cons end
 M.Cons = Cons
 M.cons = cons
 M.is_cons = is_cons
+
+----------------------------------------------------------------------
+-- Vectors (KL absvector): pure-array table discriminated by Vmt.
+--   [1] = size n ; [i+2] = KL element i (for i in 0..n-1)
+-- A dedicated metatable (a POSITIVE discriminator) keeps cons/symbol/
+-- stream/exception from ever being mistaken for a vector, and avoids the
+-- hash part the old `n` string key forced. Owned here, shared into
+-- prims.lua via R.Vmt so the metatable identity is the SAME object in both.
+----------------------------------------------------------------------
+local Vmt = {}
+M.Vmt = Vmt
 
 ----------------------------------------------------------------------
 -- Exceptions (Shen `exception` objects)
@@ -205,7 +217,7 @@ local function to_str(x, seen)
   elseif getmetatable(x) == Excn then
     return "#<exception: " .. tostring(x.msg) .. ">"
   elseif t == "function" then return "#<function>"
-  elseif t == "table" and x.n ~= nil then return "#<vector " .. tostring(x.n) .. ">"
+  elseif getmetatable(x) == Vmt then return "#<vector " .. tostring(x[1]) .. ">"
   else return tostring(x) end
 end
 M.to_str = to_str

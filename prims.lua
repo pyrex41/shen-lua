@@ -6,6 +6,7 @@ local C = require("compiler")
 local cons, is_cons, NIL = R.cons, R.is_cons, R.NIL
 local Symbol, intern, is_symbol = R.Symbol, R.intern, R.is_symbol
 local Excn, mkexcn = R.Excn, R.mkexcn
+local Vmt = R.Vmt        -- absvector metatable (pure-array layout; shared with runtime.lua)
 
 local P = {}
 
@@ -99,10 +100,11 @@ local function equal(a, b)
     if is_cons(a) and is_cons(b) then
       return equal(a[1], b[1]) and equal(a[2], b[2])
     end
-    -- vectors
-    if a.n ~= nil and b.n ~= nil then
-      if a.n ~= b.n then return false end
-      for i=0,a.n-1 do if not equal(a[i], b[i]) then return false end end
+    -- vectors (pure-array layout: [1]=size, [i+2]=KL elt i)
+    if getmetatable(a) == Vmt and getmetatable(b) == Vmt then
+      local n = a[1]
+      if n ~= b[1] then return false end
+      for i=0,n-1 do if not equal(a[i+2], b[i+2]) then return false end end
       return true
     end
   end
@@ -222,13 +224,13 @@ end)
 local FAILOBJ = intern("shen.fail!")
 P.FAILOBJ = FAILOBJ
 defprim("absvector", 1, function(n)
-  local v = { n = n }
-  for i=0,n-1 do v[i] = FAILOBJ end
-  return v
+  local v = { [1] = n }
+  for i=0,n-1 do v[i+2] = FAILOBJ end
+  return setmetatable(v, Vmt)
 end)
-defprim("absvector?", 1, function(x) return type(x)=="table" and x.n~=nil and getmetatable(x)==nil end)
-defprim("<-address", 2, function(v, i) return v[i] end)
-defprim("address->", 3, function(v, i, x) v[i]=x; return v end)
+defprim("absvector?", 1, function(x) return getmetatable(x)==Vmt end)
+defprim("<-address", 2, function(v, i) return v[i+2] end)
+defprim("address->", 3, function(v, i, x) v[i+2]=x; return v end)
 
 -- freeze/thaw : thunks are 0-arity functions (kernel: (defun thaw (V) (V)))
 -- Hot path in the Prolog/typechecker CPS: a thawed value is always a 0-arity
@@ -258,7 +260,7 @@ end)
 
 -- ---- streams -------------------------------------------------------------
 -- Stream objects carry a metatable so they are never confused with vectors
--- (absvector? requires getmetatable(x)==nil) or cons cells.
+-- (absvector? requires getmetatable(x)==Vmt) or cons cells.
 local Stream = {}
 P.Stream = Stream
 local function is_stream(x) return type(x)=="table" and getmetatable(x)==Stream end
@@ -331,18 +333,20 @@ defprim("exit", 1, function(n) io.stdout:flush(); os.exit(type(n)=="number" and 
 -- -- returning the original cons subtree unchanged when nothing dereffed -- which
 -- the native C/Rust ports do NOT do, eliminating most of deref's cons allocation.
 -- Installed after the kernel loads (overriding the compiled KL defuns in F).
--- A prolog variable is an absvector {[0]=shen.pvar, [1]=ticket}; the binding for
--- ticket t lives at prolog-vector slot v[t], with shen.-null- meaning unbound.
+-- A prolog variable is an absvector (pure-array layout, metatable Vmt): KL
+-- index 0 (the `shen.pvar` tag) lives at slot [2], KL index 1 (the ticket) at
+-- slot [3]. The binding for ticket t lives at prolog-vector KL-index t, i.e.
+-- slot v[t+2], with shen.-null- meaning unbound.
 function P.install_native_prolog()
   local shen_pvar = intern("shen.pvar")
   local shen_null = intern("shen.-null-")
   local getmt = getmetatable
   local function is_pvar(x)
-    return type(x) == "table" and x.n ~= nil and getmt(x) == nil and x[0] == shen_pvar
+    return getmt(x) == Vmt and x[2] == shen_pvar
   end
   local function lazyderef(x, v)
-    while type(x) == "table" and x.n ~= nil and getmt(x) == nil and x[0] == shen_pvar do
-      local w = v[x[1]]
+    while getmt(x) == Vmt and x[2] == shen_pvar do
+      local w = v[x[3]+2]
       if w == shen_null then return x end
       x = w
     end
@@ -355,8 +359,8 @@ function P.install_native_prolog()
       local t = deref(t0, v)
       if h == h0 and t == t0 then return x end   -- structure sharing: nothing changed
       return cons(h, t)
-    elseif type(x) == "table" and x.n ~= nil and getmt(x) == nil and x[0] == shen_pvar then
-      local w = v[x[1]]
+    elseif getmt(x) == Vmt and x[2] == shen_pvar then
+      local w = v[x[3]+2]
       if w == shen_null then return x end
       return deref(w, v)
     else
