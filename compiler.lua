@@ -38,6 +38,70 @@ end
 local gsn = 0
 local function gen(prefix) gsn = gsn + 1; return (prefix or "t") .. gsn end
 
+-- ------------------------------------------------------------------
+-- Compilation context (module-global; we never compile in parallel).
+--
+-- For a single `defun` body, we hoist every `(freeze ...)` closure to a flat
+-- list at the top of the impl function. Reason: KLambda emitted by the Shen
+-- Prolog compiler (e.g. einsteins-riddle, t-star) chains 60+ continuation
+-- closures inside argument positions; naive codegen would nest 60+ Lua
+-- `function() ... end` bodies, which LuaJIT's parser rejects with "chunk has
+-- too many syntax levels".
+--
+-- The trick:
+--   * Each freeze body is compiled with its free variables abstracted as
+--     parameters: `kbody[N] = function(cap1, cap2, ...) return BODY end`.
+--     These bodies are emitted as a flat sequence inside the impl function.
+--   * At each freeze occurrence, we emit `BIND(kbody[N], cap1, cap2, ...)` --
+--     a plain call, no nested `function` literal at the use site. BIND is a
+--     runtime helper that snapshots the captures and returns a 0-arity thunk.
+--
+-- This decouples freeze definitions from the surrounding `let` block scope,
+-- so we don't need per-defun forward declarations of every let-var (which
+-- would blow Lua's per-function 200-local limit on the larger t-star defun).
+-- ------------------------------------------------------------------
+local CTX  -- nil outside a defun compile; otherwise a fresh table per defun.
+local function new_ctx()
+  return { kbodies = {} }   -- list of compiled body strings (one per freeze)
+end
+
+-- Collect the free variables of a form: KL names that appear as symbols in
+-- the form, are bound in the outer `env`, and are NOT shadowed by inner
+-- `let` / `lambda` bindings of the same name.
+local function collect_free(form, env, bound, acc)
+  if not is_cons(form) then
+    if is_symbol(form) and env[form.name] and not bound[form.name] then
+      acc[form.name] = true
+    end
+    return
+  end
+  local head = form[1]
+  if is_symbol(head) and not env[head.name] then
+    local op = head.name
+    if op == "let" then
+      local var = car(cdr(form)).name
+      local val = car(cdr(cdr(form)))
+      local body = car(cdr(cdr(cdr(form))))
+      collect_free(val, env, bound, acc)
+      local nb = {}; for k in pairs(bound) do nb[k] = true end; nb[var] = true
+      collect_free(body, env, nb, acc)
+      return
+    elseif op == "lambda" then
+      local var = car(cdr(form)).name
+      local body = car(cdr(cdr(form)))
+      local nb = {}; for k in pairs(bound) do nb[k] = true end; nb[var] = true
+      collect_free(body, env, nb, acc)
+      return
+    end
+  end
+  local cur = form
+  while is_cons(cur) do
+    collect_free(cur[1], env, bound, acc)
+    cur = cur[2]
+  end
+end
+
+
 -- environment: maps KL var name -> Lua local name. Implemented as a linked
 -- table of scopes for cheap shadowing.
 local function extend(env, kname, lname)
@@ -86,6 +150,169 @@ local function ftab_ref(name)
   return 'F[' .. qstr(name) .. ']'
 end
 
+-- Let-floating: rewrite (F a1...aN (let X V B)) -> (let X V (F a1...aN B)).
+-- This collapses right-recursive let chains in continuation-passing code
+-- (e.g. the Prolog backend generates many (let X (newpv A) (shen.gc A NEXT))
+-- forms inside einsteins-riddle), which would otherwise compile to deeply
+-- nested IIFEs that exceed Lua's chunk syntax-level limit.
+--
+-- This is sound when the let's value form V has no side effect that depends
+-- on evaluating a1...aN first. We restrict to the LAST argument and require
+-- preceding args to be atoms/unbound symbols (pure variable / literal refs)
+-- so the visible evaluation order is preserved.
+local function arg_pure(form, env)
+  if not is_cons(form) then return true end
+  return false
+end
+-- Recognised special forms that must NOT be treated as ordinary calls when
+-- recursing for deep let-floating.
+local SPECIAL_HEADS = {
+  ["if"]=true, ["cond"]=true, ["let"]=true, ["do"]=true,
+  ["trap-error"]=true, ["and"]=true, ["or"]=true,
+  ["lambda"]=true, ["freeze"]=true, ["defun"]=true, ["type"]=true,
+}
+local function try_let_float(form, env)
+  -- Never treat a binder / control form as if it were an ordinary call.
+  -- In particular (lambda V BODY) and (freeze BODY) must NOT have their body
+  -- floated out, because that would move the body's enclosed lets to an outer
+  -- scope where the binder's variable (V) is no longer in scope when the body
+  -- references it. (Concrete bug: defprolog `mapit` source has
+  -- `(lambda Z112 (lambda Z113 (let W114 ... (let W115 (lambda ... Z113 ...) ...))))`
+  -- where the inner lambda body's freeze references Z113. Floating the let
+  -- out of `(lambda Z113 ...)` strands that Z113 reference outside its binder
+  -- and the compiler emits `S("Z113")` (a self-evaluating symbol) instead of
+  -- the captured Lua local -- causing mapit to silently produce false.)
+  local head = car(form)
+  if is_symbol(head) and not env[head.name] and SPECIAL_HEADS[head.name] then
+    return nil
+  end
+  local args_node = cdr(form)
+  if args_node == NIL then return nil end
+  -- find the last cons cell of the arg list
+  local prev_chain = {}
+  local cur = args_node
+  while cdr(cur) ~= NIL do
+    prev_chain[#prev_chain+1] = car(cur)
+    cur = cdr(cur)
+  end
+  local last = car(cur)
+  -- preceding args must be pure (atoms / unbound symbols) so floating preserves
+  -- the visible evaluation order.
+  for i=1,#prev_chain do
+    if not arg_pure(prev_chain[i], env) then return nil end
+  end
+  local x, val, new_last
+  if is_cons(last) and is_symbol(car(last)) and car(last).name == "let"
+     and not env["let"] then
+    x   = car(cdr(last))
+    val = car(cdr(cdr(last)))
+    new_last = car(cdr(cdr(cdr(last))))
+  elseif is_cons(last) and is_symbol(car(last))
+         and not env[car(last).name]
+         and not SPECIAL_HEADS[car(last).name] then
+    -- Recurse: try to float a let out of the last arg's own last-arg chain.
+    -- This collapses (F1 _ (F2 _ (let X V B))) into (let X V (F1 _ (F2 _ B))).
+    local inner = try_let_float(last, env)
+    if not (inner and is_cons(inner) and is_symbol(car(inner))
+            and car(inner).name == "let") then
+      return nil
+    end
+    x   = car(cdr(inner))
+    val = car(cdr(cdr(inner)))
+    new_last = car(cdr(cdr(cdr(inner))))
+  else
+    return nil
+  end
+  -- rebuild (F prev... new_last)
+  local new_args = cons(new_last, NIL)
+  for i=#prev_chain,1,-1 do new_args = cons(prev_chain[i], new_args) end
+  local new_call = cons(car(form), new_args)
+  return cons(R.intern("let"), cons(x, cons(val, cons(new_call, NIL))))
+end
+
+-- Flatten a deep right-spine call chain (F1 ... (F2 ... (F3 ... INNER)))
+-- into a sequence of local assignments. Without this, the chained
+-- shen.gc(A, shen.gc(A, shen.gc(A, ...))) calls produced by the Shen Prolog
+-- compiler hit Lua's expression-complexity limit (~200 nested calls).
+-- Only valid in statement (tail) position because we emit `local` bindings.
+local function try_flatten_call_chain(form, env)
+  -- Walk into the last-arg chain, building a list of call frames.
+  local frames = {}   -- each: { head_form, prev_args_array }
+  local cur = form
+  while is_cons(cur) and is_symbol(car(cur)) and not env[car(cur).name]
+        and not SPECIAL_HEADS[car(cur).name] do
+    local args_node = cdr(cur)
+    if args_node == NIL then break end
+    local prev = {}
+    local c = args_node
+    while cdr(c) ~= NIL do prev[#prev+1] = car(c); c = cdr(c) end
+    frames[#frames+1] = { car(cur), prev }
+    cur = car(c)
+  end
+  if #frames < 16 then return nil end   -- not deep enough to flatten
+  -- innermost value first
+  local stmts = {}
+  -- If the innermost form is a (do A1 A2 ... AN), emit A1..A_{N-1} as
+  -- statement-level side-effects (via tiny IIFEs that capture nothing
+  -- expensive) and use AN as the value expression. This avoids wrapping the
+  -- whole innermost in a single IIFE that would capture every flattened
+  -- local as an upvalue (Lua caps at 60 upvalues per function).
+  local val_form = cur
+  if is_cons(cur) and is_symbol(cur[1]) and not env["do"]
+     and cur[1].name == "do" then
+    local do_args = to_array(cdr(cur))
+    for i=1,#do_args-1 do
+      stmts[#stmts+1] = "(function() return " .. cexpr(do_args[i], env) .. " end)();"
+    end
+    val_form = do_args[#do_args]
+  end
+  local inner_name = gen("c")
+  stmts[#stmts+1] = "local " .. inner_name .. " = " .. cexpr(val_form, env) .. ";"
+  -- build each call up to but not including the outermost
+  for i=#frames, 2, -1 do
+    local frame = frames[i]
+    local hname = frame[1].name
+    local prev_strs = {}
+    for j=1,#frame[2] do prev_strs[j] = cexpr(frame[2][j], env) end
+    local arg_list
+    if #prev_strs == 0 then arg_list = inner_name
+    else arg_list = table.concat(prev_strs, ", ") .. ", " .. inner_name end
+    local next_name = gen("c")
+    -- use ccall semantics via a single-shot synthetic form
+    local synth = cons(frame[1], NIL)
+    -- prepend prev args + inner placeholder. Build a synthetic AST node so
+    -- we can reuse ccall for arity-correct dispatch.
+    -- We don't actually need the AST; emit a direct F[...] call using ARITY.
+    local ar = C.ARITY[hname]
+    local call_str
+    if ar and #prev_strs + 1 == ar then
+      call_str = ftab_ref(hname) .. "(" .. arg_list .. ")"
+    else
+      -- fall back to APP for unknown / mismatched arity
+      call_str = "APP(" .. symlit(hname) .. ", " .. arg_list .. ")"
+    end
+    stmts[#stmts+1] = "local " .. next_name .. " = " .. call_str .. ";"
+    inner_name = next_name
+  end
+  -- outermost: emit as return statement
+  local frame = frames[1]
+  local hname = frame[1].name
+  local prev_strs = {}
+  for j=1,#frame[2] do prev_strs[j] = cexpr(frame[2][j], env) end
+  local arg_list
+  if #prev_strs == 0 then arg_list = inner_name
+  else arg_list = table.concat(prev_strs, ", ") .. ", " .. inner_name end
+  local ar = C.ARITY[hname]
+  local call_str
+  if ar and #prev_strs + 1 == ar then
+    call_str = ftab_ref(hname) .. "(" .. arg_list .. ")"
+  else
+    call_str = "APP(" .. symlit(hname) .. ", " .. arg_list .. ")"
+  end
+  stmts[#stmts+1] = "return " .. call_str
+  return table.concat(stmts, " ")
+end
+
 -- compile a call (F a1..an) in expression position
 local function ccall(form, env)
   local head = car(form)
@@ -100,18 +327,21 @@ local function ccall(form, env)
     if ar ~= nil then
       if #args == ar then
         return ftab_ref(name) .. "(" .. argstr .. ")"
-      elseif #args < ar then
-        -- partial application
-        local pack = (#args == 0) and "{}" or ("{" .. argstr .. "}")
-        return "PARTIAL(" .. ftab_ref(name) .. ", " .. ar .. ", " .. pack .. ")"
       else
-        -- over-application: apply arity, then APP the rest
-        local first = {}
-        for i=1,ar do first[i]=cargs[i] end
-        local rest = {}
-        for i=ar+1,#args do rest[#rest+1]=cargs[i] end
-        return "APP(" .. ftab_ref(name) .. "(" .. table.concat(first,", ") .. "), "
-                       .. table.concat(rest, ", ") .. ")"
+        -- Arity mismatch at compile time: route through APP so dispatch uses
+        -- the *current* runtime arity (FA[F[name]]) rather than the value of
+        -- C.ARITY[name] captured at compile time. This matters whenever a
+        -- function's arity changes between when a call site is compiled and
+        -- when it executes -- e.g. when a later (define ...) redefines a
+        -- function with a new arity (binary.shen redefines `complement` after
+        -- tableauprolog.shen used it as a 6-arg Prolog predicate), or when
+        -- Shen's `shen.update-lambdatable` evaluates a curry wrapper for the
+        -- new arity *before* the new defun has been installed (depth.shen
+        -- redefining `depth` from 3 to 4 args). Baking the stale arity into
+        -- PARTIAL / over-app expressions would silently produce wrong-arity
+        -- residual closures.
+        if #args == 0 then return "APP(" .. symlit(name) .. ")" end
+        return "APP(" .. symlit(name) .. ", " .. argstr .. ")"
       end
     else
       -- unknown arity: generic apply through function table / symbol
@@ -186,22 +416,46 @@ local function try_const(form, env)
   return nil
 end
 
--- General literal data hoisting for arbitrary cons trees (e.g. embedded source
--- forms passed to shen.record-kl in 41.1 stlib, giant tables, etc.).
--- Any tree of cons cells + atoms + unbound symbols is "literal data".
+-- General literal data hoisting for (cons ...) trees used as arguments
+-- (e.g. embedded source forms passed to shen.record-kl in 41.1 stlib, giant
+-- arity tables, etc.). A form is "literal data" only if it self-evaluates:
+-- atoms / unbound symbols / NIL, or a `(cons L R)` call whose subtrees are
+-- literal data. Crucially this MUST NOT match other calls like `(set ...)`,
+-- `(shen.record-kl ...)`, or `(lambda ...)` — those have side effects /
+-- semantics and cannot be replaced by their AST as a constant.
 local function is_lit(form, env)
   local t = type(form)
   if t=="number" or t=="string" or t=="boolean" then return true end
   if form == NIL then return true end
   if is_symbol(form) then return not env[form.name] end
   if is_cons(form) then
-    return is_lit(form[1], env) and is_lit(form[2], env)
+    -- Only a (cons L R) call counts as data construction.
+    -- The cons cell representing this call has shape:
+    --   cons(cons-sym, cons(L, cons(R, NIL)))
+    local head = form[1]
+    if not (is_symbol(head) and head.name == "cons" and not env["cons"]) then
+      return false
+    end
+    local rest = form[2]
+    if not is_cons(rest) then return false end
+    local rest2 = rest[2]
+    if not is_cons(rest2) then return false end
+    if rest2[2] ~= NIL then return false end
+    return is_lit(rest[1], env) and is_lit(rest2[1], env)
   end
   return false
 end
 local function lit_count(form)
   if not is_cons(form) then return 1 end
-  return 1 + lit_count(form[1]) + lit_count(form[2])
+  -- count cons-call nodes via the L and R arguments only
+  local rest = form[2]
+  return 1 + lit_count(rest[1]) + lit_count(rest[2][1])
+end
+-- Build the runtime cons tree value from a (cons L R) form recursively.
+local function lit_build(form)
+  if not is_cons(form) then return form end
+  local rest = form[2]
+  return cons(lit_build(rest[1]), lit_build(rest[2][1]))
 end
 local function try_lit_const(form, env)
   if not is_cons(form) then return nil end
@@ -209,10 +463,63 @@ local function try_lit_const(form, env)
   local n = lit_count(form)
   if n >= 24 then
     local idx = #C.KDATA + 1
-    C.KDATA[idx] = form   -- the runtime cons tree is the value; safe to share
+    C.KDATA[idx] = lit_build(form)
     return "KDATA[" .. idx .. "]"
   end
   return nil
+end
+
+-- ------------------------------------------------------------------
+-- Deep cons-tree compilation.
+--
+-- A KLambda expression like `(cons A (cons B (cons (cons ...) ...)))` compiles
+-- naively into deeply-nested `F["cons"](_, F["cons"](_, F["cons"](_, _)))`
+-- expressions. Lua's parser refuses to compile expressions nested past about
+-- 200 levels, so the 41.1 stlib's giant `shen.record-kl <name> <source-tree>`
+-- calls (some have tree depth ~216 and ~7000 cons cells) blow up at load.
+--
+-- The fix: emit deep cons-trees through a flat blueprint array consumed by
+-- the runtime helper `MKTREE`. The blueprint contains:
+--   * `'v', <leaf-value-expr>` for each leaf (atom, unbound symbol,
+--     literal cons subtree hoisted via KDATA, or non-cons-call subexpr like
+--     `(protect Var)`), and
+--   * `'c'` to pop the top two stack entries and replace them with a cons cell.
+-- The whole expression becomes a single shallow call to MKTREE.
+-- ------------------------------------------------------------------
+local function count_cons_nodes(form)
+  if not is_cons(form) then return 0 end
+  if not (is_symbol(form[1]) and form[1].name == "cons") then return 0 end
+  local rest = form[2]
+  if not (is_cons(rest) and is_cons(rest[2]) and rest[2][2] == NIL) then return 0 end
+  return 1 + count_cons_nodes(rest[1]) + count_cons_nodes(rest[2][1])
+end
+
+local function compile_cons_tree(form, env)
+  local ops = {}
+  local function visit(f)
+    if is_cons(f) then
+      -- prefer hoisting fully-literal subtrees as KDATA (one stack push)
+      local hoisted = try_lit_const(f, env)
+      if hoisted then
+        ops[#ops+1] = "'v', " .. hoisted
+        return
+      end
+      -- (cons L R) call: recurse into both halves, then emit 'c'
+      if is_symbol(f[1]) and f[1].name == "cons" and not env["cons"] then
+        local rest = f[2]
+        if is_cons(rest) and is_cons(rest[2]) and rest[2][2] == NIL then
+          visit(rest[1])
+          visit(rest[2][1])
+          ops[#ops+1] = "'c'"
+          return
+        end
+      end
+    end
+    -- arbitrary leaf expression (constant, symbol, or non-cons call like `(protect V)`)
+    ops[#ops+1] = "'v', " .. cexpr(f, env)
+  end
+  visit(form)
+  return "MKTREE({" .. table.concat(ops, ", ") .. "})"
 end
 
 -- ------------------------------------------------------------------
@@ -227,6 +534,13 @@ function cexpr(form, env)
   if is_symbol(head) and head.name == "cons" and not env["cons"] then
     local k = try_const(form, env)
     if k then return k end
+    -- If this is a deep cons-tree (would blow Lua's expression-nesting limit
+    -- when compiled as nested F["cons"] calls), emit via the flat MKTREE
+    -- blueprint instead. 60 nodes is well below the parser limit and gives
+    -- the inline path a chance for moderately-sized forms.
+    if count_cons_nodes(form) >= 60 then
+      return compile_cons_tree(form, env)
+    end
     local elems, tail = cons_chain(form)
     if #elems >= 16 then
       local parts = {}
@@ -243,7 +557,12 @@ function cexpr(form, env)
        or op == "trap-error" or op == "and" or op == "or" then
       -- control form in value position: wrap tail compilation in an IIFE
       return "(function() " .. ctail(form, env) .. " end)()"
-    elseif op == "lambda" then
+    end
+    -- For ordinary calls, opportunistically let-float a trailing let argument
+    -- so that nested continuation-passing chains compile flat.
+    local floated = try_let_float(form, env)
+    if floated then return cexpr(floated, env) end
+    if op == "lambda" then
       local v = car(cdr(form))
       local body = car(cdr(cdr(form)))
       local ln = gen("v")
@@ -251,6 +570,20 @@ function cexpr(form, env)
       return "MKFUN(1, function(" .. ln .. ") return " .. cexpr(body, e2) .. " end)"
     elseif op == "freeze" then
       local body = car(cdr(form))
+      if CTX then
+        -- abstract free variables as parameters, hoist body to KB[N]
+        local fv = {}
+        collect_free(body, env, {}, fv)
+        local lnames = {}
+        for kname in pairs(fv) do lnames[#lnames+1] = env[kname] end
+        table.sort(lnames)  -- stable order for caller / body
+        local body_str = cexpr(body, env)
+        local idx = #CTX.kbodies + 1
+        CTX.kbodies[idx] = "function(" .. table.concat(lnames, ", ") .. ") return "
+                           .. body_str .. " end"
+        local call_args = (#lnames == 0) and "" or (", " .. table.concat(lnames, ", "))
+        return "BIND(KB[" .. idx .. "]" .. call_args .. ")"
+      end
       return "MKFUN(0, function() return " .. cexpr(body, env) .. " end)"
     elseif op == "defun" then
       error("defun in expression position")
@@ -342,9 +675,17 @@ function ctail(form, env)
     elseif op == "lambda" or op == "freeze" then
       return "return " .. cexpr(form, env)
     else
+      local floated = try_let_float(form, env)
+      if floated then return ctail(floated, env) end
+      local flat = try_flatten_call_chain(form, env)
+      if flat then return flat end
       return "return " .. ccall(form, env)
     end
   else
+    local floated = try_let_float(form, env)
+    if floated then return ctail(floated, env) end
+    local flat = try_flatten_call_chain(form, env)
+    if flat then return flat end
     return "return " .. ccall(form, env)
   end
 end
@@ -365,8 +706,31 @@ local function cdefun(form)
     lnames[i] = ln
   end
   C.ARITY[name] = #params
+  local saved = CTX
+  CTX = new_ctx()
+  local body_src = ctail(body, env)
+  -- Emit any hoisted (freeze ...) bodies into a per-defun KB table. Each
+  -- BIND(KB[i], cap...) call site stays flat, so deep CPS chains compile
+  -- without exceeding Lua's chunk syntax-level limit.
+  --
+  -- We MUST forward-declare `local KB` and assign on a separate line: when
+  -- the body of KB[i] is parsed, it needs `KB` to already be in scope so the
+  -- reference is captured as an upvalue. Writing `local KB = { ... KB[j] ... }`
+  -- would parse the inner KB as a global (the local isn't visible until after
+  -- its initializer is evaluated).
+  local kb_init = ""
+  if #CTX.kbodies > 0 then
+    local parts = { "local KB; KB = {" }
+    for i, b in ipairs(CTX.kbodies) do
+      parts[#parts+1] = "[" .. i .. "] = " .. b .. (i == #CTX.kbodies and "" or ",")
+    end
+    parts[#parts+1] = "};"
+    kb_init = table.concat(parts, " ") .. " "
+  end
+  CTX = saved
   local src = "do local function impl(" .. table.concat(lnames, ", ") .. ") "
-            .. ctail(body, env) .. " end "
+            .. kb_init
+            .. body_src .. " end "
             .. "F[" .. qstr(name) .. "] = impl; FA[impl] = " .. #params .. " end"
   return src
 end

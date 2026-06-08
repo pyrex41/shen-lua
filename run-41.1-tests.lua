@@ -49,13 +49,13 @@ do
   end
 end
 
--- Try to make y-or-n? non-interactive (harness uses it to ask on failure).
-local yn_ok, yn_err = pcall(function()
-  P.run_kl_string([[(define y-or-n? _ -> true)]])
-end)
-if not yn_ok then
-  print("Note: could not redefine y-or-n? (continuing anyway)")
-end
+-- Make y-or-n? non-interactive (harness asks "failed; continue?" on each
+-- failure; we want it to always say yes so the test run keeps going and we
+-- collect a real pass/fail count for the whole suite).
+P.F["y-or-n?"] = function(_msg) return true end
+P.FA[P.F["y-or-n?"]] = 1
+-- Some tests look up `y-or-n?` via `(fn ...)` (Shen Prolog) and end up calling
+-- the symbol — leave the underlying KL function as-is so direct calls work.
 
 print("\n=== Running test suite step by step ===\n")
 
@@ -90,10 +90,18 @@ end)
 print("\n=== Test run finished ===")
 print("kerneltests result:", ok2 and "ok" or e2)
 
--- Final counters from the harness (they are set in the root as *passed* / *failed*)
-local function getg(name)
-  return P.GLOBALS[name] or "?"
+-- Final counters from the harness. The harness defines *passed* / *failed*
+-- inside its `(package test-harness ...)` block, so the bare symbol names get
+-- prefixed to `test-harness.*passed*` / `test-harness.*failed*`.
+local function getg(...)
+  for _, name in ipairs({...}) do
+    local v = P.GLOBALS[name]
+    if v ~= nil then return v end
+  end
+  return "?"
 end
-print(string.format("Counters: passed=%s failed=%s", getg("*passed*"), getg("*failed*")))
+print(string.format("Counters: passed=%s failed=%s",
+  getg("test-harness.*passed*", "*passed*"),
+  getg("test-harness.*failed*", "*failed*")))
 
 print("\nDone.")
