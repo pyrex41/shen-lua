@@ -155,14 +155,22 @@ defprim("cn", 2, function(a,b)
 end)
 defprim("pos", 2, function(s,n)
   if type(s)~="string" then ERR("pos: not a string") end
+  if n < 0 or n >= #s then ERR("pos: index out of range") end
   return string.sub(s, n+1, n+1)
 end)
 defprim("tlstr", 1, function(s)
   if type(s)~="string" then ERR("tlstr: not a string") end
+  if #s == 0 then ERR("tlstr: empty string") end
   return string.sub(s, 2)
 end)
-defprim("string->n", 1, function(s) return string.byte(s,1) end)
-defprim("n->string", 1, function(n) return string.char(n) end)
+defprim("string->n", 1, function(s)
+  if type(s) ~= "string" or #s == 0 then ERR("string->n: empty or non-string") end
+  return string.byte(s,1)
+end)
+defprim("n->string", 1, function(n)
+  if type(n) ~= "number" then ERR("n->string: not a number") end
+  return string.char(n)
+end)
 defprim("string->symbol", 1, function(s) return intern(s) end)
 
 -- empty?
@@ -233,6 +241,14 @@ local function mk_in_stream(readfn, closefn, name)
 end
 P.mk_out_stream, P.mk_in_stream = mk_out_stream, mk_in_stream
 
+-- shen.char-stoutput? : port-specific predicate referenced by `pr` to choose
+-- between a fast (write-string) and a fallback (write-chars) path. Our streams
+-- are byte streams, so we return false and the `write-chars` path is used.
+defprim("shen.char-stoutput?", 1, function(_st) return false end)
+-- shen.char-stinput? : input-side counterpart used by `read-byte` callers.
+-- Our streams are byte streams.
+defprim("shen.char-stinput?", 1, function(_st) return false end)
+
 -- write-byte (N STREAM) -> N : write a single byte to an output stream
 defprim("write-byte", 2, function(n, st)
   if not is_stream(st) or st.kind~="out" then ERR("write-byte: not an output stream") end
@@ -288,6 +304,55 @@ local ENV = {
     for i=#arr,1,-1 do acc = cons(arr[i], acc) end
     return acc
   end,
+  -- BIND wraps a per-defun continuation function `fn` together with a snapshot
+  -- of its captures into a 0-arity thunk. The compiler hoists deep
+  -- (freeze ...) bodies out to a KB table (see CTX in compiler.lua) and emits
+  -- BIND(KB[i], cap1, ..., capN) at every use site, so the use site itself
+  -- contains no Lua function literal -- avoiding chunk syntax-level overflow
+  -- on Prolog CPS chains (einsteins-riddle, t-star).
+  BIND = function(fn, ...)
+    local n = select("#", ...)
+    if n == 0 then FA[fn] = 0; return fn end
+    if n == 1 then
+      local a1 = ...
+      local th = function() return fn(a1) end
+      FA[th] = 0; return th
+    elseif n == 2 then
+      local a1, a2 = ...
+      local th = function() return fn(a1, a2) end
+      FA[th] = 0; return th
+    elseif n == 3 then
+      local a1, a2, a3 = ...
+      local th = function() return fn(a1, a2, a3) end
+      FA[th] = 0; return th
+    else
+      local args = {...}
+      local th = function() return fn(unpack(args, 1, n)) end
+      FA[th] = 0; return th
+    end
+  end,
+  -- MKTREE consumes a flat blueprint produced by the compiler for deep
+  -- cons-trees. See compile_cons_tree in compiler.lua. ops is a sequence of
+  -- 'v' followed by a leaf value (push), or 'c' (pop two, push cons).
+  MKTREE = function(ops)
+    local stack, sp = {}, 0
+    local i, n = 1, #ops
+    while i <= n do
+      local tag = ops[i]
+      if tag == "v" then
+        sp = sp + 1
+        stack[sp] = ops[i+1]
+        i = i + 2
+      else
+        local r = stack[sp]
+        local l = stack[sp-1]
+        sp = sp - 1
+        stack[sp] = cons(l, r)
+        i = i + 1
+      end
+    end
+    return stack[1]
+  end,
   -- allow compiled code to reach a few Lua builtins safely
   pcall = pcall, select = select, error = error,
   setmetatable = setmetatable, getmetatable = getmetatable,
@@ -315,6 +380,23 @@ P.compile_and_load = compile_and_load
 -- eval a single KL form (compile and run)
 function P.eval(form)
   local C = require("compiler")
+  -- Atoms and non-AST values self-evaluate. This includes numbers, strings,
+  -- booleans, symbols, NIL, but also absvectors and streams that the macro
+  -- expander may hand to (eval-kl) when walking property-vector entries.
+  local t = type(form)
+  if t == "number" or t == "string" or t == "boolean" then return form end
+  if form == NIL then return form end
+  if is_symbol(form) then
+    -- Bare symbols evaluate to their value in the global var namespace if
+    -- bound, otherwise to themselves (KL convention).
+    local v = GLOBALS[form.name]
+    if v ~= nil then return v end
+    return form
+  end
+  if t == "table" and not is_cons(form) then
+    -- absvector, stream, exception, or other opaque object: self-evaluating.
+    return form
+  end
   if is_cons(form) and is_symbol(form[1]) and form[1].name == "defun" then
     compile_and_load(C.compile_top(form), "defun")
     return form[2][1]   -- the function NAME symbol (car of cdr), as shen-c returns
