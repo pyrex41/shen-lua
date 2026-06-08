@@ -62,7 +62,14 @@ local function gen(prefix) gsn = gsn + 1; return (prefix or "t") .. gsn end
 -- ------------------------------------------------------------------
 local CTX  -- nil outside a defun compile; otherwise a fresh table per defun.
 local function new_ctx()
-  return { kbodies = {} }   -- list of compiled body strings (one per freeze)
+  -- cbodies: hoisted bodies (both `freeze` bodies and value-position control
+  --          forms), emitted into a single `KC` table at *chunk* scope (built
+  --          once at load). Each is a constant function abstracting its free
+  --          vars as params, so it never captures an impl-local as an upvalue
+  --          (which would force a per-call FNEW). freeze use sites wrap KC[i]
+  --          with BIND (snapshotting captures into a thunk); control forms just
+  --          call KC[i] directly.
+  return { cbodies = {} }
 end
 
 -- Collect the free variables of a form: KL names that appear as symbols in
@@ -555,7 +562,35 @@ function cexpr(form, env)
     local op = head.name
     if op == "if" or op == "cond" or op == "let" or op == "do"
        or op == "trap-error" or op == "and" or op == "or" then
-      -- control form in value position: wrap tail compilation in an IIFE
+      -- Control form in value position. The obvious codegen wraps the tail
+      -- compilation in an IIFE `(function() ... end)()`, but that closure
+      -- captures every in-scope local it references (6-9 upvalues in the
+      -- typechecker) and is re-allocated on EVERY evaluation -- measured at
+      -- ~1490 bytes/inference, 64% of all typechecker allocation.
+      --
+      -- Instead, hoist the body to a *constant* function that takes its free
+      -- variables as parameters (same KB-table mechanism as `freeze`), and
+      -- call it. A nested function with no upvalues is created once at chunk
+      -- load, not per evaluation, so this allocates nothing per call. Compile
+      -- the body FIRST so any nested freezes/control-forms claim lower KB
+      -- indices before we take ours.
+      if CTX then
+        local fv = {}
+        collect_free(form, env, {}, fv)
+        local lnames = {}
+        for kname in pairs(fv) do lnames[#lnames+1] = env[kname] end
+        table.sort(lnames)
+        local params = table.concat(lnames, ", ")
+        -- Compile the body FIRST so nested freezes/control-forms claim their KC
+        -- indices before we take ours. The body references only its param free
+        -- vars, globals, and KC (a load-time upvalue) -- never an impl local --
+        -- so this stays a constant function with no per-call FNEW.
+        local body_stmts = ctail(form, env)
+        local idx = #CTX.cbodies + 1
+        CTX.cbodies[idx] = "function(" .. params .. ") " .. body_stmts .. " end"
+        return "KC[" .. idx .. "](" .. params .. ")"
+      end
+      -- No per-defun context (top-level eval chunk): fall back to the IIFE.
       return "(function() " .. ctail(form, env) .. " end)()"
     end
     -- For ordinary calls, opportunistically let-float a trailing let argument
@@ -571,18 +606,23 @@ function cexpr(form, env)
     elseif op == "freeze" then
       local body = car(cdr(form))
       if CTX then
-        -- abstract free variables as parameters, hoist body to KB[N]
+        -- Hoist the freeze body to the chunk-scope KC table (a constant function
+        -- built once at load), abstracting its free vars as params; BIND snapshots
+        -- the current captures into a thunk at the use site. Putting the body in
+        -- KC rather than a per-impl-call table means the function literal is
+        -- created ONCE, not on every call to the enclosing defun -- which in the
+        -- recursive typechecker was a major per-inference allocation source.
         local fv = {}
         collect_free(body, env, {}, fv)
         local lnames = {}
         for kname in pairs(fv) do lnames[#lnames+1] = env[kname] end
         table.sort(lnames)  -- stable order for caller / body
         local body_str = cexpr(body, env)
-        local idx = #CTX.kbodies + 1
-        CTX.kbodies[idx] = "function(" .. table.concat(lnames, ", ") .. ") return "
+        local idx = #CTX.cbodies + 1
+        CTX.cbodies[idx] = "function(" .. table.concat(lnames, ", ") .. ") return "
                            .. body_str .. " end"
         local call_args = (#lnames == 0) and "" or (", " .. table.concat(lnames, ", "))
-        return "BIND(KB[" .. idx .. "]" .. call_args .. ")"
+        return "BIND(KC[" .. idx .. "]" .. call_args .. ")"
       end
       return "MKFUN(0, function() return " .. cexpr(body, env) .. " end)"
     elseif op == "defun" then
@@ -709,27 +749,29 @@ local function cdefun(form)
   local saved = CTX
   CTX = new_ctx()
   local body_src = ctail(body, env)
-  -- Emit any hoisted (freeze ...) bodies into a per-defun KB table. Each
-  -- BIND(KB[i], cap...) call site stays flat, so deep CPS chains compile
-  -- without exceeding Lua's chunk syntax-level limit.
+  -- Hoisted (freeze ...) bodies AND value-position control-form bodies both go
+  -- into a single chunk-scope KC table, built ONCE at load -- NOT inside impl.
+  -- Each KC entry is a constant function abstracting its free vars as params
+  -- (BIND snapshots a freeze's captures at the use site; a control form is just
+  -- called). Because the table and its function literals are created once rather
+  -- than on every impl call, the recursive typechecker no longer re-allocates a
+  -- freeze-body table per inference. The BIND(KC[i],...) / KC[i](...) use sites
+  -- stay flat, so deep CPS chains still compile under Lua's syntax-level limit.
   --
-  -- We MUST forward-declare `local KB` and assign on a separate line: when
-  -- the body of KB[i] is parsed, it needs `KB` to already be in scope so the
-  -- reference is captured as an upvalue. Writing `local KB = { ... KB[j] ... }`
-  -- would parse the inner KB as a global (the local isn't visible until after
-  -- its initializer is evaluated).
-  local kb_init = ""
-  if #CTX.kbodies > 0 then
-    local parts = { "local KB; KB = {" }
-    for i, b in ipairs(CTX.kbodies) do
-      parts[#parts+1] = "[" .. i .. "] = " .. b .. (i == #CTX.kbodies and "" or ",")
+  -- We MUST forward-declare `local KC` and assign on a separate line so a KC
+  -- body that references KC[j] (a nested hoist) captures KC as an upvalue.
+  local kc_init = ""
+  if #CTX.cbodies > 0 then
+    local parts = { "local KC; KC = {" }
+    for i, b in ipairs(CTX.cbodies) do
+      parts[#parts+1] = "[" .. i .. "] = " .. b .. (i == #CTX.cbodies and "" or ",")
     end
     parts[#parts+1] = "};"
-    kb_init = table.concat(parts, " ") .. " "
+    kc_init = table.concat(parts, " ") .. " "
   end
   CTX = saved
-  local src = "do local function impl(" .. table.concat(lnames, ", ") .. ") "
-            .. kb_init
+  local src = "do " .. kc_init
+            .. "local function impl(" .. table.concat(lnames, ", ") .. ") "
             .. body_src .. " end "
             .. "F[" .. qstr(name) .. "] = impl; FA[impl] = " .. #params .. " end"
   return src
