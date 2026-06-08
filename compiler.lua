@@ -172,6 +172,20 @@ local SPECIAL_HEADS = {
   ["lambda"]=true, ["freeze"]=true, ["defun"]=true, ["type"]=true,
 }
 local function try_let_float(form, env)
+  -- Never treat a binder / control form as if it were an ordinary call.
+  -- In particular (lambda V BODY) and (freeze BODY) must NOT have their body
+  -- floated out, because that would move the body's enclosed lets to an outer
+  -- scope where the binder's variable (V) is no longer in scope when the body
+  -- references it. (Concrete bug: defprolog `mapit` source has
+  -- `(lambda Z112 (lambda Z113 (let W114 ... (let W115 (lambda ... Z113 ...) ...))))`
+  -- where the inner lambda body's freeze references Z113. Floating the let
+  -- out of `(lambda Z113 ...)` strands that Z113 reference outside its binder
+  -- and the compiler emits `S("Z113")` (a self-evaluating symbol) instead of
+  -- the captured Lua local -- causing mapit to silently produce false.)
+  local head = car(form)
+  if is_symbol(head) and not env[head.name] and SPECIAL_HEADS[head.name] then
+    return nil
+  end
   local args_node = cdr(form)
   if args_node == NIL then return nil end
   -- find the last cons cell of the arg list
@@ -313,18 +327,21 @@ local function ccall(form, env)
     if ar ~= nil then
       if #args == ar then
         return ftab_ref(name) .. "(" .. argstr .. ")"
-      elseif #args < ar then
-        -- partial application
-        local pack = (#args == 0) and "{}" or ("{" .. argstr .. "}")
-        return "PARTIAL(" .. ftab_ref(name) .. ", " .. ar .. ", " .. pack .. ")"
       else
-        -- over-application: apply arity, then APP the rest
-        local first = {}
-        for i=1,ar do first[i]=cargs[i] end
-        local rest = {}
-        for i=ar+1,#args do rest[#rest+1]=cargs[i] end
-        return "APP(" .. ftab_ref(name) .. "(" .. table.concat(first,", ") .. "), "
-                       .. table.concat(rest, ", ") .. ")"
+        -- Arity mismatch at compile time: route through APP so dispatch uses
+        -- the *current* runtime arity (FA[F[name]]) rather than the value of
+        -- C.ARITY[name] captured at compile time. This matters whenever a
+        -- function's arity changes between when a call site is compiled and
+        -- when it executes -- e.g. when a later (define ...) redefines a
+        -- function with a new arity (binary.shen redefines `complement` after
+        -- tableauprolog.shen used it as a 6-arg Prolog predicate), or when
+        -- Shen's `shen.update-lambdatable` evaluates a curry wrapper for the
+        -- new arity *before* the new defun has been installed (depth.shen
+        -- redefining `depth` from 3 to 4 args). Baking the stale arity into
+        -- PARTIAL / over-app expressions would silently produce wrong-arity
+        -- residual closures.
+        if #args == 0 then return "APP(" .. symlit(name) .. ")" end
+        return "APP(" .. symlit(name) .. ", " .. argstr .. ")"
       end
     else
       -- unknown arity: generic apply through function table / symbol

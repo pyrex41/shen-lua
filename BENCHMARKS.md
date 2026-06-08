@@ -70,10 +70,10 @@ which lets LuaJIT trace through the continuations cleanly.
 
 ```
 Total reports: 134
-Passed:        129
-Failed:        5
-Pass rate:     96.27 %
-Wall time:     ~34 s
+Passed:        134
+Failed:        0
+Pass rate:     100 %
+Wall time:     ~35 s
 ```
 
 Run via `luajit run-41.1-tests.lua`. The harness loads, package /
@@ -124,8 +124,6 @@ workloads on 41.1.
   single trail array is the obvious next attack.
 * **Kernel image caching.** Generated Lua could be cached to disk to
   drop startup toward the LuaJIT process floor.
-* **Five failing reports.** Triage and resolve the remaining suite
-  failures (concentrated in higher-order Prolog patterns).
 
 ---
 
