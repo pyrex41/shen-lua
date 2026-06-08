@@ -26,6 +26,17 @@ P.ERR = ERR
 local unpack = table.unpack or unpack
 local function MKFUN(arity, fn) FA[fn] = arity; return fn end
 
+-- Frozen-continuation thunks (from BIND / freeze) are represented as array
+-- tables {fn, cap1, ..., capN} tagged with the Thunk metatable, NOT as Lua
+-- closures. Reason: in LuaJIT every closed-over upvalue is a separate ~56-byte
+-- GCupval box, so a freeze capturing 7 vars costs ~440 B as a closure but only
+-- ~170 B as an 8-slot array table. Captures are never Lua nil (KL false/() are
+-- non-nil values), so #t is a reliable length. thaw and APP's 0-arg path run a
+-- thunk by calling t[1](t[2..#t]).
+local Thunk = {}
+local function runthunk(t) return t[1](unpack(t, 2, #t)) end
+P.Thunk = Thunk
+
 local APP  -- fwd
 local function PARTIAL(f, ar, have)
   local need = ar - #have
@@ -42,28 +53,40 @@ local function PARTIAL(f, ar, have)
 end
 
 APP = function(f, ...)
+  -- Fast path: the operand is overwhelmingly a Lua function (a compiled Shen
+  -- function or a continuation/thunk). Check that first so the common case
+  -- avoids the `is_symbol` getmetatable probe entirely. APP is ~13% of the
+  -- typechecker's runtime, so this branch order matters.
+  if type(f) == "function" then
+    local n = select("#", ...)
+    local ar = FA[f]
+    if ar == nil or ar == n then     -- primitive/unknown-arity fn: assume exact
+      return f(...)
+    elseif n < ar then
+      return PARTIAL(f, ar, {...})
+    else
+      local args = {...}
+      local first = {}
+      for i=1,ar do first[i] = args[i] end
+      local r = f(unpack(first, 1, ar))
+      local rest = {}
+      for i=ar+1,n do rest[#rest+1] = args[i] end
+      return APP(r, unpack(rest, 1, #rest))
+    end
+  end
+  -- A frozen-continuation thunk applied with no args (KL `(thaw V)` sometimes
+  -- routes here): run it; if over-applied, apply the result to the rest.
+  if getmetatable(f) == Thunk then
+    if select("#", ...) == 0 then return runthunk(f) end
+    return APP(runthunk(f), ...)
+  end
+  -- Slow path: a symbol naming a function, or an error.
   if is_symbol(f) then
     local fn = F[f.name]
     if fn == nil then ERR("not a function: " .. f.name) end
-    f = fn
+    return APP(fn, ...)
   end
-  if type(f) ~= "function" then ERR("attempt to apply a non-function") end
-  local n = select("#", ...)
-  local ar = FA[f]
-  if ar == nil then ar = n end          -- primitive Lua fn: assume exact
-  if n == ar then
-    return f(...)
-  elseif n < ar then
-    return PARTIAL(f, ar, {...})
-  else
-    local args = {...}
-    local first = {}
-    for i=1,ar do first[i] = args[i] end
-    local r = f(unpack(first, 1, ar))
-    local rest = {}
-    for i=ar+1,n do rest[#rest+1] = args[i] end
-    return APP(r, unpack(rest, 1, #rest))
-  end
+  ERR("attempt to apply a non-function")
 end
 P.APP, P.MKFUN, P.PARTIAL = APP, MKFUN, PARTIAL
 
@@ -208,7 +231,15 @@ defprim("<-address", 2, function(v, i) return v[i] end)
 defprim("address->", 3, function(v, i, x) v[i]=x; return v end)
 
 -- freeze/thaw : thunks are 0-arity functions (kernel: (defun thaw (V) (V)))
-defprim("thaw", 1, function(x) return APP(x) end)
+-- Hot path in the Prolog/typechecker CPS: a thawed value is always a 0-arity
+-- Lua closure (produced by `freeze` / BIND), so call it directly and skip the
+-- full APP dispatch (symbol check, arity lookup, vararg packing). APP remains
+-- the fallback for the rare symbol case.
+defprim("thaw", 1, function(x)
+  if getmetatable(x) == Thunk then return runthunk(x) end
+  if type(x) == "function" then return x() end
+  return APP(x)
+end)
 
 -- type : erased
 defprim("type", 2, function(x, _ty) return x end)
@@ -292,6 +323,51 @@ end)
 -- exit
 defprim("exit", 1, function(n) io.stdout:flush(); os.exit(type(n)=="number" and n or 0) end)
 
+-- Native reimplementation of the hottest Prolog dereference primitives.
+-- These run ~6x/inference in the typechecker; as compiled KL each call pays
+-- function-dispatch + per-step `<-address`/`shen.pvar?` indirection. The native
+-- versions are tight Lua loops over the prolog binding vector (this is what the
+-- shen-c and shen-rust ports do). shen.deref additionally does STRUCTURE SHARING
+-- -- returning the original cons subtree unchanged when nothing dereffed -- which
+-- the native C/Rust ports do NOT do, eliminating most of deref's cons allocation.
+-- Installed after the kernel loads (overriding the compiled KL defuns in F).
+-- A prolog variable is an absvector {[0]=shen.pvar, [1]=ticket}; the binding for
+-- ticket t lives at prolog-vector slot v[t], with shen.-null- meaning unbound.
+function P.install_native_prolog()
+  local shen_pvar = intern("shen.pvar")
+  local shen_null = intern("shen.-null-")
+  local getmt = getmetatable
+  local function is_pvar(x)
+    return type(x) == "table" and x.n ~= nil and getmt(x) == nil and x[0] == shen_pvar
+  end
+  local function lazyderef(x, v)
+    while type(x) == "table" and x.n ~= nil and getmt(x) == nil and x[0] == shen_pvar do
+      local w = v[x[1]]
+      if w == shen_null then return x end
+      x = w
+    end
+    return x
+  end
+  local function deref(x, v)
+    if is_cons(x) then
+      local h0, t0 = x[1], x[2]
+      local h = deref(h0, v)
+      local t = deref(t0, v)
+      if h == h0 and t == t0 then return x end   -- structure sharing: nothing changed
+      return cons(h, t)
+    elseif type(x) == "table" and x.n ~= nil and getmt(x) == nil and x[0] == shen_pvar then
+      local w = v[x[1]]
+      if w == shen_null then return x end
+      return deref(w, v)
+    else
+      return x
+    end
+  end
+  F["shen.pvar?"] = is_pvar;       FA[is_pvar] = 1
+  F["shen.lazyderef"] = lazyderef; FA[lazyderef] = 2
+  F["shen.deref"] = deref;         FA[deref] = 2
+end
+
 -- ---- loader / eval -------------------------------------------------------
 -- environment table exposed to compiled chunks
 local ENV = {
@@ -310,26 +386,13 @@ local ENV = {
   -- BIND(KB[i], cap1, ..., capN) at every use site, so the use site itself
   -- contains no Lua function literal -- avoiding chunk syntax-level overflow
   -- on Prolog CPS chains (einsteins-riddle, t-star).
+  -- All thunks produced here are 0-arity and are invoked via `thaw` (direct
+  -- call) or APP-with-0-args (whose fallback treats an unknown-arity function
+  -- as exact-arity), so we no longer tag them in FA -- skipping a weak-table
+  -- write on every freeze, one of the hottest ops in the typechecker.
   BIND = function(fn, ...)
-    local n = select("#", ...)
-    if n == 0 then FA[fn] = 0; return fn end
-    if n == 1 then
-      local a1 = ...
-      local th = function() return fn(a1) end
-      FA[th] = 0; return th
-    elseif n == 2 then
-      local a1, a2 = ...
-      local th = function() return fn(a1, a2) end
-      FA[th] = 0; return th
-    elseif n == 3 then
-      local a1, a2, a3 = ...
-      local th = function() return fn(a1, a2, a3) end
-      FA[th] = 0; return th
-    else
-      local args = {...}
-      local th = function() return fn(unpack(args, 1, n)) end
-      FA[th] = 0; return th
-    end
+    if select("#", ...) == 0 then return fn end
+    return setmetatable({ fn, ... }, Thunk)
   end,
   -- MKTREE consumes a flat blueprint produced by the compiler for deep
   -- cons-trees. See compile_cons_tree in compiler.lua. ops is a sequence of

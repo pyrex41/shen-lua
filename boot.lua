@@ -81,6 +81,9 @@ local function load_kernel(verbose)
     end
     if verbose then io.stderr:write("  loaded "..nm.."\n") end
   end
+  -- Override the hottest Prolog deref primitives with native Lua now that the
+  -- compiled KL defuns are all in F (see prims.install_native_prolog).
+  P.install_native_prolog()
 end
 
 -- ---- initialise ----------------------------------------------------------
