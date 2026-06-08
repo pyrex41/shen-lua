@@ -4,11 +4,21 @@ Goal: close the gap to the Go/Rust ports (~7–10 s suite) from where we are now
 
 ## Where we are (branch `perf/typechecker-allocation`, 134/134)
 
-| metric | baseline | now |
-|---|---:|---:|
-| allocation / inference | 2344 B | **742 B** (−68%) |
-| isolated typecheck (GC on) | ~2.9 s | **~1.14 s** |
-| full suite, best of 3 | ~40 s | **~22 s** |
+| metric | baseline | after 68% cut | **after B (pvar)** |
+|---|---:|---:|---:|
+| allocation / inference | 2344 B | 742 B | **~701 B** (min-of-5) |
+| isolated typecheck (min-of-5) | ~2.9 s | ~2.23 s | **~2.11 s** |
+
+Update log (this branch, newest first):
+- **B (compact pvar/absvector) — DONE & committed.** Pure-array `Vmt` layout
+  (length at `[1]`, KL elt i at `[i+2]`, no `n` hash key). −42 B/inf min-of-5,
+  ~6% faster isolated typecheck, 134/134, inferences=431741 unchanged. NOTE the
+  real-base change had to ALSO update `install_native_prolog`'s
+  `is_pvar`/`lazyderef`/`deref` (tag at `[2]`, ticket at `[3]`, binding `v[t+2]`).
+- **A (lambda → array tables) — DISPROVEN, dropped.** Implemented + validated
+  134/134 but measured +1350 B/inf WORSE (cross-checked `-joff`). Tables only beat
+  closures at HIGH capture counts (freeze=7–8); lambdas capture 1–5, where a LuaJIT
+  closure is cheaper. Do not redo the table rep; see memory `lambda-array-table-regression`.
 
 Hot path = the Shen typechecker, a recursive CPS Prolog engine (`klambda/t-star.kl` +
 `klambda/prolog.kl`), ~990k inferences (same as every port). The cost is **per-inference
@@ -47,7 +57,17 @@ box size); it's most likely just my size-model slack, not a hidden allocator.
 
 ## Execution playbook (revised order, by measured payoff × safety)
 
-### A. λ closures → array tables (NEW; ~166 → ~80 B/inf; med risk, high value)
+### A. λ closures → array tables — ❌ DISPROVEN (regression). DO NOT REDO.
+Implemented and validated 134/134, but measured **+1350 B/inf WORSE** (cross-checked
+with `luajit -joff`: identical numbers, so raw allocation volume, not a JIT artifact).
+The premise is false for shen-lua: tables beat closures only at HIGH capture counts
+(freeze = 7–8 caps), but lambdas capture only 1–5, where a LuaJIT closure is cheaper
+than a metatable-tagged array-table. If revisiting lambda allocation, beta-reduce
+immediately-applied monomorphic `((lambda V B) A)` at compile time instead. Original
+(now-falsified) rationale preserved below for context.
+
+<details><summary>original step A (falsified)</summary>
+
 Same win as freeze thunks, applied to `(lambda V BODY)`. Currently
 `compiler.lua` `cexpr` lambda branch (~line 599) emits
 `MKFUN(1, function(V) BODY end)` capturing free vars as upvalues → ~56 B/upval box AND a
@@ -65,7 +85,9 @@ Gotcha: APP is the hottest dispatch — order the metatable check AFTER `type(f)
 (`montague`, `interpreter`, the prolog interps) + 134/134. Expected: removes upval boxing
 + per-eval FNEW for lambdas.
 
-### B. Compact pvar / absvector representation (−63 B/inf measured; med risk)
+</details>
+
+### B. Compact pvar / absvector representation — ✅ DONE (committed; −42 B/inf min-of-5)
 The size-2 pvar is 146 B because `{n=2,[0],[1]}` forces a hash part (string key `n` alone
 does it). Pure-array layout (KL index `i` → array slot `[i+2]`, length at `[1]`, no `n`
 key) → ~98 B. An agent verified a maximal-array variant kept the typecheck correct
