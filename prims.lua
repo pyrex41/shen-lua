@@ -491,6 +491,115 @@ function P.install_native_prolog()
   F["shen.gc"] = gc;                FA[gc] = 2
 end
 
+-- Native overrides of the hottest GENERAL-purpose kernel functions (the
+-- officially-recommended "overwrite" peephole track; see Shen PortDeveloperNotes
+-- and shen-cl's overwrite.lsp). Installed after the kernel loads, overriding the
+-- compiled-KL defuns in F. A 41.1-suite call-frequency profile (bench/callfreq.lua)
+-- showed these are called millions of times each, and -- crucially -- their
+-- compiled-KL bodies re-dispatch through F["="]/F["cons?"]/F["hd"]/F["tl"] on
+-- every iteration. The native bodies call the Lua `equal`/`is_cons`/`cons`
+-- directly (no F-table round-trip), so overriding them also CASCADES down the
+-- inner-primitive call counts (= at 39M, cons? at 34M, ...).
+--
+-- Semantics mirror klambda/sys.kl EXACTLY. For the list walkers, the rare
+-- improper-list error branch DELEGATES to the captured original compiled-KL
+-- function, so the (multi-line) simple-error messages stay byte-identical without
+-- transcription. None of these touch shen.*infs* except shen.incinfs (which is
+-- kept arithmetically identical), so the typecheck inference count is unchanged.
+function P.install_native_stdlib()
+  local fail_sym = intern("shen.fail!")
+
+  -- fail / parse-failure: return the fail symbol.  parse-failure?: (= V (fail)),
+  -- which for the interned singleton fail symbol is exactly an identity test.
+  local function fail() return fail_sym end
+  local function parse_failure() return fail_sym end
+  local function parse_failure_q(v) return v == fail_sym end
+
+  -- shen.unlocked?: (<-address V 1) == v[3] in the pure-array vector layout.
+  local function unlocked_q(v) return v[3] end
+
+  -- shen.incinfs: (set shen.*infs* (+ 1 (value shen.*infs*))). Kept
+  -- arithmetically identical so the inference-count invariant (431741) holds.
+  local function incinfs()
+    local n = GLOBALS["shen.*infs*"] + 1
+    GLOBALS["shen.*infs*"] = n
+    return n
+  end
+
+  -- element? : linear membership using KL `=` (== Lua `equal`). Improper-list
+  -- error delegates to the original for an identical message.
+  local orig_element = F["element?"]
+  local function element_q(x, lst)
+    while true do
+      if lst == NIL then return false end
+      if is_cons(lst) then
+        if equal(x, lst[1]) then return true end
+        lst = lst[2]
+      else
+        return orig_element(x, lst)
+      end
+    end
+  end
+
+  -- assoc : find the first pair whose head `= X`.
+  local orig_assoc = F["assoc"]
+  local function assoc(x, lst)
+    while true do
+      if lst == NIL then return NIL end
+      if is_cons(lst) then
+        local pair = lst[1]
+        if is_cons(pair) and equal(x, pair[1]) then return pair end
+        lst = lst[2]
+      else
+        return orig_assoc(x, lst)
+      end
+    end
+  end
+
+  -- shen.reverse-help (and reverse, its only caller) : accumulate-reverse.
+  local orig_revh = F["shen.reverse-help"]
+  local function reverse_help(lst, acc)
+    while true do
+      if lst == NIL then return acc end
+      if is_cons(lst) then
+        acc = cons(lst[1], acc); lst = lst[2]
+      else
+        return orig_revh(lst, acc)
+      end
+    end
+  end
+  local function reverse(lst) return reverse_help(lst, NIL) end
+
+  -- shen.map-h (and map) : map a function over a list, building the result
+  -- reversed then reversing (exactly as the KL does). The mapper is applied via
+  -- APP (it may be a closure, a partial, or a symbol).
+  local orig_maph = F["shen.map-h"]
+  local function map_h(f, lst, acc)
+    while true do
+      if lst == NIL then return reverse_help(acc, NIL) end
+      if is_cons(lst) then
+        acc = cons(APP(f, lst[1]), acc); lst = lst[2]
+      else
+        return orig_maph(f, lst, acc)
+      end
+    end
+  end
+  local function map(f, lst) return map_h(f, lst, NIL) end
+
+  local function install(name, fn, arity) F[name] = fn; FA[fn] = arity end
+  install("fail", fail, 0)
+  install("shen.parse-failure", parse_failure, 0)
+  install("shen.parse-failure?", parse_failure_q, 1)
+  install("shen.unlocked?", unlocked_q, 1)
+  install("shen.incinfs", incinfs, 0)
+  install("element?", element_q, 2)
+  install("assoc", assoc, 2)
+  install("shen.reverse-help", reverse_help, 2)
+  install("reverse", reverse, 1)
+  install("shen.map-h", map_h, 3)
+  install("map", map, 2)
+end
+
 -- ---- loader / eval -------------------------------------------------------
 -- environment table exposed to compiled chunks
 local ENV = {
@@ -539,6 +648,23 @@ local ENV = {
     end
     return stack[1]
   end,
+  -- Arithmetic / equality fast-paths (Track 1.1/1.2). The compiler emits these
+  -- (ADD/SUB/.../EQ) instead of F["+"]/.../F["="] for 2-arg numeric-prim calls.
+  -- Each takes the monomorphic-number fast path -- which LuaJIT folds to a bare
+  -- machine op on a hot trace -- and otherwise falls back to the real primitive,
+  -- which preserves KL semantics EXACTLY: tonum rejects non-numbers (so "3"+1
+  -- still errors rather than string-coercing), and a user redefinition of `+`
+  -- via F still takes effect. EQ on a numeric LHS is `a==b` (Lua never coerces
+  -- across number/non-number in ==, matching `equal`); otherwise full `equal`.
+  ADD = function(a,b) if type(a)=="number" and type(b)=="number" then return a+b end return F["+"](a,b) end,
+  SUB = function(a,b) if type(a)=="number" and type(b)=="number" then return a-b end return F["-"](a,b) end,
+  MUL = function(a,b) if type(a)=="number" and type(b)=="number" then return a*b end return F["*"](a,b) end,
+  DIV = function(a,b) if type(a)=="number" and type(b)=="number" and b~=0 then return a/b end return F["/"](a,b) end,
+  GT  = function(a,b) if type(a)=="number" and type(b)=="number" then return a>b  end return F[">"](a,b) end,
+  LT  = function(a,b) if type(a)=="number" and type(b)=="number" then return a<b  end return F["<"](a,b) end,
+  GE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a>=b end return F[">="](a,b) end,
+  LE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a<=b end return F["<="](a,b) end,
+  EQ  = function(a,b) if type(a)=="number" then return a==b end return equal(a,b) end,
   -- allow compiled code to reach a few Lua builtins safely
   pcall = pcall, select = select, error = error,
   setmetatable = setmetatable, getmetatable = getmetatable,

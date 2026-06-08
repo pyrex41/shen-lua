@@ -157,6 +157,13 @@ local function ftab_ref(name)
   return 'F[' .. qstr(name) .. ']'
 end
 
+-- 2-arg numeric primitives that get inlined to an ENV fast-path helper
+-- (see ENV.ADD/.../EQ in prims.lua and the call site in ccall). Track 1.1/1.2.
+local ARITH2 = {
+  ["+"]="ADD", ["-"]="SUB", ["*"]="MUL", ["/"]="DIV",
+  [">"]="GT", ["<"]="LT", [">="]="GE", ["<="]="LE", ["="]="EQ",
+}
+
 -- Let-floating: rewrite (F a1...aN (let X V B)) -> (let X V (F a1...aN B)).
 -- This collapses right-recursive let chains in continuation-passing code
 -- (e.g. the Prolog backend generates many (let X (newpv A) (shen.gc A NEXT))
@@ -333,6 +340,14 @@ local function ccall(form, env)
     local ar = C.ARITY[name]
     if ar ~= nil then
       if #args == ar then
+        -- Track 1.1/1.2: inline 2-arg numeric prims to ENV fast-paths (ADD,
+        -- SUB, ..., EQ) instead of an F-table hash lookup. The helpers guard on
+        -- type(number) and fall back to F[name], preserving KL semantics + late
+        -- binding. Only when the head isn't a locally-bound var (checked above).
+        local helper = ARITH2[name]
+        if helper and ar == 2 then
+          return helper .. "(" .. argstr .. ")"
+        end
         return ftab_ref(name) .. "(" .. argstr .. ")"
       else
         -- Arity mismatch at compile time: route through APP so dispatch uses

@@ -84,6 +84,9 @@ local function load_kernel(verbose)
   -- Override the hottest Prolog deref primitives with native Lua now that the
   -- compiled KL defuns are all in F (see prims.install_native_prolog).
   P.install_native_prolog()
+  -- Override the hottest general-purpose kernel functions with native Lua
+  -- (element?, assoc, map, reverse, fail, ...; see prims.install_native_stdlib).
+  P.install_native_stdlib()
 end
 
 -- ---- initialise ----------------------------------------------------------
