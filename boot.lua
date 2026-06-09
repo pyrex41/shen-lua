@@ -51,7 +51,7 @@ P.GLOBALS["*home-directory*"] = ""
 
 -- ---- platform metadata (required by 41.1+ kernel) -------------------------
 P.GLOBALS["*language*"]       = "Lua"
-P.GLOBALS["*implementation*"] = "LuaJIT"
+P.GLOBALS["*implementation*"] = rawget(_G, "jit") and "LuaJIT" or _VERSION
 P.GLOBALS["*port*"]           = "shen-lua"
 P.GLOBALS["*porters*"]        = "shen-lua contributors"
 P.GLOBALS["*os*"]             = (package.config and package.config:sub(1,1) == "\\") and "Windows" or "Unix"
@@ -67,7 +67,14 @@ P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes f
 -- arch (bytecode is not portable across either). SHEN_KERNEL_CACHE=off
 -- disables; any other value overrides the cache path.
 local CACHE_FORMAT = "SHENKC2"
-local bit = require("bit")
+-- LuaJIT's `bit` library drives the FNV-1a hashing behind both the kernel
+-- bytecode cache and the user fasl cache. PUC Lua has no `bit` (5.3+ has
+-- native bitwise operators, but this file must stay parseable by 5.1/LuaJIT),
+-- so when it is absent both caches self-disable: cache_path()/fasl_dir()
+-- return nil, which makes every hashing path (fnv1a/cache_key/fasl_key)
+-- unreachable. Pure perf features — correctness is unaffected.
+local has_bit, bit = pcall(require, "bit")
+if not has_bit then bit = nil end
 
 local function fnv1a(s, h)
   h = h or 2166136261
@@ -82,6 +89,7 @@ local function fnv1a(s, h)
 end
 
 local function cache_path()
+  if not bit then return nil end   -- PUC Lua: no `bit` -> no cache keys
   local p = os.getenv("SHEN_KERNEL_CACHE")
   if p == "off" or p == "0" then return nil end
   if p and p ~= "" then return p end
@@ -361,6 +369,7 @@ local FASL_ROLL = 2166136261
 local FASL_DEBUG = os.getenv("SHEN_FASL_DEBUG") == "1"
 
 local function fasl_dir()
+  if not bit then return nil end   -- PUC Lua: no `bit` -> no fasl keys
   local p = os.getenv("SHEN_FASL")
   if p == "off" or p == "0" then return nil end
   local d = os.getenv("SHEN_FASL_DIR")

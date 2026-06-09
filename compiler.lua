@@ -143,8 +143,16 @@ local function catom(form, env)
 end
 
 -- numeric literal needs care: keep integers exact
+-- mtoint: PUC 5.3+ %d-format guard (string.format("%d", n) errors there for
+-- an integral float outside int64 range). nil under LuaJIT/5.1: path unchanged.
+local mtoint = math.tointeger
 local function cnum(n)
   if n == math.floor(n) and n ~= math.huge and n ~= -math.huge then
+    if mtoint then
+      local i = mtoint(n)
+      if i then return string.format("%d", i) end
+      return string.format("%.17g", n)
+    end
     return string.format("%d", n)
   end
   return string.format("%.17g", n)

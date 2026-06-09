@@ -147,6 +147,22 @@ defprim("+", 2, function(a,b) return tonum(a) + tonum(b) end)
 defprim("-", 2, function(a,b) return tonum(a) - tonum(b) end)
 defprim("*", 2, function(a,b) return tonum(a) * tonum(b) end)
 defprim("/", 2, function(a,b) b=tonum(b); if b==0 then ERR("division by zero") end; return tonum(a)/b end)
+-- PUC Lua 5.3+ tier: Lua gained an integer subtype whose int64 arithmetic
+-- WRAPS on overflow; LuaJIT (and 5.1) compute on IEEE doubles. The kernel
+-- relies on double behaviour — e.g. shen.hashkey takes the product of all
+-- byte values of a symbol name (astronomically large) and shen.mod reduces
+-- it by repeated subtraction, which only terminates if the product stayed a
+-- positive (possibly inexact) float rather than wrapping to a negative int64.
+-- So on 5.3+ the value-producing arithmetic primitives compute in the float
+-- domain, reproducing the LuaJIT number model exactly (comparisons need no
+-- coercion: int/float compares are exact in 5.3+). Under LuaJIT
+-- math.tointeger is nil and the definitions above stay installed unchanged.
+if math.tointeger then
+  defprim("+", 2, function(a,b) return tonum(a) + 0.0 + tonum(b) end)
+  defprim("-", 2, function(a,b) return tonum(a) + 0.0 - tonum(b) end)
+  defprim("*", 2, function(a,b) return (tonum(a) + 0.0) * tonum(b) end)
+  defprim("/", 2, function(a,b) b=tonum(b); if b==0 then ERR("division by zero") end; return (tonum(a)+0.0)/b end)
+end
 defprim(">", 2, function(a,b) return tonum(a) >  tonum(b) end)
 defprim("<", 2, function(a,b) return tonum(a) <  tonum(b) end)
 defprim(">=",2, function(a,b) return tonum(a) >= tonum(b) end)
@@ -174,8 +190,18 @@ defprim("intern", 1, function(s)
   return intern(s)
 end)
 
+-- On 5.3+ string.format("%d", x) ERRORS for an integral float outside int64
+-- range; go through math.tointeger and fall back to %.17g (where LuaJIT's
+-- own %d output is junk anyway). math.tointeger is nil under LuaJIT/5.1, so
+-- that path is byte-identical to before.
+local mtoint = math.tointeger
 local function numToStr(n)
   if type(n)=="number" and n==math.floor(n) and n~=math.huge and n~=-math.huge then
+    if mtoint then
+      local i = mtoint(n)
+      if i then return string.format("%d", i) end
+      return string.format("%.17g", n)
+    end
     return string.format("%d", n)
   end
   return tostring(n)
@@ -714,6 +740,18 @@ local ENV = {
   math = math, string = string, table = table,
 }
 P.ENV = ENV
+
+-- PUC Lua 5.3+ tier: the inline fast paths must compute in the float domain
+-- for the same int64-wrap reason as the `+`/`-`/`*`/`/` primitives above
+-- (see that comment). Comparisons (GT/LT/GE/LE/EQ) create no numbers and are
+-- exact across int/float in 5.3+, so they stay as-is. Under LuaJIT this
+-- block is dead and ENV is byte-identical to before.
+if math.tointeger then
+  ENV.ADD = function(a,b) if type(a)=="number" and type(b)=="number" then return a+0.0+b end return F["+"](a,b) end
+  ENV.SUB = function(a,b) if type(a)=="number" and type(b)=="number" then return a+0.0-b end return F["-"](a,b) end
+  ENV.MUL = function(a,b) if type(a)=="number" and type(b)=="number" then return (a+0.0)*b end return F["*"](a,b) end
+  ENV.DIV = function(a,b) if type(a)=="number" and type(b)=="number" and b~=0 then return (a+0.0)/b end return F["/"](a,b) end
+end
 
 local loadstring = loadstring or load
 local setfenv = setfenv
