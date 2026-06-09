@@ -535,6 +535,40 @@ local function import(x, varmap)
 end
 M.import = import
 
+-- import_cached: identity-memoized import for values re-imported repeatedly
+-- within one query (e.g. the shen.*datatypes* assoc list, passed to every
+-- search-user-datatypes call). Sound because Shen list structure is immutable
+-- and pvar imports go through the identity varmap (no allocation). The memo
+-- is cleared at query_end (cells are reclaimed there).
+local import_memo = {}
+local identity_varmap = setmetatable({}, {
+  __index = function(_, idx) return VAR_BASE + idx end,
+})
+M.identity_varmap = identity_varmap
+
+local function import_cached(x)
+  if type(x) == "table" then
+    local t = import_memo[x]
+    if t then return t end
+    t = M.import(x, identity_varmap)
+    import_memo[x] = t
+    return t
+  end
+  return M.import(x, identity_varmap)
+end
+M.import_cached = import_cached
+
+-- maxinferences check, transcribed from shen.maxinfexceeded? (t-star.kl):
+-- THROWS "maximum inferences exceeded" past the limit, else returns false
+local GLOBALS, ERRFN
+function M.maxinf_exceeded()
+  local mx = GLOBALS and GLOBALS["shen.*maxinferences*"]
+  if type(mx) == "number" and infs > mx then
+    ERRFN("maximum inferences exceeded")
+  end
+  return false
+end
+
 -- materialize: deep deref + export an arena term to a Shen value. Unbound
 -- vars become legacy-format pvar absvectors {2, shen.pvar, idx} (cached per
 -- idx — they are immutable, so sharing across calls is safe), preserving
@@ -631,6 +665,10 @@ function M.query_end(q)
     opq_log[i] = nil
   end
   opq_top = q[8]
+  -- the import memo references cells that are no longer valid
+  if next(import_memo) ~= nil then
+    for k in pairs(import_memo) do import_memo[k] = nil end
+  end
 end
 
 -- full reset (tests / benchmarks only)
@@ -640,6 +678,7 @@ function M.reset_all()
   infs = 0
   for h in pairs(contFn) do contFn[h] = nil end
   for h in pairs(contSpill) do contSpill[h] = nil end
+  for k in pairs(import_memo) do import_memo[k] = nil end
 end
 
 -- expose tops read-only for tests/diagnostics
@@ -658,6 +697,8 @@ M.NativePred = {}
 -- ---------------------------------------------------------------------------
 function M.install(P)
   M.P = P
+  GLOBALS = P.GLOBALS
+  ERRFN = P.ERR
   for _, mod in ipairs({ "prolog_compile", "typecheck_native" }) do
     local ok, m = pcall(require, mod)
     if ok then

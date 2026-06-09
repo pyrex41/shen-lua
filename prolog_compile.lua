@@ -162,6 +162,15 @@ local guard_n = 0
 local function lift_guard(ctx, e, env, out, d)
   -- replace (shen.deref X B) / (shen.lazyderef X B) with fresh params
   local params, args = {}, {}
+  local seen = {}   -- engine var -> param (dedupe repeated references)
+  local function mkparam(luaname)
+    if seen[luaname] then return seen[luaname] end
+    local i = #params + 1
+    params[i] = R.intern("GP" .. i)
+    args[i] = luaname
+    seen[luaname] = params[i]
+    return params[i]
+  end
   local function strip(x)
     if is_cons(x) then
       local h = x[1]
@@ -170,18 +179,19 @@ local function lift_guard(ctx, e, env, out, d)
         local vn = x[2][1].name
         local b = env[vn]
         if not b or b.kind ~= "term" then refuse(ctx, "guard derefs non-term " .. vn) end
-        local i = #params + 1
-        params[i] = R.intern("GP" .. i)
-        args[i] = b.lua
-        return params[i]
+        return mkparam(b.lua)
       end
       return R.cons(strip(x[1]), strip(x[2]))
     end
     if is_klvar(x) then
-      -- a bare engine-value variable leaking into guard code would be a
-      -- translator bug (deref-calls wraps every free var)
+      -- bare engine-value variables (the t-star drivers pass raw terms to
+      -- helpers like subst) are materialized like deref'd ones; full deref
+      -- and materialize agree on everything a Shen helper can observe
       local b = env[x.name]
-      if b then refuse(ctx, "bare engine var in guard: " .. x.name) end
+      if b then
+        if b.kind ~= "term" then refuse(ctx, "non-term var in guard: " .. x.name) end
+        return mkparam(b.lua)
+      end
     end
     return x
   end
@@ -269,8 +279,8 @@ compile_value = function(ctx, e, env, out, d)
     return b.lua
   end
   if not is_cons(e) then
-    -- bare literal in value position (e.g. final `false`)
     if e == NIL then return atomconst(e) end
+    if type(e) == "number" then return tostring(e) end   -- counter arithmetic
     refuse(ctx, "literal in value position: " .. tostring(e))
   end
 
@@ -458,6 +468,35 @@ compile_value = function(ctx, e, env, out, d)
     refuse(ctx, "application of variable " .. h.name)
   end
 
+  -- curried static application: ((F a) b) ... — the t-star drivers apply
+  -- multi-param GoTo lambdas one argument at a time
+  if is_cons(h) then
+    local arglists = { args }
+    local cur = h
+    while is_cons(cur) and is_cons(cur[1]) do
+      arglists[#arglists + 1] = cur[2]
+      cur = cur[1]
+    end
+    if is_cons(cur) and is_klvar(cur[1]) then
+      local b = env[cur[1].name]
+      if b and b.kind == "static" then
+        arglists[#arglists + 1] = cur[2]
+        local call_args = {}
+        for i = #arglists, 1, -1 do
+          local at = lst2tbl(arglists[i])
+          for j = 1, #at do
+            call_args[#call_args + 1] = compile_term(ctx, at[j], env, out, d)
+          end
+        end
+        if #call_args == #b.params then
+          return ctx:callstatic(b, call_args, env, out, d)
+        end
+        refuse(ctx, "curried static arity mismatch: " .. cur[1].name)
+      end
+    end
+    refuse(ctx, "application of non-static expression")
+  end
+
   -- goal calls + builtins: (name args... B L K C)
   if is_sym(h) then
     local a, an = lst2tbl(args)
@@ -469,6 +508,8 @@ compile_value = function(ctx, e, env, out, d)
         local tl
         if t == true then tl = "true"
         elseif t == false then tl = "false"
+        elseif is_cons(t) and t[1] == SYM["shen.maxinfexceeded?"] then
+          tl = "MAXINF()"   -- hot path: runs once per system-S call
         elseif is_cons(t) then tl = lift_guard(ctx, t, env, out, d)
         else refuse(ctx, "when test shape") end
         local k = compile_cont(ctx, a[an], env, out, d)
@@ -720,22 +761,19 @@ local NEWCONT9, NEWCONT10, NEWCONT11, NEWCONT12 =
 local NEWCONT13, NEWCONT14, NEWCONT15, NEWCONT16 =
   E.newcont13, E.newcont14, E.newcont15, E.newcont16
 local NEWCONTV = E.newcontV
+local MAXINF = E.maxinf_exceeded
 local VAR_BASE, CONS_BASE = E.VAR_BASE, E.CONS_BASE
 ]]
 
-local function translate(name, defineForm)
-  local parts = lst2tbl(defineForm)
-  -- parts: define, name, p1..pk, B, L, K, C, ->, body
-  assert(parts[1] == SYM["define"], "not a define form")
-  local arrow
-  for i = 3, #parts do
-    if parts[i] == SYM["->"] then arrow = i; break end
-  end
-  assert(arrow and arrow >= 7, "malformed prolog define")
-  local body = parts[arrow + 1]
-  local nparams = arrow - 7   -- params between name and the B L K C gensyms
-  local Bv, Lv, Kv, Cv = parts[arrow - 4], parts[arrow - 3],
-                         parts[arrow - 2], parts[arrow - 1]
+-- translate_core: shared by defprolog define-forms and the t-star driver
+-- defuns. `allparams` is the full parameter list whose LAST FOUR entries are
+-- the Vec / Lock / Count / Cont gensyms (the uniform CPS goal ABI).
+local function translate_core(name, allparams, body)
+  local np = #allparams
+  assert(np >= 4, "prolog fn must have at least the B L K C params")
+  local nparams = np - 4
+  local Bv, Lv, Kv, Cv = allparams[np - 3], allparams[np - 2],
+                         allparams[np - 1], allparams[np]
 
   local ctx = setmetatable({
     buf = {}, nlift = 0, nlocal = 0, fail = {}, liftnames = {},
@@ -744,7 +782,7 @@ local function translate(name, defineForm)
   local env = {}
   local sig = {}
   for i = 1, nparams do
-    local pv = parts[2 + i]
+    local pv = allparams[i]
     sig[#sig + 1] = "a" .. i
     env[pv.name] = { lua = "a" .. i, kind = "term" }
   end
@@ -782,22 +820,43 @@ local function translate(name, defineForm)
   if not chunk then
     return nil, "luagen: " .. tostring(err) .. "\n" .. source
   end
-  local matfn = E.materialize
-  local impfn = M.import_value
-  local fn = chunk(E, NP, F, matfn, impfn)
+  local fn = chunk(E, NP, F, E.materialize, E.import_cached)
   return fn, nil, source
+end
+M.translate_core = translate_core
+
+-- translate a (define Name P1..Pk B L K C -> Body) form (defprolog output)
+local function translate(name, defineForm)
+  local parts = lst2tbl(defineForm)
+  assert(parts[1] == SYM["define"], "not a define form")
+  local arrow
+  for i = 3, #parts do
+    if parts[i] == SYM["->"] then arrow = i; break end
+  end
+  assert(arrow and arrow >= 7, "malformed prolog define")
+  local body = parts[arrow + 1]
+  local allparams = {}
+  for i = 3, arrow - 1 do allparams[#allparams + 1] = parts[i] end
+  return translate_core(name, allparams, body)
+end
+
+-- translate a (defun name (p1..pk V L K C) body) form (the t-star drivers)
+function M.translate_defun(defunForm)
+  local parts = lst2tbl(defunForm)
+  assert(parts[1] == SYM["defun"], "not a defun")
+  local name = sname(parts[2])
+  local allparams = lst2tbl(parts[3])
+  local body = parts[4]
+  local fn, err, src = translate_core(name, allparams, body)
+  return fn, err, src, name
 end
 
 -- ---------------------------------------------------------------------------
 -- runtime support: import with identity pvar mapping (materialize . import
 -- must be the identity on arena terms)
 -- ---------------------------------------------------------------------------
-local identity_vm = setmetatable({}, {
-  __index = function(_, idx) return nil end,  -- replaced in install (needs E)
-})
-
 function M.import_value(x)
-  return E.import(x, M.identity_varmap)
+  return E.import(x, E.identity_varmap)
 end
 
 -- ---------------------------------------------------------------------------
@@ -805,14 +864,29 @@ end
 -- ---------------------------------------------------------------------------
 M.registry = {}     -- name -> { form=..., fn=..., err=..., src=... }
 
+-- LAZY translation: registration just records the define form; the actual
+-- KL->Lua translation (incl. guard-defun evals) runs on FIRST NativePred
+-- dispatch via NP's __index. The suite compiles hundreds of datatypes it
+-- never typechecks with — eager translation made the full suite slower.
 local function register(namesym, defineForm)
   local name = sname(namesym)
-  local fn, err, src = translate(name, defineForm)
-  M.registry[name] = { form = defineForm, fn = fn, err = err, src = src }
-  if fn then
-    NP[name] = fn
-  end
+  M.registry[name] = { form = defineForm }
+  rawset(NP, name, nil)   -- invalidate any previous (re)definition
 end
+
+local function force_translate(name)
+  local r = M.registry[name]
+  if not r or r.done then return r and r.fn end
+  r.done = true
+  local fn, err, src = translate(name, r.form)
+  r.fn, r.err, r.src = fn, err, src
+  if not fn and os.getenv("SHEN_PROLOG_DEBUG") then
+    io.stderr:write("native prolog compile failed for ", name, ": ",
+                    tostring(err), "\n")
+  end
+  return fn
+end
+M.force_translate = force_translate
 
 -- ---------------------------------------------------------------------------
 -- native query routing for prolog?
@@ -954,12 +1028,6 @@ function M.install(Pmod, Emod)
   NP = E.NativePred
   M.NP = NP
 
-  -- identity pvar mapping: legacy pvar absvector {2, shen.pvar, idx} -> the
-  -- SAME arena var, so materialize . import == id on terms
-  M.identity_varmap = setmetatable({}, {
-    __index = function(_, idx) return E.VAR_BASE + idx end,
-  })
-
   -- popvar for the translated shen.gc
   if not E.popvar then
     error("prolog_engine must expose popvar")
@@ -967,16 +1035,19 @@ function M.install(Pmod, Emod)
 
   install_dispatch_builtins()
 
-  -- wrapper: dual registration
+  -- NP lazily translates registered predicates on first dispatch
+  setmetatable(NP, { __index = function(t, name)
+    local fn = force_translate(name)
+    rawset(t, name, fn)   -- cache (nil stays a miss; registry marks done)
+    return fn
+  end })
+
+  -- wrapper: dual registration (record only; translation deferred)
   local orig_cp = F["shen.compile-prolog"]
   if not orig_cp then error("shen.compile-prolog not loaded yet") end
   F["shen.compile-prolog"] = function(namesym, clauses)
     local defineForm = orig_cp(namesym, clauses)
-    local ok, err = pcall(register, namesym, defineForm)
-    if not ok and os.getenv("SHEN_PROLOG_DEBUG") then
-      io.stderr:write("native prolog compile failed for ",
-        tostring(namesym), ": ", tostring(err), "\n")
-    end
+    register(namesym, defineForm)
     return defineForm
   end
   P.FA[F["shen.compile-prolog"]] = 2
