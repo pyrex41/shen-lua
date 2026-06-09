@@ -1,0 +1,27 @@
+tc-number	number
+tc-string	string
+tc-boolean	boolean
+tc-list	(list . (number . ()))
+tc-arith	number
+tc-id-lambda	(?1 . (--> . (?1 . ())))
+tc-mono-lambda	(number . (--> . (number . ())))
+tc-twice	((?1 . (--> . (?1 . ()))) . (--> . ((?1 . (--> . (?1 . ()))) . ())))
+tc-compose	((?1 . (--> . (?2 . ()))) . (--> . (((?3 . (--> . (?1 . ()))) . (--> . ((?3 . (--> . (?2 . ()))) . ()))) . ())))
+tc-cons	(list . (number . ()))
+tc-tuple	(number . (* . (string . ())))
+tc-nested-tuple	((number . (* . (number . ()))) . (* . (string . ())))
+tc-if	number
+tc-let	number
+tc-let-shadow	string
+tc-map	(list . (number . ()))
+tc-reverse	(list . (number . ()))
+tc-hd	false
+tc-append	(list . (number . ()))
+tc-poly-pair	(?1 . (--> . ((?1 . (* . (?1 . ()))) . ())))
+tcfail-arith	false
+tcfail-hd	false
+tcfail-if	false
+tcfail-branch	primitive-object
+tcfail-list	(list . (primitive-object . ()))
+tc-ycombinator	(list . (l-formula . ()))
+prolog-einstein	german
