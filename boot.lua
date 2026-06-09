@@ -84,6 +84,21 @@ local function load_kernel(verbose)
   -- Override the hottest Prolog deref primitives with native Lua now that the
   -- compiled KL defuns are all in F (see prims.install_native_prolog).
   P.install_native_prolog()
+  -- Override the hottest general-purpose kernel functions with native Lua
+  -- (element?, assoc, map, reverse, fail, ...; see prims.install_native_stdlib).
+  P.install_native_stdlib()
+  -- Native soa32 Prolog/typecheck engine (prolog_engine.lua). Default on once
+  -- the module ships; SHEN_PROLOG_ENGINE=legacy falls back to the compiled-KL
+  -- CPS engine. Module absence is tolerated (pre-engine checkouts); any other
+  -- load error is real and must propagate.
+  if os.getenv("SHEN_PROLOG_ENGINE") ~= "legacy" then
+    local ok, eng = pcall(require, "prolog_engine")
+    if ok then
+      eng.install(P)
+    elseif not tostring(eng):find("module 'prolog_engine' not found", 1, true) then
+      error(eng)
+    end
+  end
 end
 
 -- ---- initialise ----------------------------------------------------------

@@ -15,6 +15,20 @@ local FA = setmetatable({}, {__mode="k"})  -- Lua function -> arity
 local GLOBALS = {}       -- KL global variable namespace: name -> value
 P.F, P.FA, P.GLOBALS = F, FA, GLOBALS
 
+-- Allocation-attribution instrumentation (Part 1, THROWAWAY). Module-scope so
+-- both the compiled-KL allocation sites (ENV.BIND freeze-thunks, MKFUN lambda
+-- closures) and the native prolog prims share one counter table. Flag-gated;
+-- counters are integer increments into a pre-existing table (zero allocation,
+-- never touch shen.*infs*). Revert before shipping any Part-2 lever.
+local APROF = os.getenv("SHEN_ALLOC_PROFILE") ~= nil
+local AP = { lzy_calls=0, lzyoc_calls=0, lzy_cont=0, lzyoc_cont=0,
+             deref_calls=0, deref_cons=0, occ_deref_calls=0, bind_calls=0,
+             newpv_total=0, newpv_poolmiss=0, mkbind=0, mkbind_slots=0, mkfun=0,
+             thaw_total=0 }
+local AP_SLOTS = {}   -- BIND-thunk slot-count histogram: nslots -> count created
+local AP_THAW  = {}   -- per-thunk thaw count (strong keys, profiling only): thunk -> n
+P.AP, P.AP_SLOTS, P.AP_THAW = AP, AP_SLOTS, AP_THAW
+
 -- ---- errors / exceptions -------------------------------------------------
 local function ERR(msg) error(mkexcn(msg), 0) end
 local function TOEXCN(e)
@@ -25,7 +39,7 @@ P.ERR = ERR
 
 -- ---- apply / curry -------------------------------------------------------
 local unpack = table.unpack or unpack
-local function MKFUN(arity, fn) FA[fn] = arity; return fn end
+local function MKFUN(arity, fn) if APROF then AP.mkfun = AP.mkfun + 1 end; FA[fn] = arity; return fn end
 
 -- Frozen-continuation thunks (from BIND / freeze) are represented as array
 -- tables {fn, cap1, ..., capN} tagged with the Thunk metatable, NOT as Lua
@@ -35,7 +49,10 @@ local function MKFUN(arity, fn) FA[fn] = arity; return fn end
 -- non-nil values), so #t is a reliable length. thaw and APP's 0-arg path run a
 -- thunk by calling t[1](t[2..#t]).
 local Thunk = {}
-local function runthunk(t) return t[1](unpack(t, 2, #t)) end
+local function runthunk(t)
+  if APROF then AP.thaw_total = AP.thaw_total + 1; AP_THAW[t] = (AP_THAW[t] or 0) + 1 end
+  return t[1](unpack(t, 2, #t))
+end
 P.Thunk = Thunk
 
 local APP  -- fwd
@@ -341,6 +358,10 @@ function P.install_native_prolog()
   local shen_pvar = intern("shen.pvar")
   local shen_null = intern("shen.-null-")
   local getmt = getmetatable
+  -- Allocation-attribution instrumentation (Part 1, THROWAWAY). Uses the
+  -- module-scope AP/APROF (shared with ENV.BIND/MKFUN). `prof` is a single
+  -- predictable-false branch when the flag is off.
+  local prof = APROF
   local function is_pvar(x)
     return getmt(x) == Vmt and x[2] == shen_pvar
   end
@@ -353,11 +374,13 @@ function P.install_native_prolog()
     return x
   end
   local function deref(x, v)
+    if prof then AP.deref_calls = AP.deref_calls + 1 end
     if is_cons(x) then
       local h0, t0 = x[1], x[2]
       local h = deref(h0, v)
       local t = deref(t0, v)
       if h == h0 and t == t0 then return x end   -- structure sharing: nothing changed
+      if prof then AP.deref_cons = AP.deref_cons + 1 end
       return cons(h, t)
     elseif getmt(x) == Vmt and x[2] == shen_pvar then
       local w = v[x[3]+2]
@@ -390,6 +413,7 @@ function P.install_native_prolog()
   local function unwind(var, vec, x) vec[var[3]+2] = shen_null; return x end
   -- bind!: bind, run the continuation; if it fails (false) undo the binding.
   local function bind_(var, val, vec, cont)
+    if prof then AP.bind_calls = AP.bind_calls + 1 end
     bindv(var, val, vec)
     local w = thaw(cont)
     if w == false then return unwind(var, vec, w) end
@@ -407,11 +431,13 @@ function P.install_native_prolog()
   -- closure (KL `freeze`) that lazyderefs the tails when thawed.
   local lzy
   lzy = function(x, y, v, cont)
+    if prof then AP.lzy_calls = AP.lzy_calls + 1 end
     if equal(x, y) then return thaw(cont) end
     if is_pvar(x) then return bind_(x, y, v, cont) end
     if is_pvar(y) then return bind_(y, x, v, cont) end
     if is_cons(x) and is_cons(y) then
       local xt, yt = x[2], y[2]
+      if prof then AP.lzy_cont = AP.lzy_cont + 1 end
       return lzy(lazyderef(x[1], v), lazyderef(y[1], v), v,
                  function() return lzy(lazyderef(xt, v), lazyderef(yt, v), v, cont) end)
     end
@@ -420,11 +446,19 @@ function P.install_native_prolog()
   -- lzy=! : lazy unification WITH occurs check (mirrors shen.lzy=!).
   local lzyoc
   lzyoc = function(x, y, v, cont)
+    if prof then AP.lzyoc_calls = AP.lzyoc_calls + 1 end
     if equal(x, y) then return thaw(cont) end
-    if is_pvar(x) and not occurs(x, deref(y, v)) then return bind_(x, y, v, cont) end
-    if is_pvar(y) and not occurs(y, deref(x, v)) then return bind_(y, x, v, cont) end
+    if is_pvar(x) then
+      if prof then AP.occ_deref_calls = AP.occ_deref_calls + 1 end
+      if not occurs(x, deref(y, v)) then return bind_(x, y, v, cont) end
+    end
+    if is_pvar(y) then
+      if prof then AP.occ_deref_calls = AP.occ_deref_calls + 1 end
+      if not occurs(y, deref(x, v)) then return bind_(y, x, v, cont) end
+    end
     if is_cons(x) and is_cons(y) then
       local xt, yt = x[2], y[2]
+      if prof then AP.lzyoc_cont = AP.lzyoc_cont + 1 end
       return lzyoc(lazyderef(x[1], v), lazyderef(y[1], v), v,
                    function() return lzyoc(lazyderef(xt, v), lazyderef(yt, v), v, cont) end)
     end
@@ -457,11 +491,15 @@ function P.install_native_prolog()
   -- newpv: reuse a pooled pvar (or allocate), record it, clear its binding
   -- slot, and bump the vector's ticket counter (KL index 1 = slot [3]).
   local function newpv(vec)
+    if prof then AP.newpv_total = AP.newpv_total + 1 end
     local n = vec[3]
     local np = #pool
     local pv = pool[np]
     if pv ~= nil then pool[np] = nil; pv[3] = n
-    else pv = setmetatable({ [1] = 2, [2] = shen_pvar, [3] = n }, Vmt) end
+    else
+      if prof then AP.newpv_poolmiss = AP.newpv_poolmiss + 1 end
+      pv = setmetatable({ [1] = 2, [2] = shen_pvar, [3] = n }, Vmt)
+    end
     pstk[n] = pv
     vec[n+2] = shen_null
     vec[3] = n + 1
@@ -491,6 +529,115 @@ function P.install_native_prolog()
   F["shen.gc"] = gc;                FA[gc] = 2
 end
 
+-- Native overrides of the hottest GENERAL-purpose kernel functions (the
+-- officially-recommended "overwrite" peephole track; see Shen PortDeveloperNotes
+-- and shen-cl's overwrite.lsp). Installed after the kernel loads, overriding the
+-- compiled-KL defuns in F. A 41.1-suite call-frequency profile (bench/callfreq.lua)
+-- showed these are called millions of times each, and -- crucially -- their
+-- compiled-KL bodies re-dispatch through F["="]/F["cons?"]/F["hd"]/F["tl"] on
+-- every iteration. The native bodies call the Lua `equal`/`is_cons`/`cons`
+-- directly (no F-table round-trip), so overriding them also CASCADES down the
+-- inner-primitive call counts (= at 39M, cons? at 34M, ...).
+--
+-- Semantics mirror klambda/sys.kl EXACTLY. For the list walkers, the rare
+-- improper-list error branch DELEGATES to the captured original compiled-KL
+-- function, so the (multi-line) simple-error messages stay byte-identical without
+-- transcription. None of these touch shen.*infs* except shen.incinfs (which is
+-- kept arithmetically identical), so the typecheck inference count is unchanged.
+function P.install_native_stdlib()
+  local fail_sym = intern("shen.fail!")
+
+  -- fail / parse-failure: return the fail symbol.  parse-failure?: (= V (fail)),
+  -- which for the interned singleton fail symbol is exactly an identity test.
+  local function fail() return fail_sym end
+  local function parse_failure() return fail_sym end
+  local function parse_failure_q(v) return v == fail_sym end
+
+  -- shen.unlocked?: (<-address V 1) == v[3] in the pure-array vector layout.
+  local function unlocked_q(v) return v[3] end
+
+  -- shen.incinfs: (set shen.*infs* (+ 1 (value shen.*infs*))). Kept
+  -- arithmetically identical so the inference-count invariant (431741) holds.
+  local function incinfs()
+    local n = GLOBALS["shen.*infs*"] + 1
+    GLOBALS["shen.*infs*"] = n
+    return n
+  end
+
+  -- element? : linear membership using KL `=` (== Lua `equal`). Improper-list
+  -- error delegates to the original for an identical message.
+  local orig_element = F["element?"]
+  local function element_q(x, lst)
+    while true do
+      if lst == NIL then return false end
+      if is_cons(lst) then
+        if equal(x, lst[1]) then return true end
+        lst = lst[2]
+      else
+        return orig_element(x, lst)
+      end
+    end
+  end
+
+  -- assoc : find the first pair whose head `= X`.
+  local orig_assoc = F["assoc"]
+  local function assoc(x, lst)
+    while true do
+      if lst == NIL then return NIL end
+      if is_cons(lst) then
+        local pair = lst[1]
+        if is_cons(pair) and equal(x, pair[1]) then return pair end
+        lst = lst[2]
+      else
+        return orig_assoc(x, lst)
+      end
+    end
+  end
+
+  -- shen.reverse-help (and reverse, its only caller) : accumulate-reverse.
+  local orig_revh = F["shen.reverse-help"]
+  local function reverse_help(lst, acc)
+    while true do
+      if lst == NIL then return acc end
+      if is_cons(lst) then
+        acc = cons(lst[1], acc); lst = lst[2]
+      else
+        return orig_revh(lst, acc)
+      end
+    end
+  end
+  local function reverse(lst) return reverse_help(lst, NIL) end
+
+  -- shen.map-h (and map) : map a function over a list, building the result
+  -- reversed then reversing (exactly as the KL does). The mapper is applied via
+  -- APP (it may be a closure, a partial, or a symbol).
+  local orig_maph = F["shen.map-h"]
+  local function map_h(f, lst, acc)
+    while true do
+      if lst == NIL then return reverse_help(acc, NIL) end
+      if is_cons(lst) then
+        acc = cons(APP(f, lst[1]), acc); lst = lst[2]
+      else
+        return orig_maph(f, lst, acc)
+      end
+    end
+  end
+  local function map(f, lst) return map_h(f, lst, NIL) end
+
+  local function install(name, fn, arity) F[name] = fn; FA[fn] = arity end
+  install("fail", fail, 0)
+  install("shen.parse-failure", parse_failure, 0)
+  install("shen.parse-failure?", parse_failure_q, 1)
+  install("shen.unlocked?", unlocked_q, 1)
+  install("shen.incinfs", incinfs, 0)
+  install("element?", element_q, 2)
+  install("assoc", assoc, 2)
+  install("shen.reverse-help", reverse_help, 2)
+  install("reverse", reverse, 1)
+  install("shen.map-h", map_h, 3)
+  install("map", map, 2)
+end
+
 -- ---- loader / eval -------------------------------------------------------
 -- environment table exposed to compiled chunks
 local ENV = {
@@ -515,6 +662,11 @@ local ENV = {
   -- write on every freeze, one of the hottest ops in the typechecker.
   BIND = function(fn, ...)
     if select("#", ...) == 0 then return fn end
+    if APROF then
+      local nslots = select("#", ...) + 1
+      AP.mkbind = AP.mkbind + 1; AP.mkbind_slots = AP.mkbind_slots + nslots
+      AP_SLOTS[nslots] = (AP_SLOTS[nslots] or 0) + 1
+    end
     return setmetatable({ fn, ... }, Thunk)
   end,
   -- MKTREE consumes a flat blueprint produced by the compiler for deep
@@ -539,6 +691,23 @@ local ENV = {
     end
     return stack[1]
   end,
+  -- Arithmetic / equality fast-paths (Track 1.1/1.2). The compiler emits these
+  -- (ADD/SUB/.../EQ) instead of F["+"]/.../F["="] for 2-arg numeric-prim calls.
+  -- Each takes the monomorphic-number fast path -- which LuaJIT folds to a bare
+  -- machine op on a hot trace -- and otherwise falls back to the real primitive,
+  -- which preserves KL semantics EXACTLY: tonum rejects non-numbers (so "3"+1
+  -- still errors rather than string-coercing), and a user redefinition of `+`
+  -- via F still takes effect. EQ on a numeric LHS is `a==b` (Lua never coerces
+  -- across number/non-number in ==, matching `equal`); otherwise full `equal`.
+  ADD = function(a,b) if type(a)=="number" and type(b)=="number" then return a+b end return F["+"](a,b) end,
+  SUB = function(a,b) if type(a)=="number" and type(b)=="number" then return a-b end return F["-"](a,b) end,
+  MUL = function(a,b) if type(a)=="number" and type(b)=="number" then return a*b end return F["*"](a,b) end,
+  DIV = function(a,b) if type(a)=="number" and type(b)=="number" and b~=0 then return a/b end return F["/"](a,b) end,
+  GT  = function(a,b) if type(a)=="number" and type(b)=="number" then return a>b  end return F[">"](a,b) end,
+  LT  = function(a,b) if type(a)=="number" and type(b)=="number" then return a<b  end return F["<"](a,b) end,
+  GE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a>=b end return F[">="](a,b) end,
+  LE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a<=b end return F["<="](a,b) end,
+  EQ  = function(a,b) if type(a)=="number" then return a==b end return equal(a,b) end,
   -- allow compiled code to reach a few Lua builtins safely
   pcall = pcall, select = select, error = error,
   setmetatable = setmetatable, getmetatable = getmetatable,

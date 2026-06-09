@@ -7,8 +7,9 @@ primitives on a host runtime and (b) translating the kernel's `.kl` files into
 that host. This port does both by **compiling KLambda to Lua source** that
 LuaJIT then trace-compiles to machine code.
 
-It targets **Shen 41.1** (via the KLambda in `ShenOSKernel-41.1/klambda`).
-Earlier versions were certified against the Shen 22.4 kernel test suite.
+It targets **Shen 41.1** (via the KLambda in `ShenOSKernel-41.1/klambda`) and
+passes the official 41.1 kernel test suite (134/134). Earlier versions were
+certified against the Shen 22.4 kernel test suite.
 
 ## Why a compiler (not an interpreter)
 
@@ -29,17 +30,57 @@ not a tree-walker:
 
 | File | Lines | Role |
 |------|------:|------|
-| `runtime.lua`  | 213 | data representation, symbol interning, the KLambda reader |
-| `compiler.lua` | 365 | KLambda → Lua source compiler (statement-based codegen) |
-| `prims.lua`    | 325 | runtime env: the primitive set, apply/curry machinery, loader |
-| `boot.lua`     |  80 | wires up streams, platform globals, loads the 41.1 kernel `.kl` files, runs `shen.initialise` |
+| `runtime.lua`  | 225 | data representation, symbol interning, the KLambda reader |
+| `compiler.lua` | 825 | KLambda → Lua source compiler (statement-based codegen) |
+| `prims.lua`    | 719 | runtime env: the primitive set, apply/curry machinery, native overrides, loader |
+| `boot.lua`     | 112 | wires up streams, platform globals, loads the 41.1 kernel `.kl` files, runs `shen.initialise` |
 
 Data representation (chosen so hot paths stay trace-JIT-friendly):
 
 * numbers → Lua numbers; strings → Lua strings; KL `true`/`false` → Lua booleans
 * symbols → interned tables (identity `==`); `()` → a unique `NIL`
-* cons → `{h, t}` with a `Cons` metatable; vectors (absvector) → `{n=size, [0..n-1]}`
+* cons → `{h, t}` with a `Cons` metatable; vectors (absvector) → a pure-array table
+  with the metatable `Vmt` (`[1]` = size, KL element `i` at `[i+2]`, no hash part —
+  this keeps the size-2 prolog variables off Lua's hash-part allocation path)
 * functions → Lua functions, arity tracked in a weak table; exceptions → tagged tables
+
+### Performance work
+
+The headline: **the Prolog engine and typechecker run on a native soa32
+substrate** that replaces the compiled-KL CPS execution model entirely —
+designed around what LuaJIT's tracing JIT rewards:
+
+* **`prolog_engine.lua` — the soa32 substrate.** Terms are plain Lua numbers,
+  range-tagged (atom < 2²⁴ ≤ var < 2²⁵ ≤ cons) over `int32_t` FFI arrays; tag
+  tests are `<` compares, payloads are subtractions, **zero bit ops and zero
+  64-bit cdata** (int64 tag-packing measured 2.2× slower — see
+  `bench/wam_poc_v4.lua`). Iterative explicit-stack unification with batch
+  trail unwind; **defunctionalized continuations** (integer handles into an
+  int32 capture buffer — no freeze closures); choice points live in Lua stack
+  frames as plain-local marks; cut is a 1:1 transcription of the kernel's
+  lock algorithm.
+* **`prolog_compile.lua` — the clause compiler retarget.** The kernel's own
+  `shen.compile-prolog` still runs (its output is the spec); its emitted
+  define-form is *translated* into direct-coded Lua against the substrate ABI,
+  lazily on first dispatch. Covers `defprolog`, `prolog?` queries, datatype
+  rules, and asserta/retract through one seam, with the legacy CPS engine
+  dual-registered as the per-predicate fallback.
+* **`typecheck_native.lua` — the t-star driver.** The ~16 CPS driver functions
+  are machine-translated from `klambda/t-star.kl` through the same translator
+  (they share the goal vocabulary); the four that escape it (entry,
+  signature lookup, datatype search, spy display) are hand-ported. The 162
+  kernel signatures are harvested from `init.kl` into a native table. The
+  native driver performs the **byte-identical inference sequence** to the
+  legacy engine (431,741 inferences on the reference typecheck, exactly).
+* **Legacy native overrides** (`prims.lua`): native Prolog deref core with
+  pvar pooling, native stdlib (`element?`, `assoc`, `map`, …), and
+  arithmetic/`=` inlining (~97M dispatches eliminated) — these still serve
+  the `SHEN_PROLOG_ENGINE=legacy` fallback path.
+
+`SHEN_PROLOG_ENGINE=legacy` disables the engine; `SHEN_TYPECHECK_NATIVE=off`
+and `SHEN_PROLOG_NATIVE=off` disable the typechecker/query routing
+individually. Correctness never depends on native coverage: anything the
+translator refuses simply keeps its legacy definition.
 
 ## Requirements
 
@@ -72,26 +113,38 @@ print(require("runtime").to_str(P.F["square"](9)))   -- 81
 
 ## Certification / Testing
 
-See [41.1-STATUS.md](41.1-STATUS.md) for the current state of the 41.1 port,
-including what works, what is broken, and how to run the official test suite.
-
 The port loads and initialises the full 41.1 kernel (including `stlib` and the new
-extensions). However, the test harness does not yet run successfully (see the status
-doc for details and error symptoms).
+extensions) and **passes the official 41.1 kernel test suite, 134/134**:
 
-The old `cert-22.4-result.txt` is historical only.
+```sh
+luajit run-41.1-tests.lua    # => "passed ... 134 / failed ... 0 / pass rate ... 100%"
+```
+
+See [41.1-STATUS.md](41.1-STATUS.md) for more detail. The old
+`cert-22.4-result.txt` is historical only.
 
 ## Benchmarks
 
-See `BENCHMARKS.md` for the historical (Shen 22.4) report and LuaJIT trace analysis.
-The numbers below are from that era; re-benchmarking against a current `shen-c` built
-for 41.1 would be the fair comparison.
+Current numbers on Apple Silicon (LuaJIT 2.1, best/min of several runs — the host
+thermally throttles ~2× run-to-run, so timings are min-of-N and allocation is the
+deterministic metric):
 
-Headline versus the `shen-c` 0.2.3 interpreter on the **same machine** (22.4 baseline):
+| workload | legacy engine | **native soa32 engine** |
+|----------|--------------:|------------------------:|
+| Cold startup (compile + load the full 41.1 kernel) | ~0.71 s | ~0.71 s |
+| **Full 41.1 kernel test suite** (134/134) | ~16 s | **~11 s** |
+| Reference typecheck (431,741 inferences) | ~0.54 s | **~0.061 s (8.9×)** |
+| Typechecker allocation | ~344–371 B/inf | **~24 B/inf (−93%)** |
+| Einstein's riddle (Prolog backtracking) | ~0.044 s / solve | **~0.002 s / solve (22×)** |
+| `fib(30)` / `fib(32)` (compute-bound recursion) | ~0.015 s / ~0.041 s | (same — not Prolog) |
 
-* **fib** (compute-bound recursion): **66–79× faster**.
-* **n-queens** (functional, allocation-heavy): **~2.5× faster**; shen-c segfaults at
-  board 6 (no TCO), shen-lua completes it.
-* **Einstein's riddle** (Prolog backtracking, CPS + heavy allocation): **~1.5× slower** —
-  the one workload class where a low-constant-factor C interpreter wins. Honest analysis
-  in `BENCHMARKS.md`.
+The native engine closes most of the gap to the fastest port — **shen-cl** on
+SBCL (suite in 4–8 s) — by removing the allocation-bound CPS execution model
+(freeze-closures + currying) rather than fighting it: terms became plain
+numbers over flat int32 storage, and continuations became integers. See
+`PERF-HANDOFF.md` and `BENCHMARKS.md` for the measurement history that led
+here (six disproven levers, the WAM PoC, and the soa32 verdict).
+
+The historical Shen 22.4 head-to-head versus the `shen-c` 0.2.3 interpreter (same
+machine) is preserved in `BENCHMARKS.md`: fib 66–79× faster, n-queens ~2.5× faster,
+Einstein's riddle ~1.5× slower.

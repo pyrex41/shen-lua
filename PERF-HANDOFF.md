@@ -1,5 +1,82 @@
 # Typechecker performance — execution handoff
 
+> **SUPERSEDED (2026-06-09, branch `perf/native-engine`).** The incremental
+> program below ended with a full architectural replacement: the typechecker
+> and Prolog engine now run on a **native soa32 substrate**
+> (`prolog_engine.lua` + `prolog_compile.lua` + `typecheck_native.lua`),
+> validated by the WAM PoC (`bench/wam_poc_v4.lua`). Results vs the legacy
+> CPS engine, same session: reference typecheck **0.061s vs 0.543s (8.9×)**,
+> allocation **24 vs 344 B/inf (−93%)**, einstein **22× faster**, inference
+> sequence **byte-identical (431,741)**, suite 134/134 + golden corpus 27/27
+> in both engine modes. `SHEN_PROLOG_ENGINE=legacy` keeps everything below
+> alive as the fallback path. The analysis below remains the measurement
+> record that motivated and de-risked the rewrite.
+
+## Handoff: state after the native engine (start here)
+
+**Architecture.** Three modules, installed from `boot.lua` at the end of
+`load_kernel` (before `initialise`, so the declare/destroy wrappers see all
+kernel signatures):
+
+- `prolog_engine.lua` — soa32 substrate. Terms = plain Lua numbers
+  range-tagged (atom < 2²⁴ ≤ var < 2²⁵ ≤ cons) over `int32_t` FFI arrays;
+  iterative unify (`lzy=`/occurs-checked `lzy=!`) with batch trail unwind;
+  continuations = integer handles + int32 capture buffer (`newcont0..16`,
+  varargs fallback, cold spill table for non-int captures); cut = two scalars
+  transcribed from `prolog.kl:80-92`; `import`/`materialize` boundary
+  (materialize emits cached legacy-format pvar absvectors so printing/`=`/
+  guards behave identically); `query_begin`/`query_end` save/restore for
+  nested queries. **Never** int64 tag-packing (measured 2.2× slower).
+- `prolog_compile.lua` — translates the legacy `shen.compile-prolog` output
+  define-form into direct-coded Lua (clause order/modes/cut inherited from
+  the kernel compiler, not re-derived). **Lazy** via `NativePred.__index` —
+  eager translation made the suite slower. Guard expressions lift to KL
+  defuns called with materialized args. `prolog?` queries route native when
+  every body predicate translates. Dual registration: legacy CPS predicate
+  always registered as fallback.
+- `typecheck_native.lua` — the ~16 t-star CPS drivers are machine-translated
+  from `klambda/t-star.kl` at install (same goal vocabulary). Hand-ports:
+  typecheck entry, lookupsig/sigf (162 kernel sigs harvested from `init.kl`'s
+  uniform 5-lambda/stpart/`is!` shape + `declare`/`destroy` wrappers),
+  search-user-datatypes (`NativePred[TypeName]` dispatch), `shen.show`.
+  Whole-query fallback: untranslatable datatype predicate raises the
+  `NATIVE_MISS` sentinel → state restores → query reruns on legacy.
+
+**Flags.** `SHEN_PROLOG_ENGINE=legacy` (whole engine off),
+`SHEN_TYPECHECK_NATIVE=off`, `SHEN_PROLOG_NATIVE=off` (query routing off),
+`SHEN_PROLOG_DEBUG=1` (log translation refusals).
+
+**Gates (rerun after any change).** `luajit run-41.1-tests.lua` 134/134 in
+both engine modes; `luajit bench/golden_typecheck.lua compare` 27/27 in both;
+`luajit test/engine_spec.lua` 70/70; infs == 431741 exactly on the reference
+typecheck (`/  the y-combinator bench`) — the translated drivers must keep
+the byte-identical inference sequence. Wall time is thermally unreliable
+(~2× run-to-run) — min-of-N serial, alloc is the deterministic metric.
+
+**Traps for the next person.**
+1. `shen.maxinfexceeded?` THROWS past `*maxinferences*` (cumulative global
+   `*infs*`). Repeated in-process typecheck benches must reset
+   `GLOBALS["shen.*infs*"] = 0` per run.
+2. Engine cell reclaim at choice points is unused in real execution (compiled
+   clauses self-unwind via unify/bind1); cells reset at `query_end` only.
+   `E.popvar` is the translated `(shen.gc B E)` LIFO ticket pop.
+3. `track`/`step` wrap `F[name]` — they observe the legacy fallback path,
+   not native dispatch (documented degrade). `*spy*` forces legacy.
+
+**Remaining headroom (next levers, in expected-value order).**
+1. The suite gap to shen-cl (4–8 s vs ~11–13 s) is now mostly *outside* the
+   typechecker: kernel load/compile (~0.7 s), the reader/macro pipeline, and
+   general compiled-KL execution (F-table dispatch + `GLOBALS` hash reads).
+   Profile the suite with `bench/callfreq.lua` to re-rank.
+2. Typecheck residual 24 B/inf = boundary materialization + guard calls —
+   small; not worth chasing before (1).
+3. The legacy-path optimizations (pvar pool, native stdlib, arith inlining)
+   still serve the fallback; do not remove.
+
+---
+
+# Historical record (superseded by the native engine)
+
 Goal: close the gap to the Go/Rust ports (~7–10 s suite) from where we are now.
 
 ## Where we are (branch `perf/typechecker-allocation`, 134/134)
