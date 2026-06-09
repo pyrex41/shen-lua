@@ -143,6 +143,12 @@ local function newvar()
 end
 M.newvar = newvar
 
+-- LIFO-pop the most recent var: the translated (shen.gc B E) reclaim, paired
+-- 1:1 with a preceding shen.newpv by the stpart emission structure
+function M.popvar()
+  var_top = var_top - 1
+end
+
 local function mkcons(carv, cdrv)
   local p = cell_top
   if p + 2 > ccap then cells, ccap = grown(cells, ccap, p + 2) end
@@ -260,6 +266,52 @@ function M.newcont8(fn, a, a2, a3, a4, a5, a6, a7, a8)
   capbuf[b] = a; capbuf[b+1] = a2; capbuf[b+2] = a3; capbuf[b+3] = a4
   capbuf[b+4] = a5; capbuf[b+5] = a6; capbuf[b+6] = a7; capbuf[b+7] = a8
   cap_top = b + 8
+  local h = ch_top + 1; ch_top = h
+  contFn[h] = fn; contBase[h] = b
+  return h
+end
+
+-- newcont9..newcont16 (generated): wide conjunctions in compiled clauses can
+-- capture more than 8 live variables. Same monomorphic shape as 0-8.
+for k = 9, 16 do
+  local args, stores = {}, {}
+  for i = 1, k do
+    args[i] = "x" .. i
+    stores[i] = "capbuf[b+" .. (i - 1) .. "] = x" .. i
+  end
+  local src = ([[
+local ckroom, state = ...
+return function(fn, %s)
+  ckroom(%d)
+  local capbuf, b = state.capbuf(), state.cap_top()
+  %s
+  return state.push(fn, b, %d)
+end]]):format(table.concat(args, ", "), k, table.concat(stores, "; "), k)
+  -- state accessors keep the generated code valid across arena growth
+  local mk = assert(loadstring(src, "@newcont" .. k))
+  M["newcont" .. k] = mk(ckroom, {
+    capbuf = function() return capbuf end,
+    cap_top = function() return cap_top end,
+    push = function(fn, b, n)
+      cap_top = b + n
+      local h = ch_top + 1; ch_top = h
+      contFn[h] = fn; contBase[h] = b
+      return h
+    end,
+  })
+end
+
+-- varargs fallback for very wide captures (>16): trace-unfriendly but cold —
+-- only long conjunctions with many clause variables reach it, once per
+-- clause-body entry
+function M.newcontV(fn, ...)
+  local k = select("#", ...)
+  ckroom(k)
+  local b = cap_top
+  for i = 1, k do
+    capbuf[b + i - 1] = select(i, ...)
+  end
+  cap_top = b + k
   local h = ch_top + 1; ch_top = h
   contFn[h] = fn; contBase[h] = b
   return h
