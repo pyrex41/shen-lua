@@ -204,6 +204,9 @@ local function install_handports()
   -- shen.search-user-datatypes (t-star.kl:60): walk the (TypeName . fn)
   -- assoc list in order, dispatching NativePred[TypeName] with the goal ABI
   -- ((fn goal) assumptions) vec lock count cont -> fn(goal, assum, n, cont).
+  -- NP[name] lazily translates on first dispatch; a predicate the translator
+  -- refuses raises NATIVE_MISS, which the typecheck entry catches to retry
+  -- the whole query on the legacy engine (whole-query ABI fallback).
   local sud
   sud = function(goal_t, assum_t, dts_t, n, cont)
     if not E.lock_is_open() then return false end
@@ -215,9 +218,7 @@ local function install_handports()
       local nm = E.atomval(E.lazyderef(E.car(entry)))
       local fn = (getmt(nm) == Symbol) and NP[nm.name] or nil
       if fn == nil then
-        -- untranslated datatype predicate mid-query: cannot continue natively
-        error("native typecheck: datatype predicate not native: " ..
-              tostring(nm), 0)
+        error(M.NATIVE_MISS, 0)
       end
       E.incinfs()
       r = fn(goal_t, assum_t, n, cont)
@@ -242,27 +243,11 @@ local function install_handports()
   end
 end
 
--- ---------------------------------------------------------------------------
--- coverage check: can this typecheck run natively right now?
--- ---------------------------------------------------------------------------
-local datatypes_ok_cache, datatypes_cache_key = false, nil
-local function datatypes_all_native()
-  local dts = P.GLOBALS["shen.*datatypes*"]
-  if dts == datatypes_cache_key then return datatypes_ok_cache end
-  local l = dts
-  local ok = true
-  while getmt(l) == Cons do
-    local entry = l[1]
-    if getmt(entry) == Cons and getmt(entry[1]) == Symbol then
-      if not NP[entry[1].name] then ok = false; break end
-    else
-      ok = false; break
-    end
-    l = l[2]
-  end
-  datatypes_cache_key, datatypes_ok_cache = dts, ok
-  return ok
-end
+-- sentinel raised by sud when a datatype predicate cannot be translated;
+-- caught by the dispatcher to retry the whole query on the legacy engine
+M.NATIVE_MISS = setmetatable({}, { __tostring = function()
+  return "native typecheck: untranslatable datatype predicate"
+end })
 
 -- ---------------------------------------------------------------------------
 -- the typecheck entry (t-star.kl:1)
@@ -373,13 +358,17 @@ function M.install(Pmod, Emod)
     P.FA[F["destroy"]] = 1
   end
 
-  -- 4) typecheck override with whole-query fallback. Native requires: all
-  --    drivers translated, and every registered datatype predicate native.
+  -- 4) typecheck override with whole-query fallback: run native; if the
+  --    search hits an untranslatable datatype predicate (NATIVE_MISS), the
+  --    engine state is already restored by native_typecheck's pcall path —
+  --    rerun the whole query on the legacy engine.
   local orig_typecheck_ref = nil  -- resolved lazily: t-star loads before us
   local function typecheck_dispatch(expr, type_)
-    if n_fail == 0 and M.sigs_complete and datatypes_all_native()
+    if n_fail == 0 and M.sigs_complete
        and P.GLOBALS["shen.*spy*"] ~= true then
-      return native_typecheck(expr, type_)
+      local ok, r = pcall(native_typecheck, expr, type_)
+      if ok then return r end
+      if r ~= M.NATIVE_MISS then error(r, 0) end
     end
     return orig_typecheck_ref(expr, type_)
   end

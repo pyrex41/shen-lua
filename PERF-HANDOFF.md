@@ -1,5 +1,17 @@
 # Typechecker performance — execution handoff
 
+> **SUPERSEDED (2026-06-09, branch `perf/native-engine`).** The incremental
+> program below ended with a full architectural replacement: the typechecker
+> and Prolog engine now run on a **native soa32 substrate**
+> (`prolog_engine.lua` + `prolog_compile.lua` + `typecheck_native.lua`),
+> validated by the WAM PoC (`bench/wam_poc_v4.lua`). Results vs the legacy
+> CPS engine, same session: reference typecheck **0.061s vs 0.543s (8.9×)**,
+> allocation **24 vs 344 B/inf (−93%)**, einstein **22× faster**, inference
+> sequence **byte-identical (431,741)**, suite 134/134 + golden corpus 27/27
+> in both engine modes. `SHEN_PROLOG_ENGINE=legacy` keeps everything below
+> alive as the fallback path. The analysis below remains the measurement
+> record that motivated and de-risked the rewrite.
+
 Goal: close the gap to the Go/Rust ports (~7–10 s suite) from where we are now.
 
 ## Where we are (branch `perf/typechecker-allocation`, 134/134)
