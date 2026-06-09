@@ -402,6 +402,13 @@ end
 -- ------------------------------------------------------------------
 C.KDATA = {}
 
+-- When set, literal hoisting goes through the self-contained MKTREE
+-- blueprint instead of the KDATA side table. Chunks compiled this way are
+-- relocatable — no baked-in KDATA indices — which is what boot.lua's fasl
+-- recorder needs to make cached user-program chunks replayable in sessions
+-- whose KDATA population differs (e.g. nested loads, skipped typechecks).
+C.NO_KDATA = false
+
 -- Original spine-only const hoisting (kept for backward behavior on explicit (cons ...) forms).
 local function const_count(form, env)
   local t = type(form)
@@ -427,6 +434,7 @@ local function const_build(form)
   return form
 end
 local function try_const(form, env)
+  if C.NO_KDATA then return nil end
   if not (is_cons(form) and is_symbol(car(form)) and car(form).name=="cons") then return nil end
   local n = const_count(form, env)
   if n and n >= 24 then
@@ -480,6 +488,7 @@ local function lit_build(form)
   return cons(lit_build(rest[1]), lit_build(rest[2][1]))
 end
 local function try_lit_const(form, env)
+  if C.NO_KDATA then return nil end
   if not is_cons(form) then return nil end
   if not is_lit(form, env) then return nil end
   local n = lit_count(form)

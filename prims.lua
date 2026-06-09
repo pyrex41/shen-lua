@@ -734,8 +734,25 @@ local function load_chunk(code, chunkname)
 end
 P.load_chunk = load_chunk
 
+-- P.FASL_REC: active fasl recording context (boot.lua's user-program cache).
+-- While a (load ...) is being recorded, every TOP-LEVEL compile (a form the
+-- kernel hands to eval-kl) is dumped into the record; compiles triggered
+-- WHILE one of those chunks executes (nested eval-kl, e.g. compile-prolog
+-- inside process-datatype) are not recorded — replaying the outer chunk
+-- regenerates them naturally.
 local function compile_and_load(luasrc, chunkname)
-  return load_chunk(luasrc, chunkname)()
+  local fn = load_chunk(luasrc, chunkname)
+  local rec = P.FASL_REC
+  if rec and not rec.in_chunk then
+    rec.n = rec.n + 1
+    rec[rec.n] = { k = "c", name = chunkname, dump = string.dump(fn) }
+    rec.in_chunk = true
+    local ok, res = pcall(fn)
+    rec.in_chunk = false
+    if not ok then error(res, 0) end
+    return res
+  end
+  return fn()
 end
 P.compile_and_load = compile_and_load
 

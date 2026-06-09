@@ -253,11 +253,23 @@ local function install_native_overrides()
   end
 end
 
+-- memoized: the fasl layer reuses the codegen key even when the kernel
+-- cache is disabled (first call reads ~850KB and hashes it, ~ms).
+local KERNEL_KEY
+local function kernel_key()
+  local k, sources = KERNEL_KEY, nil
+  if not k then
+    k, sources = cache_key()
+    KERNEL_KEY = k
+  end
+  return k, sources
+end
+
 local function load_kernel(verbose)
   local path = cache_path()
   local key, sources
   if path then
-    key, sources = cache_key()
+    key, sources = kernel_key()
     local cached = read_cache(path, key)
     if cached then
       -- Load (don't run) every dump first, so a corrupt cache falls back to
@@ -320,6 +332,357 @@ local function load_kernel(verbose)
   install_native_overrides()
 end
 
+-- ---- user-program fasl cache ----------------------------------------------
+-- (load "x.shen") is dominated by the reader, macroexpansion, and — with tc
+-- on — typechecking, all deterministic given the file content and the
+-- session's load history. The persistent effects of a load are exactly
+-- (load.kl): the top-level eval-kl chunks (eval-and-print / work-through),
+-- the (declare Name Type) calls from shen.assumetypes on the tc path, and
+-- the compile-time side state those compiles created (C.ARITY, C.KDATA,
+-- shen.*gensym*). We record those during a load and replay them on a key
+-- hit, skipping reader+macro+typecheck entirely — SBCL fasl semantics: "it
+-- typechecked when compiled".
+--
+-- Key = codegen key + file content + tc flag + a ROLLING hash of all
+-- previously loaded files (editing file A invalidates everything loaded
+-- after it, make-style) + the names of live datatypes and macros (catches
+-- most REPL-defined state). Replay requires #C.KDATA to equal the recorded
+-- base (compiled bytecode hard-codes KDATA indices); a mismatch is a miss,
+-- never an error.
+--
+-- Known fasl-style degrades: a replayed load does not echo per-form values/
+-- types or the "run time"/"typechecked in N inferences" banners, and
+-- (destroy ...) at the REPL between loads is not in the key.
+-- SHEN_FASL=off disables; SHEN_FASL_DIR overrides ~/.cache/shen-lua-fasl;
+-- SHEN_FASL_DEBUG=1 logs hits/misses to stderr.
+local FASL_FORMAT = "SHENFASL2"
+local FASL_STACK = {}
+local FASL_ROLL = 2166136261
+local FASL_DEBUG = os.getenv("SHEN_FASL_DEBUG") == "1"
+
+local function fasl_dir()
+  local p = os.getenv("SHEN_FASL")
+  if p == "off" or p == "0" then return nil end
+  local d = os.getenv("SHEN_FASL_DIR")
+  if d and d ~= "" then return d end
+  local home = os.getenv("HOME")
+  if not home or home == "" then return nil end
+  return home .. "/.cache/shen-lua-fasl"
+end
+
+local function fasl_log(msg)
+  if FASL_DEBUG then io.stderr:write("[fasl] " .. msg .. "\n") end
+end
+
+-- names of a KL list of symbols or (symbol . x) pairs (datatypes, *macros*)
+local function kl_names(l)
+  local parts = {}
+  while R.is_cons(l) do
+    local e = l[1]
+    if R.is_symbol(e) then parts[#parts+1] = e.name
+    elseif R.is_cons(e) and R.is_symbol(e[1]) then parts[#parts+1] = e[1].name
+    else parts[#parts+1] = "?" end
+    l = l[2]
+  end
+  return table.concat(parts, ",")
+end
+
+local function fasl_key(content)
+  local env = (P.GLOBALS["shen.*tc*"] and "tc" or "raw")
+    .. "|" .. (os.getenv("SHEN_PROLOG_ENGINE") or "native")
+    .. "|" .. bit.tohex(FASL_ROLL)
+    .. "|" .. kl_names(P.GLOBALS["shen.*datatypes*"])
+    .. "|" .. kl_names(P.GLOBALS["*macros*"])
+  return bit.tohex(fnv1a(content, fnv1a(env, fnv1a((kernel_key())))))
+end
+
+-- format: SHENFASL1\n nrec\n
+--   { C\n name\n #dump\n dump          top-level eval-kl chunk
+--   | D\n <ser name><ser type>          (declare ...) from assumetypes
+--   | M\n <ser name>                    shen.record-macro (fn rebuilt by name)
+--   | P\n <ser x><ser ptr><ser y>       (put ... *property-vector*)
+--   | G\n <ser name><ser val> }*        (set ...) outside any chunk
+--   narity\n {ar SP name\n}*  kbase\n nkdata\n entries  gensym\n
+local function fasl_write(path, rec, arity0)
+  if rec.uncacheable then error(rec.uncacheable) end
+  local parts = { FASL_FORMAT, "\n", tostring(rec.n), "\n" }
+  for i = 1, rec.n do
+    local r = rec[i]
+    if r.k == "c" then
+      parts[#parts+1] = "C\n" .. r.name .. "\n" .. #r.dump .. "\n" .. r.dump
+    elseif r.k == "d" then
+      parts[#parts+1] = "D\n"
+      kdata_ser(r.name, parts)
+      kdata_ser(r.typ, parts)
+    elseif r.k == "m" then
+      parts[#parts+1] = "M\n"
+      kdata_ser(r.name, parts)
+    elseif r.k == "lf" then
+      parts[#parts+1] = "L\n"
+      kdata_ser(r.name, parts)
+    elseif r.k == "dt" then
+      parts[#parts+1] = "T\n"
+      kdata_ser(r.name, parts)
+      kdata_ser(r.rules, parts)
+    elseif r.k == "sy" then
+      parts[#parts+1] = "Z\n"
+      kdata_ser(r.syns, parts)
+    elseif r.k == "p" then
+      parts[#parts+1] = "P\n"
+      kdata_ser(r.x, parts)
+      kdata_ser(r.pointer, parts)
+      kdata_ser(r.y, parts)
+    else -- "g"
+      parts[#parts+1] = "G\n"
+      kdata_ser(r.name, parts)
+      kdata_ser(r.val, parts)
+    end
+  end
+  local delta = {}
+  for name, ar in pairs(C.ARITY) do
+    if arity0[name] ~= ar then delta[#delta+1] = ar .. " " .. name end
+  end
+  parts[#parts+1] = #delta .. "\n"
+  for _, d in ipairs(delta) do parts[#parts+1] = d .. "\n" end
+  local g = P.GLOBALS["shen.*gensym*"]
+  parts[#parts+1] = tostring(type(g) == "number" and g or 0) .. "\n"
+  local tmp = path .. ".tmp"
+  local fh = io.open(tmp, "wb")
+  if not fh then return end
+  fh:write(table.concat(parts)); fh:close()
+  os.remove(path)
+  os.rename(tmp, path)
+end
+
+local function fasl_read(path)
+  local data = read_file(path)
+  if not data then return nil end
+  local pos = 1
+  local function line()
+    local e = data:find("\n", pos, true)
+    if not e then return nil end
+    local s = data:sub(pos, e - 1); pos = e + 1
+    return s
+  end
+  if line() ~= FASL_FORMAT then return nil end
+  local n = tonumber(line() or ""); if not n then return nil end
+  local function de_n(count)
+    local ok, vals = pcall(function()
+      local out = {}
+      for j = 1, count do out[j], pos = kdata_de(data, pos) end
+      return out
+    end)
+    if ok then return vals end
+    return nil
+  end
+  local recs = {}
+  for i = 1, n do
+    local k = line()
+    if k == "C" then
+      local nm = line()
+      local len = tonumber(line() or "")
+      if not nm or not len or pos + len - 1 > #data then return nil end
+      recs[i] = { k = "c", name = nm, dump = data:sub(pos, pos + len - 1) }
+      pos = pos + len
+    elseif k == "D" then
+      local v = de_n(2); if not v then return nil end
+      recs[i] = { k = "d", name = v[1], typ = v[2] }
+    elseif k == "M" then
+      local v = de_n(1); if not v then return nil end
+      recs[i] = { k = "m", name = v[1] }
+    elseif k == "L" then
+      local v = de_n(1); if not v then return nil end
+      recs[i] = { k = "lf", name = v[1] }
+    elseif k == "T" then
+      local v = de_n(2); if not v then return nil end
+      recs[i] = { k = "dt", name = v[1], rules = v[2] }
+    elseif k == "Z" then
+      local v = de_n(1); if not v then return nil end
+      recs[i] = { k = "sy", syns = v[1] }
+    elseif k == "P" then
+      local v = de_n(3); if not v then return nil end
+      recs[i] = { k = "p", x = v[1], pointer = v[2], y = v[3] }
+    elseif k == "G" then
+      local v = de_n(2); if not v then return nil end
+      recs[i] = { k = "g", name = v[1], val = v[2] }
+    else return nil end
+  end
+  local na = tonumber(line() or ""); if not na then return nil end
+  local arity = {}
+  for i = 1, na do
+    local ln = line(); if not ln then return nil end
+    local ar, name = ln:match("^(%-?%d+) (.*)$")
+    if not ar then return nil end
+    arity[name] = tonumber(ar)
+  end
+  local gensym = tonumber(line() or ""); if not gensym then return nil end
+  return { recs = recs, arity = arity, gensym = gensym }
+end
+
+local function fasl_replay(cached)
+  -- Recorded chunks are relocatable (compiled under C.NO_KDATA — literals
+  -- ride inside the chunk via MKTREE/MKLIST, never the KDATA side table),
+  -- so replay has no positional coupling to this session's compile state.
+  for name, ar in pairs(cached.arity) do C.ARITY[name] = ar end
+  for _, r in ipairs(cached.recs) do
+    if r.k == "c" then
+      P.load_chunk(r.dump, r.name)()
+    elseif r.k == "d" then
+      -- through the live F["declare"] so engine sig-table wrappers see it
+      P.F["declare"](r.name, r.typ)
+    elseif r.k == "m" then
+      -- the macro's defun chunk replayed above; rebuild the (name . fn) pair
+      local fn = P.F[r.name.name]
+      if not fn then error("fasl: macro function missing: " .. r.name.name) end
+      P.F["shen.record-macro"](r.name, fn)
+    elseif r.k == "lf" then
+      -- shen.lambda-entry returns the complete (name . curried-fn) entry
+      -- (or () for arity 0/-1); the recorded put stored its tl. Rebuild and
+      -- put the same shape. The arity property it reads was applied by the
+      -- preceding "p" record (stream order).
+      local entry = P.F["shen.lambda-entry"](r.name)
+      local val = R.is_cons(entry) and entry[2] or entry
+      P.F["put"](r.name, R.intern("shen.lambda-form"), val,
+                 P.GLOBALS["*property-vector*"])
+    elseif r.k == "dt" then
+      P.F["shen.process-datatype"](r.name, r.rules)
+    elseif r.k == "sy" then
+      P.F["shen.process-synonyms"](r.syns)
+    elseif r.k == "p" then
+      P.F["put"](r.x, r.pointer, r.y, P.GLOBALS["*property-vector*"])
+    else -- "g"
+      P.F["set"](r.name, r.val)
+    end
+  end
+  -- Fast-forward the gensym counter past every name the recording consumed,
+  -- so post-replay gensyms can't collide with names baked into the chunks.
+  local g = P.GLOBALS["shen.*gensym*"]
+  if type(g) == "number" and cached.gensym > g then
+    P.GLOBALS["shen.*gensym*"] = cached.gensym
+  end
+end
+
+local function install_fasl()
+  local dir = fasl_dir()
+  if not dir then return end
+  os.execute("mkdir -p '" .. dir .. "'")
+  local F = P.F
+
+  -- Persistent load effects that happen OUTSIDE an eval-kl chunk are all
+  -- funneled through four kernel entry points; wrap each. The in_chunk dance
+  -- (flag set while the original runs) makes the wrappers compose: declare's
+  -- internal put, record-macro's internal set, etc. are suppressed because
+  -- replaying the outer record reproduces them. Effects made by chunk
+  -- EXECUTION are never recorded — replaying the chunk reproduces those.
+  --
+  --   declare           — shen.assumetypes on the tc load path
+  --   shen.record-macro — defmacro processing runs at MACROEXPANSION time
+  --                       (macros.kl shen.process-def); the macro fn value
+  --                       can't serialize, so record the name and rebuild
+  --                       the pair from F[name] on replay
+  --   put               — expansion/typecheck-time property-vector writes
+  --   set               — expansion-time global writes (process-datatype's
+  --                       *datatypes*, process-synonyms' *synonyms*, ...)
+  local function wrap_recorded(fname, mk)
+    local orig = F[fname]
+    F[fname] = function(...)
+      local rec = FASL_STACK[#FASL_STACK]
+      if rec and not rec.in_chunk then
+        local r = mk(rec, ...)
+        if r then
+          rec.n = rec.n + 1
+          rec[rec.n] = r
+        end
+        rec.in_chunk = true
+        local ok, res = pcall(orig, ...)
+        rec.in_chunk = false
+        if not ok then error(res, 0) end
+        return res
+      end
+      return orig(...)
+    end
+  end
+
+  wrap_recorded("declare", function(rec, name, typ)
+    return { k = "d", name = name, typ = typ }
+  end)
+  wrap_recorded("shen.record-macro", function(rec, name, fn)
+    return { k = "m", name = name }
+  end)
+  -- (datatype ...) and (synonyms ...) do ALL their work at macroexpansion
+  -- time (shen.macros dispatches to these; the expansion result is just the
+  -- type name). Their state — *datatypes*/*alldatatypes* assoc entries with
+  -- compiled-closure leaves — can't serialize, but their ARGUMENTS are pure
+  -- reader output. Record the call; replay re-executes it (recompiling the
+  -- datatype is much cheaper than the typechecking the replay skips). The
+  -- in_chunk dance suppresses all their internal chunks/sets/puts.
+  wrap_recorded("shen.process-datatype", function(rec, name, rules)
+    return { k = "dt", name = name, rules = rules }
+  end)
+  wrap_recorded("shen.process-synonyms", function(rec, syns)
+    return { k = "sy", syns = syns }
+  end)
+  wrap_recorded("put", function(rec, x, pointer, y, vector)
+    if vector ~= P.GLOBALS["*property-vector*"] then
+      rec.uncacheable = "put to a non-property vector"
+      return nil
+    end
+    if R.is_symbol(pointer) and pointer.name == "shen.lambda-form" then
+      -- the value is a freshly eval'd curried lambda (sys.kl
+      -- update-lambda-table) — not serializable; regenerated on replay
+      -- from the live defun via shen.lambda-entry. The arity put that
+      -- update-lambda-table does first is an ordinary "p" record, already
+      -- applied by the time this replays (stream order).
+      return { k = "lf", name = x }
+    end
+    return { k = "p", x = x, pointer = pointer, y = y }
+  end)
+  wrap_recorded("set", function(rec, name, val)
+    local nm = R.is_symbol(name) and name.name or tostring(name)
+    -- the gensym counter churns on every expansion-time gensym; the replay
+    -- fast-forward (max) covers it without hundreds of noise records
+    if nm == "shen.*gensym*" then return nil end
+    return { k = "g", name = name, val = val }
+  end)
+
+  local orig_load = F["load"]
+  F["load"] = function(fname)
+    if type(fname) ~= "string" then return orig_load(fname) end
+    local fh = io.open(fname, "rb")
+    if not fh then return orig_load(fname) end   -- let the kernel error
+    local content = fh:read("*a"); fh:close()
+    local key = fasl_key(content)
+    local path = dir .. "/" .. key .. ".fasl"
+    local cached = fasl_read(path)
+    if cached then
+      local ok, err = pcall(fasl_replay, cached)
+      if ok then
+        fasl_log("hit  " .. fname .. " " .. key)
+        FASL_ROLL = fnv1a(content, FASL_ROLL)
+        return R.intern("loaded")
+      end
+      os.remove(path)   -- stale beyond what the key caught: recompile next run
+      error(err, 0)
+    end
+    fasl_log("miss " .. fname .. " " .. key)
+    local rec = { n = 0, in_chunk = false }
+    local arity0 = {}
+    for k, v in pairs(C.ARITY) do arity0[k] = v end
+    FASL_STACK[#FASL_STACK + 1] = rec
+    P.FASL_REC = rec
+    C.NO_KDATA = true   -- recorded chunks must be relocatable
+    local ok, res = pcall(orig_load, fname)
+    FASL_STACK[#FASL_STACK] = nil
+    P.FASL_REC = FASL_STACK[#FASL_STACK]
+    C.NO_KDATA = P.FASL_REC ~= nil
+    if not ok then error(res, 0) end
+    local wok, werr = pcall(fasl_write, path, rec, arity0)
+    if not wok then fasl_log("uncacheable " .. fname .. ": " .. tostring(werr)) end
+    FASL_ROLL = fnv1a(content, FASL_ROLL)
+    return res
+  end
+end
+
 -- ---- initialise ----------------------------------------------------------
 local function initialise()
   -- (shen.initialise) sets up the environment, lambda-form tables, etc.
@@ -329,7 +692,10 @@ local function initialise()
   return fn()
 end
 
-P.load_kernel = load_kernel
+P.load_kernel = function(verbose)
+  load_kernel(verbose)
+  install_fasl()   -- after native overrides so the declare wrapper composes
+end
 P.initialise = initialise
 
 -- run a KL toplevel string (one or more forms) through eval

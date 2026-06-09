@@ -85,6 +85,33 @@ golden 27/27 both, engine_spec 70/70, infs == 431741, alloc min-of-N
 unchanged (85 B/inf bench floor; note single alloc runs vary 85–122 with
 thermal/trace noise — min-of-N only).
 
+**User-program fasl cache (2026-06-09, the "fasl trick").** `(load "x.shen")`
+records and replays, skipping reader + macroexpansion + typechecking on a hit
+— SBCL fasl semantics ("it typechecked when compiled"). Suite warm-vs-cold:
+**~10.7s → 4.2s; gap to shen-cl closed from ~5.5× to ~2.7×** (interleaved
+mins; shen-cl 1.56s). 42/42 files hit on the first warm run, 0 uncacheable.
+Cache: `~/.cache/shen-lua-fasl/<key>.fasl`, content-addressed; key = codegen
+key + file content + tc flag + engine mode + a ROLLING hash of prior loads
+(make-style invalidation) + live datatype/macro names. `SHEN_FASL=off`,
+`SHEN_FASL_DIR`, `SHEN_FASL_DEBUG=1`. Mechanism (boot.lua): a load's
+persistent effects are exactly (a) top-level eval-kl chunks, recorded via a
+hook in `compile_and_load` and replayed as dumped bytecode, and (b) FOUR
+out-of-chunk kernel entry points, each wrapped with an in_chunk "dance" so
+their internals aren't double-captured: `declare` (assumetypes), `put`
+(property vector; `shen.lambda-form` puts hold fresh closures → recorded by
+name, value regenerated on replay via `shen.lambda-entry` — its tl IS the
+entry, do NOT re-wrap in cons), `set` (expansion-time globals; gensym counter
+excluded, fast-forwarded via max at replay), `shen.record-macro` (defmacro
+runs at MACROEXPANSION time via shen.process-def; fn rebuilt from F[name]).
+`datatype`/`synonyms` do all their work at expansion time and their state
+holds closures — recorded as CALLS (`shen.process-datatype` args are pure
+reader output) and re-executed on replay. CRITICAL: recorded chunks compile
+under `C.NO_KDATA` (compiler.lua) so literals ride inside the chunk via
+MKTREE/MKLIST — KDATA's baked absolute indices made nested-load caches
+non-relocatable (first design: 40/42 misses on warm1 from base drift).
+Degrades (fasl-style, documented): replayed loads don't echo per-form
+values/types or run-time banners; REPL `destroy` between loads isn't keyed.
+
 **Eval/compile cache — measured DEAD (2026-06-09; don't re-open).** shen-rust
 won big caching runtime-closure compiles (1.2M recompiles over 655 bodies).
 shen-lua has no such pathology: `bench/evalstats.lua` over the full suite
@@ -100,11 +127,12 @@ last arg) blows Lua's 200-locals-per-function limit. The kernel never hits it
 Fix if it ever fires: reuse two alternating locals or route through MKLIST.
 
 **Remaining headroom (next levers, in expected-value order).**
-1. The suite gap to shen-cl is now mostly *outside* the typechecker:
-   the reader/macro pipeline and general compiled-KL execution (F-table
-   dispatch + `GLOBALS` hash reads). Profile the suite with
-   `luajit -jp=fl run-41.1-tests.lua` (leaf time, not just `bench/callfreq.lua`
-   call counts) to re-rank. (Kernel load/compile: done, see cache above.)
+1. The remaining warm gap to shen-cl (~2.7×: 4.2s vs 1.56s) is now pure
+   test-body EXECUTION — reader/macro/typecheck are skipped on warm runs, so
+   what's left is general compiled-KL execution + per-process LuaJIT trace
+   warmup. Profile with `luajit -jp=fl run-41.1-tests.lua` (leaf time, not
+   just `bench/callfreq.lua` call counts) to re-rank. (Kernel load: done.
+   Reader/macro/typecheck on repeated loads: done, see fasl above.)
 2. Self-tail-call → loop lowering in `cdefun` (shen-rust klcompile precedent:
    params reassign + `continue`). On LuaJIT, loops are the ideal trace anchor
    vs down-recursion tail calls, and it removes the F-table self-lookup.
