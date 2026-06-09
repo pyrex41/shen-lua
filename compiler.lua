@@ -817,8 +817,11 @@ function C.compile_top(form)
   if is_cons(form) and is_symbol(car(form)) and car(form).name == "defun" then
     return cdefun(form)
   else
-    -- a top-level expression: evaluate for side effects
-    return "local _ = " .. cexpr(form, {}) .. ";"
+    -- a top-level expression: evaluate for side effects. Wrapped in do..end
+    -- so a whole kernel file can be concatenated into ONE chunk (boot.lua's
+    -- bytecode cache) without accumulating `local _` slots toward Lua's
+    -- 200-locals-per-scope limit.
+    return "do local _ = " .. cexpr(form, {}) .. "; end"
   end
 end
 
