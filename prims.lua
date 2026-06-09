@@ -718,17 +718,24 @@ P.ENV = ENV
 local loadstring = loadstring or load
 local setfenv = setfenv
 
-local function compile_and_load(luasrc, chunkname)
+-- Load Lua source OR a string.dump'd binary chunk into ENV without running it.
+-- Used by compile_and_load and by the kernel bytecode cache (boot.lua).
+local function load_chunk(code, chunkname)
   local chunk, err
   if setfenv then
-    chunk, err = loadstring(luasrc, chunkname)
-    if not chunk then error("Lua load error in "..tostring(chunkname)..": "..tostring(err).."\n"..luasrc) end
+    chunk, err = loadstring(code, chunkname)
+    if not chunk then error("Lua load error in "..tostring(chunkname)..": "..tostring(err).."\n"..code) end
     setfenv(chunk, ENV)
   else
-    chunk, err = load(luasrc, chunkname, "t", ENV)
+    chunk, err = load(code, chunkname, nil, ENV)
     if not chunk then error("Lua load error: "..tostring(err)) end
   end
-  return chunk()
+  return chunk
+end
+P.load_chunk = load_chunk
+
+local function compile_and_load(luasrc, chunkname)
+  return load_chunk(luasrc, chunkname)()
 end
 P.compile_and_load = compile_and_load
 
