@@ -35,8 +35,10 @@ compatibility tier below). The first boot compiles the kernel (~1 s); after
 that the bytecode cache boots it in ~30 ms, and loaded programs are cached
 fasl-style, so everything is fast from the second run on. The examples are
 walked through in the [Examples](#examples) section and
-[`examples/README.md`](examples/README.md); new to Shen itself? Start at
-[shenlanguage.org](https://shenlanguage.org).
+[`examples/README.md`](examples/README.md); for an **executable, verifiable
+tour of the whole system** see [`demo/walkthrough.md`](demo/walkthrough.md)
+(every code block in it re-runs via `showboat verify`). New to Shen itself?
+Start at [shenlanguage.org](https://shenlanguage.org).
 
 ## Why a compiler (not an interpreter)
 
