@@ -1,5 +1,10 @@
 # shen-lua — a speed-focused LuaJIT port of the Shen kernel
 
+> Shen on LuaJIT: suite-certified, within ~1.5× of shen-cl on SBCL (measured
+> same-machine), embeds in any Lua host via a one-file ~6 MB bundle that boots
+> in ~70 ms, with bidirectional typed interop and fasl-style caching — and a
+> degraded-but-correct mode on plain Lua 5.1/5.4/5.5.
+
 `shen-lua` runs the [Shen](http://shenlanguage.org) language on **LuaJIT 2.1**.
 Shen programs compile down to **KLambda (Kλ)** — a small, untyped Lisp kernel of
 ~46 primitives — and a "port" of Shen consists of (a) implementing those
