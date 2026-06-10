@@ -22,6 +22,20 @@ local function find_kldir()
     "../shen-c/shen/src/kl",
     "../shen-c/klambda",
   }
+  -- 3. Relative to this module's own location, so requiring shen-lua from
+  --    another directory (LUA_PATH into a checkout, or a luarocks install)
+  --    works without chdir. For a luarocks install boot.lua lives at
+  --    <tree>/share/lua/5.1/boot.lua and copy_directories puts klambda at
+  --    <tree>/lib/luarocks/rocks-5.1/shen/<version>/klambda.
+  local src = debug.getinfo(1, "S").source
+  local here = src:match("^@(.*)[/\\][^/\\]*$")
+  if here then
+    candidates[#candidates+1] = here .. "/klambda"
+    local tree = here:match("^(.*)/share/lua/[%d.]+$")
+    if tree then
+      candidates[#candidates+1] = tree .. "/lib/luarocks/rocks-5.1/shen/scm-1/klambda"
+    end
+  end
   for _,c in ipairs(candidates) do
     local f = io.open(c .. "/toplevel.kl", "r")
     if f then f:close(); return c end
@@ -31,6 +45,7 @@ local function find_kldir()
   return "klambda"
 end
 local KLDIR = find_kldir() .. "/"
+P.KLDIR = KLDIR   -- resolved .kl directory (trailing /), for typecheck_native
 local FILES = {
   "toplevel","core","sys","dict","sequent","yacc","reader","prolog",
   "track","load","writer","macros","declarations","types","t-star","init",
@@ -187,9 +202,10 @@ local function write_cache(path, key, chunks, arity)
   os.rename(tmp, path)
 end
 
-local function read_cache(path, key)
-  local data = read_file(path)
-  if not data then return nil end
+-- Parse a write_cache blob. key == nil skips the key check (used for the
+-- embedded-kernel payload baked into a single-file bundle, where the build
+-- pins the blob and per-chunk load failures fall back to a full compile).
+local function parse_cache(data, key)
   local pos = 1
   local function line()
     local e = data:find("\n", pos, true)
@@ -197,7 +213,9 @@ local function read_cache(path, key)
     local s = data:sub(pos, e - 1); pos = e + 1
     return s
   end
-  if line() ~= CACHE_FORMAT or line() ~= key then return nil end
+  if line() ~= CACHE_FORMAT then return nil end
+  local k = line()
+  if key ~= nil and k ~= key then return nil end
   local n = tonumber(line() or ""); if not n then return nil end
   local chunks = {}
   for i = 1, n do
@@ -224,6 +242,12 @@ local function read_cache(path, key)
   end)
   if not kok then return nil end
   return { chunks = chunks, arity = arity, kdata = kdata }
+end
+
+local function read_cache(path, key)
+  local data = read_file(path)
+  if not data then return nil end
+  return parse_cache(data, key)
 end
 
 -- ---- load the kernel -----------------------------------------------------
@@ -259,52 +283,51 @@ local KERNEL_KEY
 local function kernel_key()
   local k, sources = KERNEL_KEY, nil
   if not k then
-    k, sources = cache_key()
+    if P.KERNEL_CACHE_DATA then
+      -- single-file bundle: no .kl files on disk; the embedded blob captures
+      -- everything that determines codegen, so its hash is the kernel key.
+      k = bit.tohex(fnv1a(P.KERNEL_CACHE_DATA))
+    else
+      k, sources = cache_key()
+    end
     KERNEL_KEY = k
   end
   return k, sources
 end
 
-local function load_kernel(verbose)
-  local path = cache_path()
-  local key, sources
-  if path then
-    key, sources = kernel_key()
-    local cached = read_cache(path, key)
-    if cached then
-      -- Load (don't run) every dump first, so a corrupt cache falls back to
-      -- the full compile before any chunk has executed.
-      local fns = {}
-      local ok = true
-      for i, ch in ipairs(cached.chunks) do
-        local lok, fn = pcall(P.load_chunk, ch.dump, ch.name)
-        if not lok then ok = false; break end
-        fns[i] = fn
-      end
-      if ok then
-        -- Rebuild the compile-time literal pool FIRST: the cached bytecode
-        -- reads KDATA[i]. Mutate C.KDATA in place — ENV.KDATA aliases it.
-        for i, v in ipairs(cached.kdata) do C.KDATA[i] = v end
-        for i, fn in ipairs(fns) do
-          local rok, err = pcall(fn)
-          if not rok then
-            error("load error in "..cached.chunks[i].name.." (cached): "..tostring(err))
-          end
-          if verbose then io.stderr:write("  loaded "..cached.chunks[i].name.." (cached)\n") end
-        end
-        -- Restore defun arities harvested at compile time (prescan + cdefun);
-        -- runtime compilation of user code needs them for direct-call codegen.
-        for name, ar in pairs(cached.arity) do C.ARITY[name] = ar end
-        install_native_overrides()
-        return
-      end
-      os.remove(path)  -- corrupt/stale dump: recompile below and rewrite
-    end
+-- Load (don't run) every cached dump first, so a corrupt/foreign-arch cache
+-- falls back to the full compile before any chunk has executed. Returns true
+-- on success, false if any dump refused to load.
+local function load_cached(cached, verbose, tag)
+  local fns = {}
+  for i, ch in ipairs(cached.chunks) do
+    local lok, fn = pcall(P.load_chunk, ch.dump, ch.name)
+    if not lok then return false end
+    fns[i] = fn
   end
+  -- Rebuild the compile-time literal pool FIRST: the cached bytecode
+  -- reads KDATA[i]. Mutate C.KDATA in place — ENV.KDATA aliases it.
+  for i, v in ipairs(cached.kdata) do C.KDATA[i] = v end
+  for i, fn in ipairs(fns) do
+    local rok, err = pcall(fn)
+    if not rok then
+      error("load error in "..cached.chunks[i].name..tag..": "..tostring(err))
+    end
+    if verbose then io.stderr:write("  loaded "..cached.chunks[i].name..tag.."\n") end
+  end
+  -- Restore defun arities harvested at compile time (prescan + cdefun);
+  -- runtime compilation of user code needs them for direct-call codegen.
+  for name, ar in pairs(cached.arity) do C.ARITY[name] = ar end
+  return true
+end
 
+-- Full compile from .kl sources. extsources (name -> source string), when
+-- given, overrides the on-disk KLDIR files (the single-file bundle embeds
+-- them as P.KL_SOURCES). path/key, when given, write the bytecode cache.
+local function compile_kernel(extsources, path, key, verbose)
   local all = {}
   for _,nm in ipairs(FILES) do
-    local s = (sources and sources[nm]) or assert(read_file(KLDIR..nm..".kl"), "cannot open "..nm)
+    local s = (extsources and extsources[nm]) or assert(read_file(KLDIR..nm..".kl"), "cannot open "..nm)
     local fs = R.read_all(s)
     all[nm] = fs
     C.prescan(fs)
@@ -329,6 +352,40 @@ local function load_kernel(verbose)
     if verbose then io.stderr:write("  loaded "..nm.."\n") end
   end
   if path then write_cache(path, key, chunks, C.ARITY) end
+end
+
+local function load_kernel(verbose)
+  -- Embedded kernel (single-file bundle, see build/make-bundle.lua):
+  -- P.KERNEL_CACHE_DATA holds a write_cache-format blob baked in at bundle
+  -- build time, P.KL_SOURCES the .kl sources as a name -> string table.
+  -- The blob is trusted as-is (no key check — the build pins it); if its
+  -- bytecode refuses to load (a different LuaJIT version/arch than the
+  -- build machine) we fall back to compiling the embedded sources. The
+  -- on-disk cache file is bypassed entirely in this mode.
+  if P.KERNEL_CACHE_DATA then
+    local cached = parse_cache(P.KERNEL_CACHE_DATA, nil)
+    if not (cached and load_cached(cached, verbose, " (embedded)")) then
+      compile_kernel(assert(P.KL_SOURCES, "embedded kernel bytecode unusable and no embedded .kl sources"),
+                     nil, nil, verbose)
+    end
+    install_native_overrides()
+    return
+  end
+
+  local path = cache_path()
+  local key, sources
+  if path then
+    key, sources = kernel_key()
+    local cached = read_cache(path, key)
+    if cached then
+      if load_cached(cached, verbose, " (cached)") then
+        install_native_overrides()
+        return
+      end
+      os.remove(path)  -- corrupt/stale dump: recompile below and rewrite
+    end
+  end
+  compile_kernel(sources, path, key, verbose)
   install_native_overrides()
 end
 
