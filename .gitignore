@@ -1,3 +1,5 @@
 .claude/
 .shen-kernel-cache.bin
 .shen-kernel-cache.bin.tmp
+build/shen-bundle.lua
+.fasl-test/

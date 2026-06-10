@@ -92,6 +92,60 @@ translator refuses simply keeps its legacy definition.
 
 No build step is needed — the kernel is compiled from `.kl` to Lua **on boot**. 
 
+## Installation & embedding
+
+### The `shen` module
+
+```lua
+local shen = require("shen")          -- with the repo (or install) on package.path
+shen.boot{quiet=true}                 -- load kernel + (shen.initialise); idempotent
+shen.eval('(define square X -> (* X X))')   -- full Shen syntax; returns last value
+print(shen.call("square", 9))         --> 81  (curried if given fewer args)
+local sq = shen.fn("square")          -- plain Lua callable (tracks redefinition)
+shen.list({1,2,3})                    -- Lua array  -> cons list
+shen.totable(shen.eval("[a b c]"))    -- cons list  -> Lua array
+shen.sym("foo")                       -- interned symbol
+shen.value("*version*")               -- Shen global
+shen.tostring(x)                      -- render any Shen value
+```
+
+`shen.prims` / `shen.runtime` expose the underlying layers (function table
+`prims.F`, reader, printer) for advanced embedding.
+
+### The `bin/shen` launcher
+
+```sh
+bin/shen                       # interactive REPL
+bin/shen prog.shen ...         # (load) each file, then exit
+bin/shen -e "(+ 1 2)"          # evaluate and print (mixes with files, in order)
+bin/shen -q prog.shen          # -q hushes load echo
+```
+
+### luarocks
+
+```sh
+luarocks make --local shen-scm-1.rockspec   # installs the modules + the `shen` launcher
+```
+
+(LuaJIT required — declared as `lua == 5.1`; run the launcher with a
+luarocks tree whose interpreter is LuaJIT.)
+
+### Single-file bundle
+
+```sh
+luajit build/make-bundle.lua    # -> build/shen-bundle.lua (~6 MB, self-contained)
+```
+
+`shen-bundle.lua` embeds the Lua modules, the precompiled kernel bytecode and
+the `.kl` sources (fallback for a different LuaJIT build). Drop the one file
+anywhere and:
+
+```lua
+local shen = require("shen-bundle")
+shen.boot{quiet=true}            -- boots from embedded bytecode in ~tens of ms
+print(shen.eval("(+ 1 2)"))      --> 3
+```
+
 ## Running a program
 
 ```sh
