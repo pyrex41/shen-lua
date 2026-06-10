@@ -1,11 +1,13 @@
 # shen-lua — a speed-focused LuaJIT port of the Shen kernel
 
-> Shen on LuaJIT: suite-certified, within ~1.5× of shen-cl on SBCL (measured
-> same-machine), embeds in any Lua host via a one-file ~6 MB bundle that boots
-> in ~70 ms, with bidirectional typed interop and fasl-style caching — and a
+> [Shen](https://shenlanguage.org) — a functional Lisp with pattern matching,
+> an optional sequent-calculus type system, and integrated Prolog — on LuaJIT:
+> suite-certified, within ~1.5× of shen-cl on SBCL (measured same-machine),
+> embeds in any Lua host via a one-file ~6 MB bundle that boots in ~70 ms,
+> with bidirectional typed interop and fasl-style caching — and a
 > degraded-but-correct mode on plain Lua 5.1/5.4/5.5.
 
-`shen-lua` runs the [Shen](http://shenlanguage.org) language on **LuaJIT 2.1**.
+`shen-lua` runs the [Shen](https://shenlanguage.org) language on **LuaJIT 2.1**.
 Shen programs compile down to **KLambda (Kλ)** — a small, untyped Lisp kernel of
 ~46 primitives — and a "port" of Shen consists of (a) implementing those
 primitives on a host runtime and (b) translating the kernel's `.kl` files into
@@ -31,7 +33,10 @@ The only requirement is **LuaJIT 2.1** (`brew install luajit` /
 `apt-get install luajit`); plain Lua 5.1/5.4/5.5 also works (slower — see the
 compatibility tier below). The first boot compiles the kernel (~1 s); after
 that the bytecode cache boots it in ~30 ms, and loaded programs are cached
-fasl-style, so everything is fast from the second run on.
+fasl-style, so everything is fast from the second run on. The examples are
+walked through in the [Examples](#examples) section and
+[`examples/README.md`](examples/README.md); new to Shen itself? Start at
+[shenlanguage.org](https://shenlanguage.org).
 
 ## Why a compiler (not an interpreter)
 
@@ -227,15 +232,15 @@ function as a real Shen function *with a declared type*, so typechecked Shen
 code can call into Lua and the call sites are proved sound under `(tc +)`.
 From the Lua side, `shen.fn`/`shen.call` make any Shen function (including
 curried partials) an ordinary Lua callable. Marshaling rules are documented
-exhaustively at the top of `lua_interop.lua`.
+exhaustively at the top of [`lua_interop.lua`](lua_interop.lua).
 
 ## Examples
 
 | | |
 |---|---|
-| `examples/hello_embed.lua` | the smallest useful embedding: boot, define a typed function, call it both ways (~25 lines) |
-| `examples/family.shen` | Shen Prolog in twenty lines: facts, rules, queries via `bin/shen` |
-| `examples/config_check.lua` | the showcase: Shen datatypes + rules as a **typed validation layer** for nested Lua config tables — the typechecker rejects buggy rules at load time ([walkthrough](examples/README.md)) |
+| [`examples/hello_embed.lua`](examples/hello_embed.lua) | the smallest useful embedding: boot, define a typed function, call it both ways (~25 lines) |
+| [`examples/family.shen`](examples/family.shen) | Shen Prolog in twenty lines: facts, rules, queries via `bin/shen` |
+| [`examples/config_check.lua`](examples/config_check.lua) | the showcase: Shen datatypes + rules as a **typed validation layer** for nested Lua config tables — the typechecker rejects buggy rules at load time ([walkthrough](examples/README.md)) |
 
 ## Certification / Testing
 
