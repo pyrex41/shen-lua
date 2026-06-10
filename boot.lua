@@ -434,7 +434,7 @@ end
 -- (destroy ...) at the REPL between loads is not in the key.
 -- SHEN_FASL=off disables; SHEN_FASL_DIR overrides ~/.cache/shen-lua-fasl;
 -- SHEN_FASL_DEBUG=1 logs hits/misses to stderr.
-local FASL_FORMAT = "SHENFASL2"
+local FASL_FORMAT = "SHENFASL3"  -- 3: added "pc" (shen.compile-prolog) records
 local FASL_STACK = {}
 local FASL_ROLL = 2166136261
 local FASL_DEBUG = os.getenv("SHEN_FASL_DEBUG") == "1"
@@ -502,6 +502,10 @@ local function fasl_write(path, rec, arity0)
       kdata_ser(r.name, parts)
     elseif r.k == "dt" then
       parts[#parts+1] = "T\n"
+      kdata_ser(r.name, parts)
+      kdata_ser(r.rules, parts)
+    elseif r.k == "pc" then
+      parts[#parts+1] = "Q\n"
       kdata_ser(r.name, parts)
       kdata_ser(r.rules, parts)
     elseif r.k == "sy" then
@@ -576,6 +580,9 @@ local function fasl_read(path)
     elseif k == "T" then
       local v = de_n(2); if not v then return nil end
       recs[i] = { k = "dt", name = v[1], rules = v[2] }
+    elseif k == "Q" then
+      local v = de_n(2); if not v then return nil end
+      recs[i] = { k = "pc", name = v[1], rules = v[2] }
     elseif k == "Z" then
       local v = de_n(1); if not v then return nil end
       recs[i] = { k = "sy", syns = v[1] }
@@ -628,6 +635,14 @@ local function fasl_replay(cached)
       P.F["shen.process-datatype"](r.name, r.rules)
     elseif r.k == "sy" then
       P.F["shen.process-synonyms"](r.syns)
+    elseif r.k == "pc" then
+      -- prolog?/defprolog expand at macroexpansion time through
+      -- shen.compile-prolog, whose native-engine clause registration (the NP
+      -- table in prolog_compile.lua) is a Lua-side effect no chunk reproduces;
+      -- a replayed (shen.lua-run-queryK "name" ...) form would find its query
+      -- gone. Re-execute the call: args are pure reader output, and the query
+      -- gensym was baked in at record time so the name re-registers exactly.
+      P.F["shen.compile-prolog"](r.name, r.rules)
     elseif r.k == "p" then
       P.F["put"](r.x, r.pointer, r.y, P.GLOBALS["*property-vector*"])
     else -- "g"
@@ -701,6 +716,15 @@ local function install_fasl()
   end)
   wrap_recorded("shen.process-synonyms", function(rec, syns)
     return { k = "sy", syns = syns }
+  end)
+  -- shen.compile-prolog: defprolog AND prolog? expansion both funnel through
+  -- it at macroexpansion time. Its kernel output (the query/predicate defun)
+  -- is captured as an ordinary chunk, but prolog_compile.lua's native-engine
+  -- clause registration (NP table) is a Lua-side effect that exists only at
+  -- expansion time — without this record a replayed prolog? query dies with
+  -- "native prolog query lost". Clause tokens are pure reader output.
+  wrap_recorded("shen.compile-prolog", function(rec, name, rules)
+    return { k = "pc", name = name, rules = rules }
   end)
   wrap_recorded("put", function(rec, x, pointer, y, vector)
     if vector ~= P.GLOBALS["*property-vector*"] then
