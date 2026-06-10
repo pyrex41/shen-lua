@@ -72,10 +72,14 @@ do
   src = gensrc("(defun tc-part (X Y) (if (= X 0) Y ((tc-part 0) (+ X Y))))")
   check(not src:find("goto", 1, true), "partial self-application not lowered")
 
-  -- mixed: outer tail self-call lowered, inner arg-position self-call stays a call
+  -- mixed (ackermann/tak shape): a tail self-call whose ARGUMENT recurses.
+  -- NOT lowered at all -- pure_tail_self refuses, because a loop wrapped
+  -- around residual non-tail recursion regresses LuaJIT tracing (measured:
+  -- tak(24,16,8) 2.1x slower when mixed-lowered). All self-calls keep the
+  -- plain F-table codegen.
   src = gensrc("(defun tc-ack (M N) (if (= M 0) (+ N 1) (if (= N 0) (tc-ack (- M 1) 1) (tc-ack (- M 1) (tc-ack M (- N 1))))))")
-  check(src:find("goto tco", 1, true) and src:find('F["tc-ack"]', 1, true),
-        "mixed tail/non-tail: loop plus real inner call")
+  check(not src:find("goto", 1, true) and src:find('F["tc-ack"]', 1, true),
+        "mixed tail/non-tail (ackermann shape): not lowered")
 
   -- self-call in tail position of a value-position control form is NOT in the
   -- function's tail position; it must stay a call inside the hoisted KC body
@@ -132,7 +136,8 @@ do
   ev("(defun tc-od? (N) (if (= N 0) false (tc-ev? (- N 1))))")
   check(ev("(tc-ev? 1000001)") == false, "mutual recursion still TCO")
 
-  -- ackermann: lowered outer loop + genuine inner recursion
+  -- ackermann: mixed tail/non-tail -> NOT lowered (pure_tail_self), but must
+  -- of course still compute correctly through the plain-call codegen
   ev("(defun tc-ack (M N) (if (= M 0) (+ N 1) (if (= N 0) (tc-ack (- M 1) 1) (tc-ack (- M 1) (tc-ack M (- N 1))))))")
   check(ev("(tc-ack 2 3)") == 9, "ackermann(2,3) = 9")
   check(ev("(tc-ack 3 3)") == 61, "ackermann(3,3) = 61")

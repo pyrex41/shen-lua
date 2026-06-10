@@ -167,6 +167,95 @@ local function lambda_captures_param(form, env, bound)
   return false
 end
 
+-- Pure-tail-recursion scan: lowering only pays when the function becomes a
+-- REAL loop, with no residual recursion left inside the loop body. A mixed
+-- function (tak/ackermann shape: the tail self-call's arguments themselves
+-- recurse, or another branch recurses non-tail) REGRESSES under lowering --
+-- LuaJIT traces a self-tail-call chain well, but a loop whose body re-enters
+-- the same function through non-tail calls keeps side-exiting the loop trace
+-- (measured: tak(24,16,8) 2.1x slower when mixed-lowered). So: eligible iff
+-- EVERY occurrence of the function's own name in the body is the head of a
+-- direct call in TAIL position with the exact declared arity, and the
+-- arguments of those calls are self-free. Any other occurrence -- bare-symbol
+-- reference (value/partial application), wrong arity, a call in an argument,
+-- inside lambda/freeze/trap-error or any non-tail position -- refuses
+-- lowering, keeping today's codegen for the whole function. A let/lambda
+-- binder that rebinds the name also refuses (the name would sometimes be a
+-- variable; conservative). The tail-position map below mirrors ctail exactly:
+-- if/cond results, let body, do-last, and/or second arg, type's expr.
+local function contains_name(form, name)
+  if is_symbol(form) then return form.name == name end
+  local cur = form
+  while is_cons(cur) do
+    if contains_name(cur[1], name) then return true end
+    cur = cur[2]
+  end
+  return false
+end
+
+local function pure_tail_self(form, name, arity, tailpos)
+  if not is_cons(form) then
+    -- a bare self-reference (value / partial application) is residual
+    return not (is_symbol(form) and form.name == name)
+  end
+  local head = form[1]
+  if is_symbol(head) then
+    local op = head.name
+    if op == name then
+      -- direct self-call: lowerable iff in tail position with exact arity and
+      -- self-free arguments (arguments are evaluated in non-tail position)
+      local args = to_array(cdr(form))
+      if not tailpos or #args ~= arity then return false end
+      for i = 1, #args do
+        if contains_name(args[i], name) then return false end
+      end
+      return true
+    elseif op == "if" then
+      local rest = cdr(form)
+      if contains_name(car(rest), name) then return false end -- test: non-tail
+      local cur = cdr(rest)
+      while is_cons(cur) do
+        if not pure_tail_self(cur[1], name, arity, tailpos) then return false end
+        cur = cur[2]
+      end
+      return true
+    elseif op == "cond" then
+      local cur = cdr(form)
+      while is_cons(cur) do
+        local cl = cur[1]
+        if contains_name(car(cl), name) then return false end  -- test: non-tail
+        if not pure_tail_self(car(cdr(cl)), name, arity, tailpos) then return false end
+        cur = cur[2]
+      end
+      return true
+    elseif op == "let" then
+      local var  = car(cdr(form))
+      local val  = car(cdr(cdr(form)))
+      local body = car(cdr(cdr(cdr(form))))
+      if is_symbol(var) and var.name == name then return false end -- rebinds it
+      if contains_name(val, name) then return false end            -- val: non-tail
+      return pure_tail_self(body, name, arity, tailpos)
+    elseif op == "do" then
+      local forms = to_array(cdr(form))
+      for i = 1, #forms - 1 do
+        if contains_name(forms[i], name) then return false end     -- non-tail
+      end
+      return #forms == 0 or pure_tail_self(forms[#forms], name, arity, tailpos)
+    elseif op == "and" or op == "or" then
+      local a = car(cdr(form)); local b = car(cdr(cdr(form)))
+      if contains_name(a, name) then return false end              -- a: non-tail
+      return pure_tail_self(b, name, arity, tailpos)
+    elseif op == "type" then
+      return pure_tail_self(car(cdr(form)), name, arity, tailpos)  -- ctail: tail
+    elseif op == "lambda" or op == "freeze" or op == "trap-error" then
+      -- separate function bodies / pcall closure: any self-ref is residual
+      return not contains_name(cdr(form), name)
+    end
+  end
+  -- generic call (or computed head): everything here is non-tail
+  return not contains_name(form, name)
+end
+
 -- environment: maps KL var name -> Lua local name. Implemented as a linked
 -- table of scopes for cheap shadowing.
 local function extend(env, kname, lname)
@@ -869,6 +958,10 @@ local function cdefun(form)
   local saved = CTX
   CTX = new_ctx()
   -- Self-tail-call -> loop lowering. Eligible unless:
+  --   * the function is not PURELY tail-recursive -- some self-reference is a
+  --     non-tail call, a partial application, or sits in a tail self-call's
+  --     own arguments (see pure_tail_self: mixed lowering measurably regresses
+  --     LuaJIT tracing, tak 2.1x), or
   --   * some lambda in the body closes over a param (its MKFUN upvalue would
   --     alias the mutating loop local; see lambda_captures_param), or
   --   * the name is an inlined 2-arg arithmetic prim (a self-call today
@@ -879,7 +972,8 @@ local function cdefun(form)
   -- step wrapper installed around F[name]) is not observed by an already-
   -- running loop. Non-tail self-calls and APP/partial calls are unaffected.
   local saved_self = SELF
-  if not ARITH2[name] and not lambda_captures_param(body, env, {}) then
+  if not ARITH2[name] and pure_tail_self(body, name, #params, true)
+     and not lambda_captures_param(body, env, {}) then
     SELF = { name = name, arity = #params, lnames = lnames, used = false }
   else
     SELF = nil
