@@ -61,6 +61,19 @@ local function gen(prefix) gsn = gsn + 1; return (prefix or "t") .. gsn end
 -- would blow Lua's per-function 200-local limit on the larger t-star defun).
 -- ------------------------------------------------------------------
 local CTX  -- nil outside a defun compile; otherwise a fresh table per defun.
+
+-- Self-tail-call -> loop lowering state. Non-nil only while compiling a defun
+-- body whose direct tail self-calls may be lowered to a loop continue:
+--   { name = <defun name>, arity = N, lnames = {param locals}, used = bool }
+-- When a tail-position call (NAME a1..aN) matches name+exact arity, ctail
+-- emits `p1, ..., pN = e1, ..., eN; goto tco` instead of a tail call, and
+-- cdefun wraps the body in `while true do ... ::tco:: end`. Lua's multiple
+-- assignment evaluates every RHS before assigning, so (f Y X)-style swaps are
+-- handled without explicit temps (and we add zero locals toward the 200-local
+-- limit). MUST be cleared while compiling any body that is hoisted into a
+-- separate Lua function (KC bodies, the no-CTX IIFE fallback) — a `goto`
+-- there would cross a function boundary and fail to parse.
+local SELF
 local function new_ctx()
   -- cbodies: hoisted bodies (both `freeze` bodies and value-position control
   --          forms), emitted into a single `KC` table at *chunk* scope (built
@@ -108,6 +121,140 @@ local function collect_free(form, env, bound, acc)
   end
 end
 
+
+-- Loop-lowering safety scan: a lowered function's param locals MUTATE on each
+-- iteration, so anything that captures a param BY REFERENCE and can outlive
+-- the iteration would observe iteration N+1's values from a closure created in
+-- iteration N. The only such construct in this codegen is `lambda` -> MKFUN,
+-- whose Lua function literal captures impl locals as upvalues. Everything else
+-- is immune:
+--   * freeze       -> BIND(KC[i], caps...) snapshots capture VALUES at creation
+--   * value-position control forms -> KC[i](caps...) called immediately
+--   * trap-error / do-IIFE inline closures execute synchronously, before any
+--     further mutation of the params
+--   * let-locals are declared INSIDE the `while` block, so Lua closes upvalues
+--     over them at each iteration's end (fresh per iteration)
+-- So: refuse lowering iff some lambda in the body (outside freeze bodies) has
+-- a param among its free variables. `env` is the param env (name -> truthy),
+-- `bound` tracks shadowing let/lambda binders, mirroring collect_free.
+local function lambda_captures_param(form, env, bound)
+  if not is_cons(form) then return false end
+  local head = form[1]
+  if is_symbol(head) and not env[head.name] then
+    local op = head.name
+    if op == "freeze" then
+      return false
+    elseif op == "lambda" then
+      -- collect_free over the whole lambda form sees through nested binders,
+      -- so a hit at any depth inside this lambda is caught here.
+      local fv = {}
+      collect_free(form, env, bound, fv)
+      return next(fv) ~= nil
+    elseif op == "let" then
+      local var = car(cdr(form)).name
+      local val = car(cdr(cdr(form)))
+      local body = car(cdr(cdr(cdr(form))))
+      if lambda_captures_param(val, env, bound) then return true end
+      local nb = {}; for k in pairs(bound) do nb[k] = true end; nb[var] = true
+      return lambda_captures_param(body, env, nb)
+    end
+  end
+  local cur = form
+  while is_cons(cur) do
+    if lambda_captures_param(cur[1], env, bound) then return true end
+    cur = cur[2]
+  end
+  return false
+end
+
+-- Pure-tail-recursion scan: lowering only pays when the function becomes a
+-- REAL loop, with no residual recursion left inside the loop body. A mixed
+-- function (tak/ackermann shape: the tail self-call's arguments themselves
+-- recurse, or another branch recurses non-tail) REGRESSES under lowering --
+-- LuaJIT traces a self-tail-call chain well, but a loop whose body re-enters
+-- the same function through non-tail calls keeps side-exiting the loop trace
+-- (measured: tak(24,16,8) 2.1x slower when mixed-lowered). So: eligible iff
+-- EVERY occurrence of the function's own name in the body is the head of a
+-- direct call in TAIL position with the exact declared arity, and the
+-- arguments of those calls are self-free. Any other occurrence -- bare-symbol
+-- reference (value/partial application), wrong arity, a call in an argument,
+-- inside lambda/freeze/trap-error or any non-tail position -- refuses
+-- lowering, keeping today's codegen for the whole function. A let/lambda
+-- binder that rebinds the name also refuses (the name would sometimes be a
+-- variable; conservative). The tail-position map below mirrors ctail exactly:
+-- if/cond results, let body, do-last, and/or second arg, type's expr.
+local function contains_name(form, name)
+  if is_symbol(form) then return form.name == name end
+  local cur = form
+  while is_cons(cur) do
+    if contains_name(cur[1], name) then return true end
+    cur = cur[2]
+  end
+  return false
+end
+
+local function pure_tail_self(form, name, arity, tailpos)
+  if not is_cons(form) then
+    -- a bare self-reference (value / partial application) is residual
+    return not (is_symbol(form) and form.name == name)
+  end
+  local head = form[1]
+  if is_symbol(head) then
+    local op = head.name
+    if op == name then
+      -- direct self-call: lowerable iff in tail position with exact arity and
+      -- self-free arguments (arguments are evaluated in non-tail position)
+      local args = to_array(cdr(form))
+      if not tailpos or #args ~= arity then return false end
+      for i = 1, #args do
+        if contains_name(args[i], name) then return false end
+      end
+      return true
+    elseif op == "if" then
+      local rest = cdr(form)
+      if contains_name(car(rest), name) then return false end -- test: non-tail
+      local cur = cdr(rest)
+      while is_cons(cur) do
+        if not pure_tail_self(cur[1], name, arity, tailpos) then return false end
+        cur = cur[2]
+      end
+      return true
+    elseif op == "cond" then
+      local cur = cdr(form)
+      while is_cons(cur) do
+        local cl = cur[1]
+        if contains_name(car(cl), name) then return false end  -- test: non-tail
+        if not pure_tail_self(car(cdr(cl)), name, arity, tailpos) then return false end
+        cur = cur[2]
+      end
+      return true
+    elseif op == "let" then
+      local var  = car(cdr(form))
+      local val  = car(cdr(cdr(form)))
+      local body = car(cdr(cdr(cdr(form))))
+      if is_symbol(var) and var.name == name then return false end -- rebinds it
+      if contains_name(val, name) then return false end            -- val: non-tail
+      return pure_tail_self(body, name, arity, tailpos)
+    elseif op == "do" then
+      local forms = to_array(cdr(form))
+      for i = 1, #forms - 1 do
+        if contains_name(forms[i], name) then return false end     -- non-tail
+      end
+      return #forms == 0 or pure_tail_self(forms[#forms], name, arity, tailpos)
+    elseif op == "and" or op == "or" then
+      local a = car(cdr(form)); local b = car(cdr(cdr(form)))
+      if contains_name(a, name) then return false end              -- a: non-tail
+      return pure_tail_self(b, name, arity, tailpos)
+    elseif op == "type" then
+      return pure_tail_self(car(cdr(form)), name, arity, tailpos)  -- ctail: tail
+    elseif op == "lambda" or op == "freeze" or op == "trap-error" then
+      -- separate function bodies / pcall closure: any self-ref is residual
+      return not contains_name(cdr(form), name)
+    end
+  end
+  -- generic call (or computed head): everything here is non-tail
+  return not contains_name(form, name)
+end
 
 -- environment: maps KL var name -> Lua local name. Implemented as a linked
 -- table of scopes for cheap shadowing.
@@ -378,6 +525,28 @@ local function ccall(form, env)
   end
 end
 
+-- Tail-position DIRECT self-call with exact declared arity -> loop continue.
+-- Returns the replacement statement string, or nil if this form is not a
+-- lowerable self-call. Anything that doesn't match (calls through APP /
+-- partials / variables, arity mismatches, shadowed name) keeps ordinary
+-- codegen and still works: the loop only replaces the tail self-call; the
+-- function value installed in F is unchanged.
+local function try_self_tail(form, env)
+  if not SELF then return nil end
+  local head = car(form)
+  if not (is_symbol(head) and not env[head.name] and head.name == SELF.name) then
+    return nil
+  end
+  local args = to_array(cdr(form))
+  if #args ~= SELF.arity then return nil end
+  SELF.used = true
+  if #args == 0 then return "goto tco" end
+  local cargs = {}
+  for i = 1, #args do cargs[i] = cexpr(args[i], env) end
+  return table.concat(SELF.lnames, ", ") .. " = "
+         .. table.concat(cargs, ", ") .. "; goto tco"
+end
+
 -- detect a long (cons A (cons B ... TAIL)) spine and flatten it into a single
 -- MKLIST({...}, tail) call, to avoid Lua's expression-nesting depth limit.
 local function cons_chain(form)
@@ -609,13 +778,24 @@ function cexpr(form, env)
         -- indices before we take ours. The body references only its param free
         -- vars, globals, and KC (a load-time upvalue) -- never an impl local --
         -- so this stays a constant function with no per-call FNEW.
+        -- Clear SELF: this body becomes a SEPARATE Lua function (KC[i]), so a
+        -- self-call in here is not in impl's tail position and a `goto tco`
+        -- would illegally cross the function boundary.
+        local saved_self = SELF
+        SELF = nil
         local body_stmts = ctail(form, env)
+        SELF = saved_self
         local idx = #CTX.cbodies + 1
         CTX.cbodies[idx] = "function(" .. params .. ") " .. body_stmts .. " end"
         return "KC[" .. idx .. "](" .. params .. ")"
       end
       -- No per-defun context (top-level eval chunk): fall back to the IIFE.
-      return "(function() " .. ctail(form, env) .. " end)()"
+      -- (Clear SELF here too: the IIFE is a separate function.)
+      local saved_self = SELF
+      SELF = nil
+      local body_stmts = ctail(form, env)
+      SELF = saved_self
+      return "(function() " .. body_stmts .. " end)()"
     end
     -- For ordinary calls, opportunistically let-float a trailing let argument
     -- so that nested continuation-passing chains compile flat.
@@ -741,8 +921,13 @@ function ctail(form, env)
     else
       local floated = try_let_float(form, env)
       if floated then return ctail(floated, env) end
+      -- try_flatten_call_chain BEFORE try_self_tail: a >=16-deep last-arg
+      -- chain must still flatten (parser nesting limit); it then keeps an
+      -- ordinary tail call for the outer frame, which is always correct.
       local flat = try_flatten_call_chain(form, env)
       if flat then return flat end
+      local selfjump = try_self_tail(form, env)
+      if selfjump then return selfjump end
       return "return " .. ccall(form, env)
     end
   else
@@ -772,7 +957,39 @@ local function cdefun(form)
   C.ARITY[name] = #params
   local saved = CTX
   CTX = new_ctx()
+  -- Self-tail-call -> loop lowering. Eligible unless:
+  --   * the function is not PURELY tail-recursive -- some self-reference is a
+  --     non-tail call, a partial application, or sits in a tail self-call's
+  --     own arguments (see pure_tail_self: mixed lowering measurably regresses
+  --     LuaJIT tracing, tak 2.1x), or
+  --   * some lambda in the body closes over a param (its MKFUN upvalue would
+  --     alias the mutating loop local; see lambda_captures_param), or
+  --   * the name is an inlined 2-arg arithmetic prim (a self-call today
+  --     compiles to the ADD/SUB/... numeric fast path, NOT a recursive call;
+  --     lowering would change that pre-existing behavior).
+  -- Semantics note: a lowered tail self-call no longer re-reads F[name] each
+  -- iteration, so a mid-recursion redefinition of the function (or a track/
+  -- step wrapper installed around F[name]) is not observed by an already-
+  -- running loop. Non-tail self-calls and APP/partial calls are unaffected.
+  local saved_self = SELF
+  if not ARITH2[name] and pure_tail_self(body, name, #params, true)
+     and not lambda_captures_param(body, env, {}) then
+    SELF = { name = name, arity = #params, lnames = lnames, used = false }
+  else
+    SELF = nil
+  end
   local body_src = ctail(body, env)
+  local lowered = SELF ~= nil and SELF.used
+  SELF = saved_self
+  if lowered then
+    -- `while true` (not a bare backward goto) so LuaJIT emits a real LOOP
+    -- bytecode -- the natural trace anchor. ::tco:: sits at the end of the
+    -- block ("continue" idiom): every `goto tco` re-enters the loop with the
+    -- params already reassigned; all other paths `return` out. let-locals are
+    -- declared inside the block, so closures over them are closed at each
+    -- iteration boundary (fresh per iteration).
+    body_src = "while true do " .. body_src .. " ::tco:: end"
+  end
   -- Hoisted (freeze ...) bodies AND value-position control-form bodies both go
   -- into a single chunk-scope KC table, built ONCE at load -- NOT inside impl.
   -- Each KC entry is a constant function abstracting its free vars as params
