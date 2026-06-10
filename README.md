@@ -266,7 +266,8 @@ deterministic metric):
 | Einstein's riddle (Prolog backtracking) | ~0.002 s / solve (22× vs legacy) |
 | Single-file bundle: require + boot + eval, from nothing | ~70 ms |
 
-Measured against the fastest port — **shen-cl** on SBCL, same machine, suite in
+Measured against the usual performance reference among ports — **shen-cl** on
+SBCL, same machine, suite in
 ~1.6 s — the warm-cache gap is **~1.5×**, down from 5.5× before the caching and
 native-engine work. The big steps, in order: the native soa32 engine (terms as
 plain numbers over flat int32 storage, continuations as integers, replacing the
