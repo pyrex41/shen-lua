@@ -3,7 +3,7 @@
 *2026-06-10T22:19:30Z by Showboat 0.6.1*
 <!-- showboat-id: ffd326d2-aa1e-49c3-92f1-fd432dcd8c66 -->
 
-This document is executable proof of what shen-lua is and how it works. Every code block below was actually run from the repo root; `showboat verify demo/walkthrough.md` re-runs them all and confirms the outputs still hold.
+This document is executable proof of what shen-lua is and how it works, built with [showboat](https://github.com/simonw/showboat) (`uv tool install showboat`). Every code block below was actually run from the repo root; `showboat verify demo/walkthrough.md` re-runs them all and confirms the outputs still hold.
 
 **What it is:** [Shen](https://shenlanguage.org) — a functional Lisp with pattern matching, an optional sequent-calculus type system, and integrated Prolog — running on LuaJIT. Shen programs compile to KLambda (a ~46-primitive Lisp kernel); this port compiles KLambda to Lua source, which LuaJIT trace-compiles to machine code. It passes the official Shen 41.1 kernel test suite and runs (slower) on plain Lua 5.1/5.4/5.5.
 
