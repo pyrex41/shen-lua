@@ -62,7 +62,7 @@ if #actions == 0 then
   if quiet then shen.prims.GLOBALS["*hush*"] = true end
   local ok, repl = pcall(require, "repl")
   if ok and type(repl) == "table" and type(repl.run) == "function" then
-    repl.run()
+    repl.run{ P = shen.prims, quiet = quiet }
   else
     -- Plain kernel REPL — (shen.shen) / 41.1's (shen.repl) is
     -- (credits) + (loop), but the kernel loop spins forever at stdin EOF
