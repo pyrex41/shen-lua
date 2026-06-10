@@ -23,7 +23,7 @@ print("Kernel initialised. Version:", P.F["version"] and P.F["version"]() or "?"
 -- `open` primitive — ALL kernel file I/O (load -> read-file -> open, plus the
 -- suite's write-to-file output) funnels through it, so prefixing there is
 -- equivalent to a chdir for the suite's purposes.
-local tests_dir = os.getenv("SHEN_TESTS_DIR") or "../cl-source/ShenOSKernel-41.1/tests"
+local tests_dir = os.getenv("SHEN_TESTS_DIR") or "tests"
 local chdir_done = false
 local ok_ffi, ffi = pcall(require, "ffi")
 if ok_ffi then

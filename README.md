@@ -252,12 +252,13 @@ luajit run-41.1-tests.lua    # => "passed ... 134 / failed ... 0 / pass rate ...
 lua    run-41.1-tests.lua    # same result on PUC Lua 5.1 / 5.4 / 5.5 (slower)
 ```
 
-(The driver chdirs into the test directory via the FFI under LuaJIT; under PUC
-Lua it uses `lfs` if available, else transparently prefixes relative paths in
-the `open` primitive. `SHEN_TESTS_DIR` overrides the test-suite location.)
+The official test suite is vendored in `tests/` (BSD-licensed, from the
+ShenOSKernel 41.1 distribution), so certification is verifiable from a bare
+clone. `SHEN_TESTS_DIR` points the driver at a different suite location.
+Port-specific specs live in `test/` (engine, interop, REPL, tail-call
+lowering).
 
-See [41.1-STATUS.md](41.1-STATUS.md) for more detail. The old
-`cert-22.4-result.txt` is historical only.
+See [doc/41.1-STATUS.md](doc/41.1-STATUS.md) for more detail.
 
 ## Benchmarks
 
@@ -284,9 +285,9 @@ plain numbers over flat int32 storage, continuations as integers, replacing the
 allocation-bound CPS model), the kernel bytecode + user fasl caches, raising
 LuaJIT's mcode/trace limits (the default 512 KB area caused constant
 trace-cache flushes), and native overrides for the hottest kernel predicates.
-See `PERF-HANDOFF.md` and `BENCHMARKS.md` for the full measurement history
+See [doc/PERF-HANDOFF.md](doc/PERF-HANDOFF.md) and [doc/BENCHMARKS.md](doc/BENCHMARKS.md) for the full measurement history
 (including the disproven levers).
 
 The historical Shen 22.4 head-to-head versus the `shen-c` 0.2.3 interpreter (same
-machine) is preserved in `BENCHMARKS.md`: fib 66–79× faster, n-queens ~2.5× faster,
+machine) is preserved in [doc/BENCHMARKS.md](doc/BENCHMARKS.md): fib 66–79× faster, n-queens ~2.5× faster,
 Einstein's riddle ~1.5× slower.
