@@ -36,9 +36,11 @@ that the bytecode cache boots it in ~30 ms, and loaded programs are cached
 fasl-style, so everything is fast from the second run on. The examples are
 walked through in the [Examples](#examples) section and
 [`examples/README.md`](examples/README.md); for an **executable, verifiable
-tour of the whole system** see [`demo/walkthrough.md`](demo/walkthrough.md)
-(every code block in it re-runs via `showboat verify`). New to Shen itself?
-Start at [shenlanguage.org](https://shenlanguage.org).
+tour of the whole system** see [`demo/walkthrough.md`](demo/walkthrough.md) —
+every code block in it re-runs via `showboat verify`
+([showboat](https://github.com/simonw/showboat) is Simon Willison's tool for
+executable proof-of-work documents; `uv tool install showboat`). New to Shen
+itself? Start at [shenlanguage.org](https://shenlanguage.org).
 
 ## Why a compiler (not an interpreter)
 
