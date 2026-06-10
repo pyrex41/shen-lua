@@ -47,7 +47,16 @@ local function find_kldir()
     candidates[#candidates+1] = here .. "/klambda"
     local tree = here:match("^(.*)/share/lua/[%d.]+$")
     if tree then
-      candidates[#candidates+1] = tree .. "/lib/luarocks/rocks-5.1/shen/scm-1/klambda"
+      -- any installed version of the rock (scm-1, 0.9.0-1, ...): glob the
+      -- rock directory rather than hardcoding a version string.
+      local rocksdir = tree .. "/lib/luarocks/rocks-5.1/shen"
+      local ls = io.popen('ls -1 "' .. rocksdir .. '" 2>/dev/null')
+      if ls then
+        for ver in ls:lines() do
+          candidates[#candidates+1] = rocksdir .. "/" .. ver .. "/klambda"
+        end
+        ls:close()
+      end
     end
   end
   for _,c in ipairs(candidates) do
