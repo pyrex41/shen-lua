@@ -194,11 +194,17 @@ a backtrace of **Shen** function names with the Lua plumbing filtered out.
 ### luarocks
 
 ```sh
-luarocks make --local shen-scm-1.rockspec   # installs the modules + the `shen` launcher
+luarocks install shen                       # from luarocks.org: modules + the `shen` launcher
+luarocks make --local shen-scm-1.rockspec   # or: install the development tree
 ```
 
 (LuaJIT required — declared as `lua == 5.1`; run the launcher with a
-luarocks tree whose interpreter is LuaJIT.)
+luarocks tree whose interpreter is LuaJIT, e.g.
+`luarocks --lua-dir=$(brew --prefix luajit) --lua-version=5.1 install shen`.)
+
+Prefer zero install? Grab `shen-bundle.lua` from the
+[latest release](https://github.com/pyrex41/shen-lua/releases/latest) —
+the whole system in one file.
 
 ### Single-file bundle
 
