@@ -716,7 +716,29 @@ function P.install_native_stdlib()
   end
   local function map(f, lst) return map_h(f, lst, NIL) end
 
+  -- variable? : a symbol whose name is an uppercase letter followed by
+  -- alphanums (kernel chain variable?/analyse-variable?/uppercase?/alphanums?,
+  -- where alphanum = letter | digit | the misc set "=-*/+_?$!@~.><&%'#`").
+  -- The kernel version walks the name char-by-char through trap-error +
+  -- hdstr/tlstr string churn; here one pattern match, memoized on the
+  -- interned symbol itself so each distinct symbol pays it once. Non-symbols
+  -- delegate to the original for byte-identical edge semantics.
+  local orig_variable = F["variable?"]
+  local VARPAT = "^[A-Z][%w=%-%*/%+_%?%$!@~%.><&%%'#`]*$"
+  local function variable_q(x)
+    if is_symbol(x) then
+      local v = x.isvar
+      if v == nil then
+        v = string.find(x.name, VARPAT) ~= nil
+        x.isvar = v
+      end
+      return v
+    end
+    return orig_variable(x)
+  end
+
   local function install(name, fn, arity) F[name] = fn; FA[fn] = arity end
+  install("variable?", variable_q, 1)
   install("fail", fail, 0)
   install("shen.parse-failure", parse_failure, 0)
   install("shen.parse-failure?", parse_failure_q, 1)
