@@ -171,10 +171,21 @@ shen.totable(shen.eval("[a b c]"))    -- cons list  -> Lua array
 shen.sym("foo")                       -- interned symbol
 shen.value("*version*")               -- Shen global
 shen.tostring(x)                      -- render any Shen value
+shen.typecheck("[1 2]", "(list number)")  -- ask the typechecker; type or false
 ```
 
 `shen.prims` / `shen.runtime` expose the underlying layers (function table
 `prims.F`, reader, printer) for advanced embedding.
+
+`shen.typecheck(expr, ty)` is the supported way to call the typechecker from
+a host program (e.g. using Shen as a runtime policy/validation engine). It
+absorbs two kernel traps that bite direct `shen.typecheck` callers: the
+kernel entry point judges *syntax* (reader output), not evaluated values, and
+the kernel's inference counter is global and cumulative — without a per-call
+reset, a long-lived process eventually exceeds `*maxinferences*` and every
+later check fails. The helper reads its arguments from source strings and
+resets the counter per call, which turns `*maxinferences*` into a per-check
+inference budget (an over-budget check returns `false`, fail-closed).
 
 ### The `bin/shen` launcher
 
