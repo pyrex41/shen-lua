@@ -31,9 +31,75 @@ P.AP, P.AP_SLOTS, P.AP_THAW = AP, AP_SLOTS, AP_THAW
 
 -- ---- errors / exceptions -------------------------------------------------
 local function ERR(msg) error(mkexcn(msg), 0) end
+
+-- Lua-error -> Shen-speak translation. Lua runtime errors that escape
+-- compiled Shen code read like VM internals ("attempt to call field 'foo'
+-- (a nil value)"). Translate the common shapes into Shen terms, preserving
+-- the original text in parentheses so nothing is hidden. Applied by TOEXCN
+-- (so trap-error handlers see the translated message) and by the REPL's
+-- top-level error display (repl.lua). Handles both the LuaJIT/Lua-5.1
+-- message order ("attempt to call field 'foo' (a nil value)") and the
+-- Lua-5.4 order ("attempt to call a nil value (field 'foo')").
+local ERR_OPS = {
+  { "call", function(ty, name)
+      if ty == "nil" then
+        if name then return name .. " is undefined" end
+        return "attempt to call an undefined function"
+      end
+      return "attempt to call a " .. ty .. " value"
+             .. (name and (" ('" .. name .. "')") or "") .. " as a function"
+    end },
+  { "index", function(ty, name)
+      if ty == "nil" and name then return name .. " is nil and cannot be indexed" end
+      return "attempt to index a " .. ty .. " value"
+             .. (name and (" ('" .. name .. "')") or "")
+    end },
+  { "perform arithmetic on", function(ty, name)
+      return "arithmetic on a " .. ty .. " value"
+             .. (name and (" ('" .. name .. "')") or "") .. ": expected a number"
+    end },
+  { "concatenate", function(ty, name)
+      return "string concatenation on a " .. ty .. " value"
+             .. (name and (" ('" .. name .. "')") or "") .. ": expected a string"
+    end },
+  { "get length of", function(ty, name)
+      return "length of a " .. ty .. " value"
+             .. (name and (" ('" .. name .. "')") or "")
+    end },
+}
+
+local function translate_error(msg)
+  if type(msg) ~= "string" then return msg end
+  -- strip the "chunkname:line: " position prefix for matching only
+  local body = msg:match("^.-:%d+: (.*)") or msg
+  for _, e in ipairs(ERR_OPS) do
+    local op, fmt = e[1], e[2]
+    local prefix = "^attempt to " .. op .. " "
+    -- Lua 5.4 order: attempt to OP a TY value (KIND 'NAME')
+    local ty, name = body:match(prefix .. "a (%a+) value %(%a+ '([^']+)'%)")
+    if not ty then
+      -- Lua 5.1 / LuaJIT order: attempt to OP KIND 'NAME' (a TY value)
+      name, ty = body:match(prefix .. "%a+ '([^']+)' %(a (%a+) value%)")
+    end
+    if not ty then name = nil; ty = body:match(prefix .. "a (%a+) value") end
+    if ty then return fmt(ty, name) .. " (Lua: " .. msg .. ")" end
+  end
+  local t1, t2 = body:match("^attempt to compare (%a+) with (%a+)")
+  if t1 then
+    return "comparison between a " .. t1 .. " and a " .. t2
+           .. ": expected numbers (Lua: " .. msg .. ")"
+  end
+  local tt = body:match("^attempt to compare two (%a+) values")
+  if tt then
+    return "comparison between two " .. tt .. " values: expected numbers (Lua: " .. msg .. ")"
+  end
+  return msg
+end
+P.translate_error = translate_error
+
 local function TOEXCN(e)
   if getmetatable(e) == Excn then return e end
-  return mkexcn(tostring(e))
+  return mkexcn(translate_error(tostring(e)))
 end
 P.ERR = ERR
 
@@ -777,7 +843,11 @@ function P.eval(form)
     return form
   end
   if is_cons(form) and is_symbol(form[1]) and form[1].name == "defun" then
-    compile_and_load(C.compile_top(form), "defun")
+    -- Chunkname carries the Shen function name ("shen:<fnname>") so Lua
+    -- error positions and debug.traceback frames identify the Shen function
+    -- (the REPL's Shen-level backtrace filters on this prefix; repl.lua).
+    local nm = is_cons(form[2]) and is_symbol(form[2][1]) and form[2][1].name or "defun"
+    compile_and_load(C.compile_top(form), "shen:" .. nm)
     return form[2][1]   -- the function NAME symbol (car of cdr), as shen-c returns
   end
   return compile_and_load(C.compile_expr_chunk(form), "eval")
