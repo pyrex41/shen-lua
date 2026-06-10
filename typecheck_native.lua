@@ -143,11 +143,9 @@ local function extract_sig(lam)
   return nil
 end
 
-local function harvest_init_sigs(kldir)
+local function harvest_init_sigs(src)
   init_syms()
-  local fh = io.open(kldir .. "/init.kl", "r")
-  if not fh then return false end
-  local src = fh:read("*a"); fh:close()
+  if not src then return false end
   local SYM_assoc = R.intern("shen.assoc->")
   local total, got = 0, 0
   local function walk(e)
@@ -295,23 +293,32 @@ function M.install(Pmod, Emod)
   F, NP = P.F, E.NativePred
   PC = require("prolog_compile")
 
-  -- 1) translate the driver defuns straight out of klambda/t-star.kl
-  local kldir = os.getenv("SHEN_KL_DIR") or "klambda"
-  local fh = io.open(kldir .. "/t-star.kl", "r")
-  if not fh then
-    -- vendored kernel not found relative to cwd; try boot's other candidates
-    for _, c in ipairs({ "../cl-source/ShenOSKernel-41.1/klambda" }) do
-      fh = io.open(c .. "/t-star.kl", "r")
-      if fh then kldir = c; break end
+  -- 1) translate the driver defuns straight out of klambda/t-star.kl.
+  -- A single-file bundle embeds the .kl sources as P.KL_SOURCES (no files
+  -- on disk); otherwise read from SHEN_KL_DIR / the vendored klambda/.
+  local function read_kl(name)
+    if P.KL_SOURCES and P.KL_SOURCES[name] then return P.KL_SOURCES[name] end
+    local dirs = {
+      P.KLDIR,                                        -- boot's resolved dir
+      (os.getenv("SHEN_KL_DIR") or "klambda") .. "/",
+      "../cl-source/ShenOSKernel-41.1/klambda/",      -- boot's other candidate
+    }
+    for _, d in ipairs(dirs) do
+      local fh = d and io.open(d .. name .. ".kl", "r")
+      if fh then
+        local s = fh:read("*a"); fh:close()
+        return s
+      end
     end
+    return nil
   end
-  if not fh then
+  local src = read_kl("t-star")
+  if not src then
     error("typecheck_native: cannot locate t-star.kl")
   end
-  local src = fh:read("*a"); fh:close()
 
   -- kernel signatures from init.kl; incomplete harvest forces legacy fallback
-  M.sigs_complete = harvest_init_sigs(kldir)
+  M.sigs_complete = harvest_init_sigs(read_kl("init"))
 
   M.translate_errors = {}
   local n_ok, n_fail = 0, 0

@@ -31,9 +31,75 @@ P.AP, P.AP_SLOTS, P.AP_THAW = AP, AP_SLOTS, AP_THAW
 
 -- ---- errors / exceptions -------------------------------------------------
 local function ERR(msg) error(mkexcn(msg), 0) end
+
+-- Lua-error -> Shen-speak translation. Lua runtime errors that escape
+-- compiled Shen code read like VM internals ("attempt to call field 'foo'
+-- (a nil value)"). Translate the common shapes into Shen terms, preserving
+-- the original text in parentheses so nothing is hidden. Applied by TOEXCN
+-- (so trap-error handlers see the translated message) and by the REPL's
+-- top-level error display (repl.lua). Handles both the LuaJIT/Lua-5.1
+-- message order ("attempt to call field 'foo' (a nil value)") and the
+-- Lua-5.4 order ("attempt to call a nil value (field 'foo')").
+local ERR_OPS = {
+  { "call", function(ty, name)
+      if ty == "nil" then
+        if name then return name .. " is undefined" end
+        return "attempt to call an undefined function"
+      end
+      return "attempt to call a " .. ty .. " value"
+             .. (name and (" ('" .. name .. "')") or "") .. " as a function"
+    end },
+  { "index", function(ty, name)
+      if ty == "nil" and name then return name .. " is nil and cannot be indexed" end
+      return "attempt to index a " .. ty .. " value"
+             .. (name and (" ('" .. name .. "')") or "")
+    end },
+  { "perform arithmetic on", function(ty, name)
+      return "arithmetic on a " .. ty .. " value"
+             .. (name and (" ('" .. name .. "')") or "") .. ": expected a number"
+    end },
+  { "concatenate", function(ty, name)
+      return "string concatenation on a " .. ty .. " value"
+             .. (name and (" ('" .. name .. "')") or "") .. ": expected a string"
+    end },
+  { "get length of", function(ty, name)
+      return "length of a " .. ty .. " value"
+             .. (name and (" ('" .. name .. "')") or "")
+    end },
+}
+
+local function translate_error(msg)
+  if type(msg) ~= "string" then return msg end
+  -- strip the "chunkname:line: " position prefix for matching only
+  local body = msg:match("^.-:%d+: (.*)") or msg
+  for _, e in ipairs(ERR_OPS) do
+    local op, fmt = e[1], e[2]
+    local prefix = "^attempt to " .. op .. " "
+    -- Lua 5.4 order: attempt to OP a TY value (KIND 'NAME')
+    local ty, name = body:match(prefix .. "a (%a+) value %(%a+ '([^']+)'%)")
+    if not ty then
+      -- Lua 5.1 / LuaJIT order: attempt to OP KIND 'NAME' (a TY value)
+      name, ty = body:match(prefix .. "%a+ '([^']+)' %(a (%a+) value%)")
+    end
+    if not ty then name = nil; ty = body:match(prefix .. "a (%a+) value") end
+    if ty then return fmt(ty, name) .. " (Lua: " .. msg .. ")" end
+  end
+  local t1, t2 = body:match("^attempt to compare (%a+) with (%a+)")
+  if t1 then
+    return "comparison between a " .. t1 .. " and a " .. t2
+           .. ": expected numbers (Lua: " .. msg .. ")"
+  end
+  local tt = body:match("^attempt to compare two (%a+) values")
+  if tt then
+    return "comparison between two " .. tt .. " values: expected numbers (Lua: " .. msg .. ")"
+  end
+  return msg
+end
+P.translate_error = translate_error
+
 local function TOEXCN(e)
   if getmetatable(e) == Excn then return e end
-  return mkexcn(tostring(e))
+  return mkexcn(translate_error(tostring(e)))
 end
 P.ERR = ERR
 
@@ -147,6 +213,22 @@ defprim("+", 2, function(a,b) return tonum(a) + tonum(b) end)
 defprim("-", 2, function(a,b) return tonum(a) - tonum(b) end)
 defprim("*", 2, function(a,b) return tonum(a) * tonum(b) end)
 defprim("/", 2, function(a,b) b=tonum(b); if b==0 then ERR("division by zero") end; return tonum(a)/b end)
+-- PUC Lua 5.3+ tier: Lua gained an integer subtype whose int64 arithmetic
+-- WRAPS on overflow; LuaJIT (and 5.1) compute on IEEE doubles. The kernel
+-- relies on double behaviour — e.g. shen.hashkey takes the product of all
+-- byte values of a symbol name (astronomically large) and shen.mod reduces
+-- it by repeated subtraction, which only terminates if the product stayed a
+-- positive (possibly inexact) float rather than wrapping to a negative int64.
+-- So on 5.3+ the value-producing arithmetic primitives compute in the float
+-- domain, reproducing the LuaJIT number model exactly (comparisons need no
+-- coercion: int/float compares are exact in 5.3+). Under LuaJIT
+-- math.tointeger is nil and the definitions above stay installed unchanged.
+if math.tointeger then
+  defprim("+", 2, function(a,b) return tonum(a) + 0.0 + tonum(b) end)
+  defprim("-", 2, function(a,b) return tonum(a) + 0.0 - tonum(b) end)
+  defprim("*", 2, function(a,b) return (tonum(a) + 0.0) * tonum(b) end)
+  defprim("/", 2, function(a,b) b=tonum(b); if b==0 then ERR("division by zero") end; return (tonum(a)+0.0)/b end)
+end
 defprim(">", 2, function(a,b) return tonum(a) >  tonum(b) end)
 defprim("<", 2, function(a,b) return tonum(a) <  tonum(b) end)
 defprim(">=",2, function(a,b) return tonum(a) >= tonum(b) end)
@@ -174,8 +256,18 @@ defprim("intern", 1, function(s)
   return intern(s)
 end)
 
+-- On 5.3+ string.format("%d", x) ERRORS for an integral float outside int64
+-- range; go through math.tointeger and fall back to %.17g (where LuaJIT's
+-- own %d output is junk anyway). math.tointeger is nil under LuaJIT/5.1, so
+-- that path is byte-identical to before.
+local mtoint = math.tointeger
 local function numToStr(n)
   if type(n)=="number" and n==math.floor(n) and n~=math.huge and n~=-math.huge then
+    if mtoint then
+      local i = mtoint(n)
+      if i then return string.format("%d", i) end
+      return string.format("%.17g", n)
+    end
     return string.format("%d", n)
   end
   return tostring(n)
@@ -715,6 +807,18 @@ local ENV = {
 }
 P.ENV = ENV
 
+-- PUC Lua 5.3+ tier: the inline fast paths must compute in the float domain
+-- for the same int64-wrap reason as the `+`/`-`/`*`/`/` primitives above
+-- (see that comment). Comparisons (GT/LT/GE/LE/EQ) create no numbers and are
+-- exact across int/float in 5.3+, so they stay as-is. Under LuaJIT this
+-- block is dead and ENV is byte-identical to before.
+if math.tointeger then
+  ENV.ADD = function(a,b) if type(a)=="number" and type(b)=="number" then return a+0.0+b end return F["+"](a,b) end
+  ENV.SUB = function(a,b) if type(a)=="number" and type(b)=="number" then return a+0.0-b end return F["-"](a,b) end
+  ENV.MUL = function(a,b) if type(a)=="number" and type(b)=="number" then return (a+0.0)*b end return F["*"](a,b) end
+  ENV.DIV = function(a,b) if type(a)=="number" and type(b)=="number" and b~=0 then return (a+0.0)/b end return F["/"](a,b) end
+end
+
 local loadstring = loadstring or load
 local setfenv = setfenv
 
@@ -777,7 +881,11 @@ function P.eval(form)
     return form
   end
   if is_cons(form) and is_symbol(form[1]) and form[1].name == "defun" then
-    compile_and_load(C.compile_top(form), "defun")
+    -- Chunkname carries the Shen function name ("shen:<fnname>") so Lua
+    -- error positions and debug.traceback frames identify the Shen function
+    -- (the REPL's Shen-level backtrace filters on this prefix; repl.lua).
+    local nm = is_cons(form[2]) and is_symbol(form[2][1]) and form[2][1].name or "defun"
+    compile_and_load(C.compile_top(form), "shen:" .. nm)
     return form[2][1]   -- the function NAME symbol (car of cdr), as shen-c returns
   end
   return compile_and_load(C.compile_expr_chunk(form), "eval")

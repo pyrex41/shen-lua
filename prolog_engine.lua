@@ -33,8 +33,16 @@
 -- the clause compiler (prolog_compile.lua) and the t-star port
 -- (typecheck_native.lua) wire into it, install() is inert.
 
-local ffi = require("ffi")
+-- PUC Lua tier: without the FFI the soa32 substrate cannot exist. Return an
+-- inert module — boot.lua's install() call becomes a no-op and the kernel
+-- keeps the compiled-KL CPS Prolog engine (exactly SHEN_PROLOG_ENGINE=legacy).
+local ok_ffi, ffi = pcall(require, "ffi")
+if not ok_ffi then
+  return { install = function() end }
+end
 local R = require("runtime")
+
+local loadstring = loadstring or load   -- 5.2+ shim (module is FFI-gated anyway)
 
 local M = {}
 

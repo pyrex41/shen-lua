@@ -92,12 +92,81 @@ translator refuses simply keeps its legacy definition.
 
 No build step is needed — the kernel is compiled from `.kl` to Lua **on boot**. 
 
-## Running a program
+### PUC-Lua compatibility tier
+
+The port also runs on **plain PUC Lua** (tested: 5.1.5, 5.4.8, 5.5.0), passing
+the same 134/134 kernel test suite. Everything JIT-specific is feature-detected
+at boot and degrades gracefully:
+
+* **Prolog/typecheck engine** — the native soa32 engine needs the LuaJIT FFI;
+  without it the port automatically falls back to the compiled-KL CPS engine
+  (the same path as `SHEN_PROLOG_ENGINE=legacy`).
+* **Kernel bytecode cache + user fasl cache** — keyed by FNV-1a hashes that use
+  LuaJIT's `bit` library; without it both caches self-disable (pure perf
+  features — the kernel just recompiles on every boot, ~0.4s).
+* **Lua 5.3+ integer subtype** — Lua 5.3+ int64 arithmetic *wraps* on overflow,
+  while the kernel assumes the IEEE-double model (LuaJIT/5.1); on 5.3+ the
+  arithmetic primitives compute in the float domain, reproducing LuaJIT's
+  number model exactly.
+
+Expect roughly **2x slower** than LuaJIT on the suite (legacy engine, no
+caches) — correct, but LuaJIT remains the recommended runtime.
+
+## Installation & embedding
+
+### The `shen` module
+
+```lua
+local shen = require("shen")          -- with the repo (or install) on package.path
+shen.boot{quiet=true}                 -- load kernel + (shen.initialise); idempotent
+shen.eval('(define square X -> (* X X))')   -- full Shen syntax; returns last value
+print(shen.call("square", 9))         --> 81  (curried if given fewer args)
+local sq = shen.fn("square")          -- plain Lua callable (tracks redefinition)
+shen.list({1,2,3})                    -- Lua array  -> cons list
+shen.totable(shen.eval("[a b c]"))    -- cons list  -> Lua array
+shen.sym("foo")                       -- interned symbol
+shen.value("*version*")               -- Shen global
+shen.tostring(x)                      -- render any Shen value
+```
+
+`shen.prims` / `shen.runtime` expose the underlying layers (function table
+`prims.F`, reader, printer) for advanced embedding.
+
+### The `bin/shen` launcher
 
 ```sh
-# load and run a .shen file (the kernel reader handles full Shen syntax)
-LUA_PATH="/path/to/shen-lua/?.lua;;" luajit run-shen.lua myprogram.shen
+bin/shen                       # interactive REPL
+bin/shen prog.shen ...         # (load) each file, then exit
+bin/shen -e "(+ 1 2)"          # evaluate and print (mixes with files, in order)
+bin/shen -q prog.shen          # -q hushes load echo
 ```
+
+### luarocks
+
+```sh
+luarocks make --local shen-scm-1.rockspec   # installs the modules + the `shen` launcher
+```
+
+(LuaJIT required — declared as `lua == 5.1`; run the launcher with a
+luarocks tree whose interpreter is LuaJIT.)
+
+### Single-file bundle
+
+```sh
+luajit build/make-bundle.lua    # -> build/shen-bundle.lua (~6 MB, self-contained)
+```
+
+`shen-bundle.lua` embeds the Lua modules, the precompiled kernel bytecode and
+the `.kl` sources (fallback for a different LuaJIT build). Drop the one file
+anywhere and:
+
+```lua
+local shen = require("shen-bundle")
+shen.boot{quiet=true}            -- boots from embedded bytecode in ~tens of ms
+print(shen.eval("(+ 1 2)"))      --> 3
+```
+
+## Running a program
 
 Programmatically:
 
@@ -118,7 +187,12 @@ extensions) and **passes the official 41.1 kernel test suite, 134/134**:
 
 ```sh
 luajit run-41.1-tests.lua    # => "passed ... 134 / failed ... 0 / pass rate ... 100%"
+lua    run-41.1-tests.lua    # same result on PUC Lua 5.1 / 5.4 / 5.5 (slower)
 ```
+
+(The driver chdirs into the test directory via the FFI under LuaJIT; under PUC
+Lua it uses `lfs` if available, else transparently prefixes relative paths in
+the `open` primitive. `SHEN_TESTS_DIR` overrides the test-suite location.)
 
 See [41.1-STATUS.md](41.1-STATUS.md) for more detail. The old
 `cert-22.4-result.txt` is historical only.

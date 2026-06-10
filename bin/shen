@@ -1,0 +1,105 @@
+#!/usr/bin/env luajit
+-- bin/shen : command-line launcher for shen-lua.
+--
+--   shen                  interactive REPL
+--   shen FILE ...         (load) each file in order, then exit
+--   shen -e "EXPR"        evaluate a Shen expression and print the result
+--
+-- -e and FILE actions may be mixed and run in command-line order.
+
+-- Make a plain checkout work from anywhere: resolve the repo root from
+-- arg[0] (this script lives in <root>/bin/) and prepend it to package.path.
+-- Under a luarocks install the modules are already on package.path.
+local self = arg and arg[0]
+if self then
+  local root = self:match("^(.*)[/\\]bin[/\\][^/\\]+$")
+  if root and root ~= "" then
+    package.path = root .. "/?.lua;" .. package.path
+  end
+end
+
+local shen = require("shen")
+
+local USAGE = [[
+usage: shen [-q] [-e EXPR | FILE] ...
+  no arguments      start the interactive Shen REPL
+  FILE              (load) the file (full Shen syntax), then exit
+  -e, --eval EXPR   evaluate EXPR and print its value
+  -q, --quiet       (set *hush* true) — silence load echo and hushable output
+]]
+
+-- parse: a list of {kind="eval"|"load", arg=...} in command-line order
+local actions = {}
+local quiet = false
+local i = 1
+while i <= #arg do
+  local a = arg[i]
+  if a == "-q" or a == "--quiet" then
+    quiet = true
+  elseif a == "-e" or a == "--eval" then
+    i = i + 1
+    if arg[i] == nil then
+      io.stderr:write("shen: " .. a .. " requires an expression\n" .. USAGE)
+      os.exit(2)
+    end
+    actions[#actions+1] = { kind = "eval", arg = arg[i] }
+  elseif a == "-h" or a == "--help" then
+    io.write(USAGE)
+    os.exit(0)
+  elseif a:sub(1, 1) == "-" and a ~= "-" then
+    io.stderr:write("shen: unknown option " .. a .. "\n" .. USAGE)
+    os.exit(2)
+  else
+    actions[#actions+1] = { kind = "load", arg = a }
+  end
+  i = i + 1
+end
+
+if #actions == 0 then
+  -- REPL. Prefer the richer Lua REPL (repl.lua) when present; fall back to
+  -- the kernel's own toplevel loop.
+  shen.boot{quiet = quiet}
+  if quiet then shen.prims.GLOBALS["*hush*"] = true end
+  local ok, repl = pcall(require, "repl")
+  if ok and type(repl) == "table" and type(repl.run) == "function" then
+    repl.run{ P = shen.prims, quiet = quiet }
+  else
+    -- Plain kernel REPL — (shen.shen) / 41.1's (shen.repl) is
+    -- (credits) + (loop), but the kernel loop spins forever at stdin EOF
+    -- (lineread's error is trapped and the loop re-prompts), so transcribe
+    -- it here with an EOF check on the *stinput* stream.
+    local F, R = shen.prims.F, shen.runtime
+    F["shen.credits"]()
+    local stin = shen.prims.GLOBALS["*stinput*"]
+    while not stin.eof do
+      F["shen.initialise_environment"]()
+      F["shen.prompt"]()
+      local okk, err = pcall(F["shen.read-evaluate-print"])
+      if not okk and not stin.eof then
+        local e = getmetatable(err) == R.Excn and err or R.mkexcn(tostring(err))
+        pcall(F["shen.toplevel-display-exception"], e)
+      end
+    end
+    io.write("\n")
+  end
+  os.exit(0)
+end
+
+shen.boot{quiet=true}
+if quiet then shen.prims.GLOBALS["*hush*"] = true end
+for _, act in ipairs(actions) do
+  local ok, err = pcall(function()
+    if act.kind == "load" then
+      shen.call("load", act.arg)
+    else
+      local v = shen.eval(act.arg)
+      io.write(shen.call("shen.app", v, "\n", shen.sym("shen.a")))
+    end
+  end)
+  if not ok then
+    io.stderr:write("shen: " .. shen.call("error-to-string", err) .. "\n")
+    os.exit(1)
+  end
+end
+io.stdout:flush()
+os.exit(0)
