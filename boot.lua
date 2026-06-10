@@ -746,12 +746,20 @@ local function initialise()
   local sym = R.intern("shen.initialise")
   local fn = P.F["shen.initialise"]
   if not fn then error("shen.initialise not defined after kernel load") end
-  return fn()
+  local r = fn()
+  -- Register the lua.* interop entries in Shen's own arity/lambda-form
+  -- tables (needs the *property-vector* that shen.initialise just created).
+  require("lua_interop").post_initialise()
+  return r
 end
 
 P.load_kernel = function(verbose)
   load_kernel(verbose)
   install_fasl()   -- after native overrides so the declare wrapper composes
+  -- Lua<->Shen interop surface (lua_interop.lua). Installed LAST so the
+  -- typed bridge (lua.function) sees the fully composed F["declare"]
+  -- (native-engine signature recording + fasl recording).
+  require("lua_interop").install(P)
 end
 P.initialise = initialise
 
