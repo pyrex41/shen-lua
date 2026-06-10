@@ -56,6 +56,7 @@ io.stderr:write(("[bundle] kernel blob: %d bytes\n"):format(#blob))
 local MODULES = {
   "runtime", "compiler", "prims", "boot",
   "prolog_engine", "prolog_compile", "typecheck_native",
+  "lua_interop", "repl",
   "shen",
 }
 

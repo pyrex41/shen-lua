@@ -39,6 +39,8 @@ build = {
       prolog_engine    = "prolog_engine.lua",
       prolog_compile   = "prolog_compile.lua",
       typecheck_native = "typecheck_native.lua",
+      lua_interop      = "lua_interop.lua",
+      repl             = "repl.lua",
    },
    install = {
       bin = { shen = "bin/shen" },
