@@ -1,3 +1,16 @@
+# Examples
+
+Three examples, smallest first (all run with plain `luajit`/`bin/shen`,
+no external dependencies, no network):
+
+| | |
+|---|---|
+| `hello_embed.lua` | the smallest useful embedding: boot, define a typed Shen function, call it from Lua, pass lists both ways. `luajit examples/hello_embed.lua` |
+| `family.shen` | Shen Prolog in twenty lines — facts, rules, yes/no and binding queries. `bin/shen examples/family.shen` |
+| `config_check.lua` | the showcase, walked through below. `luajit examples/config_check.lua` |
+
+---
+
 # Lua ⇄ Shen interop: a typed validation layer for Lua config tables
 
 Run from the repo root (or anywhere — the script finds its way home):

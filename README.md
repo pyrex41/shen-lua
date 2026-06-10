@@ -11,6 +11,23 @@ It targets **Shen 41.1** (via the KLambda in `ShenOSKernel-41.1/klambda`) and
 passes the official 41.1 kernel test suite (134/134). Earlier versions were
 certified against the Shen 22.4 kernel test suite.
 
+## Quick start
+
+```sh
+git clone https://github.com/pyrex41/shen-lua && cd shen-lua
+bin/shen                            # REPL: multiline input, history, helpful errors
+bin/shen -e "(+ 1 2)"               # one-liner
+bin/shen examples/family.shen       # run a program (Shen Prolog in 20 lines)
+luajit examples/hello_embed.lua     # embed Shen in a Lua program in ~25 lines
+luajit examples/config_check.lua    # the showcase: a typed validation layer for Lua data
+```
+
+The only requirement is **LuaJIT 2.1** (`brew install luajit` /
+`apt-get install luajit`); plain Lua 5.1/5.4/5.5 also works (slower — see the
+compatibility tier below). The first boot compiles the kernel (~1 s); after
+that the bytecode cache boots it in ~30 ms, and loaded programs are cached
+fasl-style, so everything is fast from the second run on.
+
 ## Why a compiler (not an interpreter)
 
 The design goal is speed, so the host backend is a **source-to-source compiler**,
@@ -28,12 +45,16 @@ not a tree-walker:
 
 ## Architecture
 
-| File | Lines | Role |
-|------|------:|------|
-| `runtime.lua`  | 225 | data representation, symbol interning, the KLambda reader |
-| `compiler.lua` | 825 | KLambda → Lua source compiler (statement-based codegen) |
-| `prims.lua`    | 719 | runtime env: the primitive set, apply/curry machinery, native overrides, loader |
-| `boot.lua`     | 112 | wires up streams, platform globals, loads the 41.1 kernel `.kl` files, runs `shen.initialise` |
+| File | Role |
+|------|------|
+| `runtime.lua`  | data representation, symbol interning, the KLambda reader |
+| `compiler.lua` | KLambda → Lua source compiler (statement-based codegen, tail-call → loop lowering) |
+| `prims.lua`    | runtime env: the primitive set, apply/curry machinery, native overrides, loader |
+| `boot.lua`     | kernel loading, the bytecode + fasl caches, `shen.initialise` |
+| `shen.lua`     | the public embedding API (`require("shen")`) |
+| `lua_interop.lua` | the Lua ⇄ Shen bridge (`lua.call`, `lua.function`, marshaling) |
+| `repl.lua`     | the interactive REPL (multiline input, error translation, backtraces) |
+| `prolog_engine.lua` / `prolog_compile.lua` / `typecheck_native.lua` | the native soa32 Prolog/typecheck engine |
 
 Data representation (chosen so hot paths stay trace-JIT-friendly):
 
@@ -81,6 +102,19 @@ designed around what LuaJIT's tracing JIT rewards:
 and `SHEN_PROLOG_NATIVE=off` disable the typechecker/query routing
 individually. Correctness never depends on native coverage: anything the
 translator refuses simply keeps its legacy definition.
+
+Two caches make warm starts near-instant (both content-keyed, both safe to
+delete at any time):
+
+* **Kernel bytecode cache** — the compiled kernel is `string.dump`ed after the
+  first boot (`.shen-kernel-cache.bin`); warm boots load it in **~30 ms**
+  instead of recompiling (~1 s).
+* **User fasl cache** — `(load "prog.shen")` records its compiled chunks and
+  replays them on later runs, skipping the reader, macroexpansion *and
+  typechecking* (SBCL-fasl semantics: it typechecked when it compiled).
+  Invalidation is make-style: edit a file and everything loaded after it
+  recompiles. `SHEN_FASL=off` disables; `SHEN_FASL_DIR` relocates
+  (default `~/.cache/shen-lua-fasl`).
 
 ## Requirements
 
@@ -141,6 +175,12 @@ bin/shen -e "(+ 1 2)"          # evaluate and print (mixes with files, in order)
 bin/shen -q prog.shen          # -q hushes load echo
 ```
 
+The REPL reads multiline forms (it tracks paren balance through strings and
+comments), keeps history (`~/.shen_history` with linenoise/readline installed,
+or run under `rlwrap`), and translates Lua-level failures into useful errors:
+undefined functions get a *did-you-mean* suggestion, and uncaught errors print
+a backtrace of **Shen** function names with the Lua plumbing filtered out.
+
 ### luarocks
 
 ```sh
@@ -166,19 +206,31 @@ shen.boot{quiet=true}            -- boots from embedded bytecode in ~tens of ms
 print(shen.eval("(+ 1 2)"))      --> 3
 ```
 
-## Running a program
+## Calling Lua from Shen (and Shen from Lua)
 
-Programmatically:
+Every Shen value *is* a Lua value, and the bridge is first-class in both
+directions (`lua_interop.lua`):
 
-```lua
-local P = require("boot")
-P.load_kernel(false)   -- compile + load the 41.1 kernel (~21 .kl files incl. stlib)
-P.initialise()         -- (shen.initialise) — required before most kernel services work
--- evaluate a Shen top-level form through the real pipeline:
-local R = require("runtime")
-P.F["eval"](R.read_all('(define square X -> (* X X))')[1])
-print(require("runtime").to_str(P.F["square"](9)))   -- 81
+```shen
+(lua.call "string.format" ["%s: %d" "answer" 42])  \\ any Lua function by dotted path
+(lua.require "cjson")                              \\ modules come back as opaque boxes
+(lua.method Obj "name" Args)                       \\ obj:name(...)
 ```
+
+The headline feature is the **typed bridge** — `lua.function` registers a Lua
+function as a real Shen function *with a declared type*, so typechecked Shen
+code can call into Lua and the call sites are proved sound under `(tc +)`.
+From the Lua side, `shen.fn`/`shen.call` make any Shen function (including
+curried partials) an ordinary Lua callable. Marshaling rules are documented
+exhaustively at the top of `lua_interop.lua`.
+
+## Examples
+
+| | |
+|---|---|
+| `examples/hello_embed.lua` | the smallest useful embedding: boot, define a typed function, call it both ways (~25 lines) |
+| `examples/family.shen` | Shen Prolog in twenty lines: facts, rules, queries via `bin/shen` |
+| `examples/config_check.lua` | the showcase: Shen datatypes + rules as a **typed validation layer** for nested Lua config tables — the typechecker rejects buggy rules at load time ([walkthrough](examples/README.md)) |
 
 ## Certification / Testing
 
@@ -199,25 +251,30 @@ See [41.1-STATUS.md](41.1-STATUS.md) for more detail. The old
 
 ## Benchmarks
 
-Current numbers on Apple Silicon (LuaJIT 2.1, best/min of several runs — the host
-thermally throttles ~2× run-to-run, so timings are min-of-N and allocation is the
+Current numbers on Apple Silicon (LuaJIT 2.1, interleaved min-of-N — the host
+thermally throttles run-to-run, so timings are mins and allocation is the
 deterministic metric):
 
-| workload | legacy engine | **native soa32 engine** |
-|----------|--------------:|------------------------:|
-| Cold startup (compile + load the full 41.1 kernel) | ~0.71 s | ~0.71 s |
-| **Full 41.1 kernel test suite** (134/134) | ~16 s | **~11 s** |
-| Reference typecheck (431,741 inferences) | ~0.54 s | **~0.061 s (8.9×)** |
-| Typechecker allocation | ~344–371 B/inf | **~24 B/inf (−93%)** |
-| Einstein's riddle (Prolog backtracking) | ~0.044 s / solve | **~0.002 s / solve (22×)** |
-| `fib(30)` / `fib(32)` (compute-bound recursion) | ~0.015 s / ~0.041 s | (same — not Prolog) |
+| workload | time |
+|----------|-----:|
+| Kernel boot, cold (compile all `.kl`) | ~0.7 s |
+| Kernel boot, warm (bytecode cache) | **~0.03 s** |
+| **Full 41.1 test suite, warm** (kernel + fasl caches) | **~2.3 s** |
+| Full 41.1 test suite, cold (caches off) | ~5.4 s |
+| Reference typecheck (431,741 inferences) | ~0.061 s (8.9× vs legacy engine) |
+| Typechecker allocation | ~24 B/inf (−93% vs legacy) |
+| Einstein's riddle (Prolog backtracking) | ~0.002 s / solve (22× vs legacy) |
+| Single-file bundle: require + boot + eval, from nothing | ~70 ms |
 
-The native engine closes most of the gap to the fastest port — **shen-cl** on
-SBCL (suite in 4–8 s) — by removing the allocation-bound CPS execution model
-(freeze-closures + currying) rather than fighting it: terms became plain
-numbers over flat int32 storage, and continuations became integers. See
-`PERF-HANDOFF.md` and `BENCHMARKS.md` for the measurement history that led
-here (six disproven levers, the WAM PoC, and the soa32 verdict).
+Measured against the fastest port — **shen-cl** on SBCL, same machine, suite in
+~1.6 s — the warm-cache gap is **~1.5×**, down from 5.5× before the caching and
+native-engine work. The big steps, in order: the native soa32 engine (terms as
+plain numbers over flat int32 storage, continuations as integers, replacing the
+allocation-bound CPS model), the kernel bytecode + user fasl caches, raising
+LuaJIT's mcode/trace limits (the default 512 KB area caused constant
+trace-cache flushes), and native overrides for the hottest kernel predicates.
+See `PERF-HANDOFF.md` and `BENCHMARKS.md` for the full measurement history
+(including the disproven levers).
 
 The historical Shen 22.4 head-to-head versus the `shen-c` 0.2.3 interpreter (same
 machine) is preserved in `BENCHMARKS.md`: fib 66–79× faster, n-queens ~2.5× faster,
