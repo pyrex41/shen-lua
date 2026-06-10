@@ -89,6 +89,42 @@ function shen.fn(name)
   end
 end
 
+-- ---- typecheck --------------------------------------------------------------
+-- Ask the kernel's sequent-calculus typechecker whether `expr` inhabits the
+-- type `ty`. Returns the inferred type (a Shen value — symbol or cons tree)
+-- on success, false on failure. Both arguments are STRINGS of Shen source:
+-- the expression is READ, never evaluated (the typechecker judges syntax —
+-- `shen.typecheck("[1 2]", "(list number)")`, not an evaluated list value).
+-- `ty` may use type variables: shen.typecheck("[1 2]", "A") infers.
+--
+-- Two kernel traps this helper absorbs, both learned in production embeds:
+--   1. (shen.typecheck X A) takes the SYNTAX TREE of X — the form the reader
+--      produces — not X's value. Passing an evaluated value silently returns
+--      false for anything non-atomic.
+--   2. The kernel's inference counter (shen.*infs*) is GLOBAL and cumulative,
+--      and shen.typecheck never resets it; only the REPL's toplevel does.
+--      A long-lived embedder calling the kernel entry point directly crosses
+--      *maxinferences* (default 1,000,000) after enough checks, after which
+--      EVERY check fails (the native engine throws maxinfexceeded). This
+--      helper resets the counter per call, making *maxinferences* a
+--      per-check inference budget: a check that exceeds it returns false.
+--      Override the budget with shen.eval("(set shen.*maxinferences* N)").
+function shen.typecheck(expr, ty)
+  ensure_boot()
+  local eforms = P.F["read-from-string"](expr)
+  if not R.is_cons(eforms) then
+    error("shen.typecheck: no expression in " .. tostring(expr), 2)
+  end
+  local tforms = P.F["read-from-string"](ty)
+  if not R.is_cons(tforms) then
+    error("shen.typecheck: no type in " .. tostring(ty), 2)
+  end
+  P.GLOBALS["shen.*infs*"] = 0
+  local ok, res = pcall(P.F["shen.typecheck"], eforms[1], tforms[1])
+  if not ok then return false end   -- budget exhausted or kernel error: fail closed
+  return res
+end
+
 -- ---- marshaling helpers -----------------------------------------------------
 -- Lua array -> Shen cons list (shallow; elements are passed through as-is).
 function shen.list(arr)
