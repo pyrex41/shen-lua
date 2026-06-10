@@ -18,19 +18,48 @@ print("Kernel initialised. Version:", P.F["version"] and P.F["version"]() or "?"
 
 -- Now that the kernel is live, switch the process cwd into the tests directory.
 -- This makes all the relative (load "foo.shen") calls inside the test suite resolve correctly.
-local ffi = require("ffi")
-ffi.cdef[[
-  int chdir(const char *path);
-  char *getcwd(char *buf, size_t size);
-]]
-
-local tests_dir = "../cl-source/ShenOSKernel-41.1/tests"
-if ffi.C.chdir(tests_dir) ~= 0 then
-  error("failed to chdir to " .. tests_dir)
+-- Under LuaJIT we chdir via the FFI (unchanged); under PUC Lua try lfs, and
+-- if neither is available fall back to prefixing relative paths inside the
+-- `open` primitive — ALL kernel file I/O (load -> read-file -> open, plus the
+-- suite's write-to-file output) funnels through it, so prefixing there is
+-- equivalent to a chdir for the suite's purposes.
+local tests_dir = os.getenv("SHEN_TESTS_DIR") or "../cl-source/ShenOSKernel-41.1/tests"
+local chdir_done = false
+local ok_ffi, ffi = pcall(require, "ffi")
+if ok_ffi then
+  ffi.cdef[[
+    int chdir(const char *path);
+    char *getcwd(char *buf, size_t size);
+  ]]
+  if ffi.C.chdir(tests_dir) ~= 0 then
+    error("failed to chdir to " .. tests_dir)
+  end
+  local cwd = ffi.string(ffi.C.getcwd(nil, 0)) or "?"
+  print("Switched working directory for tests: " .. cwd)
+  chdir_done = true
+else
+  local ok_lfs, lfs = pcall(require, "lfs")
+  if ok_lfs and lfs.chdir(tests_dir) then
+    print("Switched working directory for tests (lfs): " .. (lfs.currentdir() or "?"))
+    chdir_done = true
+  end
 end
-
-local cwd = ffi.string(ffi.C.getcwd(nil, 0)) or "?"
-print("Switched working directory for tests: " .. cwd)
+if not chdir_done then
+  local probe = io.open(tests_dir .. "/harness.shen", "r")
+  if not probe then
+    error("cannot find tests at " .. tests_dir .. " (set SHEN_TESTS_DIR)")
+  end
+  probe:close()
+  local orig_open = P.F["open"]
+  P.F["open"] = function(name, dir)
+    if type(name) == "string" and name:sub(1, 1) ~= "/" then
+      name = tests_dir .. "/" .. name
+    end
+    return orig_open(name, dir)
+  end
+  P.FA[P.F["open"]] = 2
+  print("No chdir primitive (PUC Lua): prefixing relative paths with " .. tests_dir)
+end
 
 -- 41.1 initialise is not populating *macros* (and shen.*tc* etc.) in a way
 -- the bare names the harness and early code expect. Force the initial value

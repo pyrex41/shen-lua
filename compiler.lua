@@ -74,6 +74,12 @@ local CTX  -- nil outside a defun compile; otherwise a fresh table per defun.
 -- separate Lua function (KC bodies, the no-CTX IIFE fallback) — a `goto`
 -- there would cross a function boundary and fail to parse.
 local SELF
+
+-- The lowering emits `goto`/labels, which PUC Lua 5.1 cannot parse (goto is
+-- 5.2+/LuaJIT). Feature-detect once; without it every defun simply keeps the
+-- proper-tail-call form (correctness identical -- this is a perf-only lever).
+local HAS_GOTO = (loadstring or load)("do goto tco ::tco:: end") ~= nil
+
 local function new_ctx()
   -- cbodies: hoisted bodies (both `freeze` bodies and value-position control
   --          forms), emitted into a single `KC` table at *chunk* scope (built
@@ -290,8 +296,16 @@ local function catom(form, env)
 end
 
 -- numeric literal needs care: keep integers exact
+-- mtoint: PUC 5.3+ %d-format guard (string.format("%d", n) errors there for
+-- an integral float outside int64 range). nil under LuaJIT/5.1: path unchanged.
+local mtoint = math.tointeger
 local function cnum(n)
   if n == math.floor(n) and n ~= math.huge and n ~= -math.huge then
+    if mtoint then
+      local i = mtoint(n)
+      if i then return string.format("%d", i) end
+      return string.format("%.17g", n)
+    end
     return string.format("%d", n)
   end
   return string.format("%.17g", n)
@@ -972,7 +986,7 @@ local function cdefun(form)
   -- step wrapper installed around F[name]) is not observed by an already-
   -- running loop. Non-tail self-calls and APP/partial calls are unaffected.
   local saved_self = SELF
-  if not ARITH2[name] and pure_tail_self(body, name, #params, true)
+  if HAS_GOTO and not ARITH2[name] and pure_tail_self(body, name, #params, true)
      and not lambda_captures_param(body, env, {}) then
     SELF = { name = name, arity = #params, lnames = lnames, used = false }
   else

@@ -38,6 +38,11 @@
 local R = require("runtime")
 local C = require("compiler")
 
+-- 5.2+ compatibility shims (this module only runs under LuaJIT today — it is
+-- loaded via prolog_engine.lua, which is FFI-gated — but keep it loadable).
+local unpack = table.unpack or unpack
+local loadstring = loadstring or load
+
 local M = {}
 
 local E, P, F            -- bound in install()

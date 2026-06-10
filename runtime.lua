@@ -194,10 +194,18 @@ M.read_all = read_all
 ----------------------------------------------------------------------
 -- Printer (for debugging / REPL)
 ----------------------------------------------------------------------
+-- mtoint: PUC 5.3+ %d-format guard (string.format("%d", x) errors there for
+-- an integral float outside int64 range). nil under LuaJIT/5.1: path unchanged.
+local mtoint = math.tointeger
 local function to_str(x, seen)
   local t = type(x)
   if t == "number" then
     if x == math.floor(x) and x == x and x ~= math.huge and x ~= -math.huge then
+      if mtoint then
+        local i = mtoint(x)
+        if i then return string.format("%d", i) end
+        return string.format("%.17g", x)
+      end
       return string.format("%d", x)
     end
     return tostring(x)
