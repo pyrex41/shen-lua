@@ -4,6 +4,20 @@ local R = require("runtime")
 local C = require("compiler")
 local P = require("prims")
 
+-- LuaJIT's default mcode area (512KB, 1000 traces) is far too small for the
+-- compiled kernel: on macOS arm64 the suite triggers dozens of full
+-- trace-cache flushes per run ("failed to allocate mcode memory"), costing
+-- ~10-16% of total wall time re-JITting the same code. Raise the limits once
+-- at boot. SHEN_JIT_OPT=off restores the host's defaults (embedders that
+-- manage jit.opt themselves should set it).
+do
+  local jit_ok, jit = pcall(require, "jit")
+  if jit_ok and jit and jit.opt and os.getenv("SHEN_JIT_OPT") ~= "off" then
+    pcall(jit.opt.start,
+      "sizemcode=2048", "maxmcode=131072", "maxtrace=8000", "maxside=400")
+  end
+end
+
 local function find_kldir()
   local env = os.getenv("SHEN_KL_DIR")
   if env and env ~= "" then return env end
