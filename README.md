@@ -182,7 +182,7 @@ shen.tostring(x)                      -- render any Shen value
 bin/shen                       # interactive REPL
 bin/shen prog.shen ...         # (load) each file, then exit
 bin/shen -e "(+ 1 2)"          # evaluate and print (mixes with files, in order)
-bin/shen -q prog.shen          # -q hushes load echo
+bin/shen -q prog.shen          # -q sets *hush*: silences load echo AND (output ...)
 ```
 
 The REPL reads multiline forms (it tracks paren balance through strings and
