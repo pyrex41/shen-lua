@@ -630,7 +630,7 @@ local function try_const(form, env)
 end
 
 -- General literal data hoisting for (cons ...) trees used as arguments
--- (e.g. embedded source forms passed to shen.record-kl in 41.1 stlib, giant
+-- (e.g. embedded source forms passed to shen.record-kl in 41.2 stlib, giant
 -- arity tables, etc.). A form is "literal data" only if it self-evaluates:
 -- atoms / unbound symbols / NIL, or a `(cons L R)` call whose subtrees are
 -- literal data. Crucially this MUST NOT match other calls like `(set ...)`,
@@ -689,7 +689,7 @@ end
 -- A KLambda expression like `(cons A (cons B (cons (cons ...) ...)))` compiles
 -- naively into deeply-nested `F["cons"](_, F["cons"](_, F["cons"](_, _)))`
 -- expressions. Lua's parser refuses to compile expressions nested past about
--- 200 levels, so the 41.1 stlib's giant `shen.record-kl <name> <source-tree>`
+-- 200 levels, so the 41.2 stlib's giant `shen.record-kl <name> <source-tree>`
 -- calls (some have tree depth ~216 and ~7000 cons cells) blow up at load.
 --
 -- The fix: emit deep cons-trees through a flat blueprint array consumed by
@@ -909,7 +909,7 @@ function ctail(form, env)
         -- Always turn intermediate do values into a statement via IIFE.
         -- This is guaranteed valid Lua syntax for any expression (var, call, etc.)
         -- and introduces no new named locals in the enclosing function scope.
-        -- Critical for giant do-chains in 41.1 stlib.initialise-* and
+        -- Critical for giant do-chains in 41.2 stlib.initialise-* and
         -- shen.initialise-lambda-forms.
         s[#s+1] = "(function() return " .. es .. " end)();"
       end

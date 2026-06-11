@@ -1,6 +1,6 @@
 local P = require("boot"); local R = require("runtime")
 P.load_kernel(false); P.initialise()
-local ffi=require("ffi"); ffi.cdef[[int chdir(const char*);]]; ffi.C.chdir("../cl-source/ShenOSKernel-41.1/tests")
+local ffi=require("ffi"); ffi.cdef[[int chdir(const char*);]]; ffi.C.chdir("../cl-source/ShenOSKernel-41.2/tests")
 local mf=P.F["shen.macros"]; if mf and not P.GLOBALS["*macros*"] then P.GLOBALS["*macros*"]=R.cons(R.cons(R.cons(R.intern("shen.macros"),mf),R.NIL),R.NIL) end
 if P.GLOBALS["shen.*tc*"]~=nil and P.GLOBALS["*tc*"]==nil then P.GLOBALS["*tc*"]=P.GLOBALS["shen.*tc*"] end
 P.F["load"]("interpreter.shen")

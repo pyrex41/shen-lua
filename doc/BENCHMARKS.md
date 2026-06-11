@@ -76,7 +76,7 @@ Pass rate:     100 %
 Wall time:     ~35 s
 ```
 
-Run via `luajit run-41.1-tests.lua`. The harness loads, package /
+Run via `luajit run-kernel-tests.lua`. The harness loads, package /
 `defmacro` machinery works, the Prolog engine is exercised, and typed
 mode runs to completion.
 
@@ -140,7 +140,7 @@ luajit -e '
 
 # Full official suite (set SHEN_TESTS_DIR or place the official tests at
 # ../cl-source/ShenOSKernel-41.1/tests):
-luajit run-41.1-tests.lua
+luajit run-kernel-tests.lua
 
 # fib + Einstein microbench:
 luajit bench.lua

@@ -32,7 +32,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ----------------------------------------------------------------------------
 
 The vendored Shen kernel sources (klambda/) and the official kernel test
-suite (tests/) are from the ShenOSKernel 41.1 distribution and are:
+suite (tests/) are from the ShenOSKernel 41.2 distribution and are:
 
 Copyright (c) 2010-2022, Mark Tarver
 All rights reserved.

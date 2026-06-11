@@ -1,11 +1,11 @@
--- run-41.1-tests.lua
--- Driver to run the Shen 41.1 kernel test suite under shen-lua
+-- run-kernel-tests.lua
+-- Driver to run the Shen kernel test suite (vendored under tests/) under shen-lua
 
 -- Require shen-lua modules from the shen-lua directory (KL dir discovery uses relative paths)
 local P = require("boot")
 local R = require("runtime")
 
-print("Loading Shen 41.1 kernel...")
+print("Loading Shen kernel...")
 local t0 = os.clock()
 P.load_kernel(false)
 local t1 = os.clock()
@@ -61,7 +61,7 @@ if not chdir_done then
   print("No chdir primitive (PUC Lua): prefixing relative paths with " .. tests_dir)
 end
 
--- 41.1 initialise is not populating *macros* (and shen.*tc* etc.) in a way
+-- initialise is not populating *macros* (and shen.*tc* etc.) in a way
 -- the bare names the harness and early code expect. Force the initial value
 -- that shen.initialise-environment was supposed to install.
 -- This is needed for the macro system (defmacro, etc.) to work.
@@ -70,7 +70,7 @@ do
   if macros_fn and not P.GLOBALS["*macros*"] then
     local entry = R.cons( R.cons(R.intern("shen.macros"), macros_fn), R.NIL )
     P.GLOBALS["*macros*"] = R.cons(entry, R.NIL)
-    print("Note: manually seeded *macros* for 41.1 compatibility")
+    print("Note: manually seeded *macros* for kernel compatibility")
   end
   -- Also make bare *tc* work if code expects it (the kernel set shen.*tc*)
   if P.GLOBALS["shen.*tc*"] ~= nil and P.GLOBALS["*tc*"] == nil then

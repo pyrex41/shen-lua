@@ -30,8 +30,8 @@ local function find_kldir()
   -- 2. Common external locations (useful when developing against a full
   --    ShenOSKernel checkout or the legacy shen-c reference implementation)
   local candidates = {
-    "../cl-source/ShenOSKernel-41.1/klambda",
-    "../ShenOSKernel-41.1/klambda",
+    "../cl-source/ShenOSKernel-41.2/klambda",
+    "../ShenOSKernel-41.2/klambda",
     -- legacy shen-c (22.4) clone for comparison / older certification
     "../shen-c/shen/src/kl",
     "../shen-c/klambda",
@@ -87,13 +87,13 @@ P.GLOBALS["*sterror*"]  = err_stream
 P.GLOBALS["*stinput*"]  = in_stream
 P.GLOBALS["*home-directory*"] = ""
 
--- ---- platform metadata (required by 41.1+ kernel) -------------------------
+-- ---- platform metadata (required by 41.2+ kernel) -------------------------
 P.GLOBALS["*language*"]       = "Lua"
 P.GLOBALS["*implementation*"] = rawget(_G, "jit") and "LuaJIT" or _VERSION
 P.GLOBALS["*port*"]           = "shen-lua"
 P.GLOBALS["*porters*"]        = "shen-lua contributors"
 P.GLOBALS["*os*"]             = (package.config and package.config:sub(1,1) == "\\") and "Windows" or "Unix"
-P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes from init.kl ("41.1")
+P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes from init.kl ("41.2")
 
 -- ---- kernel bytecode cache -------------------------------------------------
 -- Loading the kernel from .kl sources costs ~0.8s (read + parse + KL->Lua
@@ -282,8 +282,10 @@ local function read_cache(path, key)
 end
 
 -- ---- load the kernel -----------------------------------------------------
--- Loads the 21 .kl files that make up Shen 41.1 (core + stlib + extensions).
--- The 41.1 KLambda sources are vendored under `klambda/` so the repository
+-- Loads the 21 .kl modules that make up Shen 41.2 (core + stlib + extensions;
+-- same boot list as shen-cl 41.2 — the opt-in
+-- extension-programmable-pattern-matching.kl is vendored but not booted).
+-- The 41.2 KLambda sources are vendored under `klambda/` so the repository
 -- is self-contained. You can still override with SHEN_KL_DIR (e.g. to point
 -- at a full ShenOSKernel checkout during development).
 

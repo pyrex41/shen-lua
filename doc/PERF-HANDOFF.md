@@ -47,7 +47,7 @@ kernel signatures):
 `SHEN_PROLOG_DEBUG=1` (log translation refusals),
 `SHEN_KERNEL_CACHE=off|<path>` (kernel bytecode cache; see below).
 
-**Gates (rerun after any change).** `luajit run-41.1-tests.lua` 134/134 in
+**Gates (rerun after any change).** `luajit run-kernel-tests.lua` 134/134 in
 both engine modes; `luajit bench/golden_typecheck.lua compare` 27/27 in both;
 `luajit test/engine_spec.lua` 70/70; infs == 431741 exactly on the reference
 typecheck (`/  the y-combinator bench`) — the translated drivers must keep
@@ -130,7 +130,7 @@ Fix if it ever fires: reuse two alternating locals or route through MKLIST.
 1. The remaining warm gap to shen-cl (~2.7×: 4.2s vs 1.56s) is now pure
    test-body EXECUTION — reader/macro/typecheck are skipped on warm runs, so
    what's left is general compiled-KL execution + per-process LuaJIT trace
-   warmup. Profile with `luajit -jp=fl run-41.1-tests.lua` (leaf time, not
+   warmup. Profile with `luajit -jp=fl run-kernel-tests.lua` (leaf time, not
    just `bench/callfreq.lua` call counts) to re-rank. (Kernel load: done.
    Reader/macro/typecheck on repeated loads: done, see fasl above.)
 2. Self-tail-call → loop lowering in `cdefun` (shen-rust klcompile precedent:
@@ -280,7 +280,7 @@ a bump arena, bypassing the Lua allocator + GC for the hot region. Scope to the 
 engine only; do NOT rewrite the whole value layer. Biggest ceiling, biggest effort.
 
 ### Also: re-check JIT engagement
-Allocation is now 3× lower → traces may stay hotter. `luajit -jv run-41.1-tests.lua 2>&1 |
+Allocation is now 3× lower → traces may stay hotter. `luajit -jv run-kernel-tests.lua 2>&1 |
 grep -c flush` (290 at baseline → ~84 after IIFE work). Re-test `-O` cache params and the
 JIT on/off ratio; could be a free win now.
 

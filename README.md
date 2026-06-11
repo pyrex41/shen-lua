@@ -14,8 +14,8 @@ primitives on a host runtime and (b) translating the kernel's `.kl` files into
 that host. This port does both by **compiling KLambda to Lua source** that
 LuaJIT then trace-compiles to machine code.
 
-It targets **Shen 41.1** (via the KLambda in `ShenOSKernel-41.1/klambda`) and
-passes the official 41.1 kernel test suite (134/134). Earlier versions were
+It targets **Shen 41.2** (via the KLambda in `ShenOSKernel-41.2/klambda`) and
+passes the official 41.2 kernel test suite (134/134). Earlier versions were
 certified against the Shen 22.4 kernel test suite.
 
 ## Quick start
@@ -133,7 +133,7 @@ delete at any time):
 ## Requirements
 
 * **LuaJIT 2.1** (Lua 5.1 semantics). On Debian/Ubuntu: `apt-get install luajit`.
-* Nothing else — the **Shen 41.1 KLambda sources** (`klambda/`) are vendored in this
+* Nothing else — the **Shen 41.2 KLambda sources** (`klambda/`) are vendored in this
   repository for a self-contained clone-and-run experience. You can still point
   `SHEN_KL_DIR` at an external checkout if you are working against a different
   ShenOSKernel tree.
@@ -265,21 +265,21 @@ exhaustively at the top of [`lua_interop.lua`](lua_interop.lua).
 
 ## Certification / Testing
 
-The port loads and initialises the full 41.1 kernel (including `stlib` and the new
-extensions) and **passes the official 41.1 kernel test suite, 134/134**:
+The port loads and initialises the full 41.2 kernel (including `stlib` and the new
+extensions) and **passes the official 41.2 kernel test suite, 134/134**:
 
 ```sh
-luajit run-41.1-tests.lua    # => "passed ... 134 / failed ... 0 / pass rate ... 100%"
-lua    run-41.1-tests.lua    # same result on PUC Lua 5.1 / 5.4 / 5.5 (slower)
+luajit run-kernel-tests.lua    # => "passed ... 134 / failed ... 0 / pass rate ... 100%"
+lua    run-kernel-tests.lua    # same result on PUC Lua 5.1 / 5.4 / 5.5 (slower)
 ```
 
 The official test suite is vendored in `tests/` (BSD-licensed, from the
-ShenOSKernel 41.1 distribution), so certification is verifiable from a bare
+ShenOSKernel 41.2 distribution), so certification is verifiable from a bare
 clone. `SHEN_TESTS_DIR` points the driver at a different suite location.
 Port-specific specs live in `test/` (engine, interop, REPL, tail-call
 lowering).
 
-See [doc/41.1-STATUS.md](doc/41.1-STATUS.md) for more detail.
+See [doc/41.1-STATUS.md](doc/41.1-STATUS.md) for the original 41.1 certification write-up (the 41.2 upgrade re-ran the same suite, 134/134).
 
 ## Benchmarks
 
@@ -291,8 +291,8 @@ deterministic metric):
 |----------|-----:|
 | Kernel boot, cold (compile all `.kl`) | ~0.7 s |
 | Kernel boot, warm (bytecode cache) | **~0.03 s** |
-| **Full 41.1 test suite, warm** (kernel + fasl caches) | **~2.3 s** |
-| Full 41.1 test suite, cold (caches off) | ~5.4 s |
+| **Full 41.2 test suite, warm** (kernel + fasl caches) | **~2.3 s** |
+| Full 41.2 test suite, cold (caches off) | ~5.4 s |
 | Reference typecheck (431,741 inferences) | ~0.061 s (8.9× vs legacy engine) |
 | Typechecker allocation | ~24 B/inf (−93% vs legacy) |
 | Einstein's riddle (Prolog backtracking) | ~0.002 s / solve (22× vs legacy) |

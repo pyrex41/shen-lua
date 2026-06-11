@@ -1,4 +1,4 @@
--- bench/evalstats.lua : measure runtime recompilation over the 41.1 suite.
+-- bench/evalstats.lua : measure runtime recompilation over the 41.2 suite.
 -- Counts P.eval calls, compile_top/compile_expr_chunk invocations, duplicate
 -- form identities and duplicate generated sources, and total time inside eval.
 -- Run from the repo root: luajit bench/evalstats.lua
@@ -67,7 +67,7 @@ P.initialise = function(...)
 end
 
 local t0 = os.clock()
-dofile("run-41.1-tests.lua")
+dofile("run-kernel-tests.lua")
 local total = os.clock() - t0
 
 local distinct_src = (st.top + st.expr) - st.src_dup

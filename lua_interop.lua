@@ -256,7 +256,7 @@ end
 
 -- Shen-LEVEL registration of name/arity: the `arity` property plus the
 -- shen.lambda-form entry that (fn name) and Shen's evaluator consult. NOT via
--- the kernel's update-lambda-table: in 41.1 that does
+-- the kernel's update-lambda-table: in 41.2 that does
 -- (set-lambda-form-entry [F | LambdaEntry]) with LambdaEntry already the
 -- (name . fn) pair, so the stored lambda-form is a CONS, and any tc+ call
 -- site — which compiles declare-only functions to ((fn name) A B ...) —

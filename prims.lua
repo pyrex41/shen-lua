@@ -567,7 +567,7 @@ function P.install_native_prolog()
   -- vectors are used sequentially (never nested in one inference), so a global
   -- ticket-indexed stack is safe.
   --
-  -- RESIDUAL RISK (validated empirically: 41.1 suite 134/134 + the typecheck
+  -- RESIDUAL RISK (validated empirically: 41.1 and 41.2 suites 134/134 + the typecheck
   -- inference count is byte-identical with and without pooling, so no exercised
   -- unification path is perturbed): recycling reuses the table OBJECT, not just
   -- the ticket. This is unsafe only if a reclaimed-ticket pvar object is still

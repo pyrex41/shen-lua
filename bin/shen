@@ -64,7 +64,7 @@ if #actions == 0 then
   if ok and type(repl) == "table" and type(repl.run) == "function" then
     repl.run{ P = shen.prims, quiet = quiet }
   else
-    -- Plain kernel REPL — (shen.shen) / 41.1's (shen.repl) is
+    -- Plain kernel REPL — (shen.shen) / 41.x's (shen.repl) is
     -- (credits) + (loop), but the kernel loop spins forever at stdin EOF
     -- (lineread's error is trapped and the loop re-prompts), so transcribe
     -- it here with an EOF check on the *stinput* stream.

@@ -11,7 +11,7 @@ local shen = require("shen")
 shen.boot{quiet = true}                     -- warm boot is ~30 ms (bytecode cache)
 
 -- Define a Shen function at runtime, with the typechecker on
--- (sum/length come from the 41.1 stlib).
+-- (sum/length come from the 41.2 stlib).
 shen.eval([[
   (tc +)
   (define mean

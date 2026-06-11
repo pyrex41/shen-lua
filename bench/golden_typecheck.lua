@@ -27,8 +27,8 @@ ffi.cdef[[int chdir(const char*); char *getcwd(char*, size_t);]]
 local cwdbuf = ffi.new("char[4096]")
 assert(ffi.C.getcwd(cwdbuf, 4096) ~= nil)
 local ROOT = ffi.string(cwdbuf)
-assert(ffi.C.chdir("../cl-source/ShenOSKernel-41.1/tests") == 0,
-       "tests dir not found (expected ../cl-source/ShenOSKernel-41.1/tests)")
+assert(ffi.C.chdir("../cl-source/ShenOSKernel-41.2/tests") == 0,
+       "tests dir not found (expected ../cl-source/ShenOSKernel-41.2/tests)")
 
 -- same environment fixes typecheck_alloc.lua needs
 local mf = P.F["shen.macros"]

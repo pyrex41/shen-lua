@@ -1,4 +1,4 @@
--- bench.lua : self-contained benchmark for the 41.1 port
+-- bench.lua : self-contained benchmark for the 41.2 port
 -- Runs cold startup, then defines fib through the real Shen pipeline and
 -- measures fib(30), fib(32). Also runs Einstein's riddle through the live
 -- Prolog engine.
@@ -68,7 +68,7 @@ local ffi = require("ffi")
 ffi.cdef[[
   int chdir(const char *path);
 ]]
-if ffi.C.chdir("../cl-source/ShenOSKernel-41.1/tests") == 0 then
+if ffi.C.chdir("../cl-source/ShenOSKernel-41.2/tests") == 0 then
   -- run the test through Shen's load (which evaluates the file's top forms)
   bench("einstein-load", function()
     P.F["load"]("einsteins-riddle.shen")

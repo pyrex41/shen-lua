@@ -26,7 +26,7 @@ shen.runtime = R
 -- and run (shen.initialise). Idempotent. opts:
 --   quiet   = true  -> hush anything printed DURING boot (banner/echo);
 --                      *hush* is restored afterwards. For a permanently
---                      silent session do shen.eval("(hush +)") — in 41.1 the
+--                      silent session do shen.eval("(hush +)") — in 41.2 the
 --                      *hush* global gates `pr` itself, i.e. ALL output.
 --   verbose = true  -> log each kernel file to stderr as it loads
 local booted = false

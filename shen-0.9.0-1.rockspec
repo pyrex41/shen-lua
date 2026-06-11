@@ -8,13 +8,13 @@ source = {
 }
 
 description = {
-   summary = "A speed-focused LuaJIT port of the Shen language (kernel 41.1)",
+   summary = "A speed-focused LuaJIT port of the Shen language (kernel 41.2)",
    detailed = [[
 shen-lua runs the Shen language on LuaJIT 2.1 by compiling KLambda to Lua
 source. Embed with `local shen = require("shen")` (boot/eval/call/fn plus
 list/symbol marshaling), or use the `shen` launcher for a REPL, running
 .shen files, and -e one-liners. Requires LuaJIT (Lua 5.1 semantics + FFI);
-the Shen 41.1 KLambda sources are bundled and compiled on first boot, then
+the Shen 41.2 KLambda sources are bundled and compiled on first boot, then
 served from a bytecode cache.
 ]],
    homepage = "https://github.com/pyrex41/shen-lua",
@@ -45,7 +45,7 @@ build = {
    install = {
       bin = { shen = "bin/shen" },
    },
-   -- The vendored Shen 41.1 KLambda kernel sources, compiled on boot.
+   -- The vendored Shen 41.2 KLambda kernel sources, compiled on boot.
    -- They land in the rock directory
    -- (<tree>/lib/luarocks/rocks-5.1/shen/<version>/klambda); boot.lua's
    -- find_kldir() derives that path from its own install location.

@@ -5,7 +5,7 @@
 
 This document is executable proof of what shen-lua is and how it works, built with [showboat](https://github.com/simonw/showboat) (`uv tool install showboat`). Every code block below was actually run from the repo root; `showboat verify demo/walkthrough.md` re-runs them all and confirms the outputs still hold.
 
-**What it is:** [Shen](https://shenlanguage.org) — a functional Lisp with pattern matching, an optional sequent-calculus type system, and integrated Prolog — running on LuaJIT. Shen programs compile to KLambda (a ~46-primitive Lisp kernel); this port compiles KLambda to Lua source, which LuaJIT trace-compiles to machine code. It passes the official Shen 41.1 kernel test suite and runs (slower) on plain Lua 5.1/5.4/5.5.
+**What it is:** [Shen](https://shenlanguage.org) — a functional Lisp with pattern matching, an optional sequent-calculus type system, and integrated Prolog — running on LuaJIT. Shen programs compile to KLambda (a ~46-primitive Lisp kernel); this port compiles KLambda to Lua source, which LuaJIT trace-compiles to machine code. It passes the official Shen 41.2 kernel test suite and runs (slower) on plain Lua 5.1/5.4/5.5.
 
 ## 1. The language, through the launcher
 
@@ -127,12 +127,12 @@ print(string.format(\"boot+initialise under 250ms: %s\", tostring(ms < 250)))"
 boot+initialise under 250ms: true
 ```
 
-## 7. Certification: the official 41.1 test suite, from this clone
+## 7. Certification: the official 41.2 test suite, from this clone
 
 The suite is vendored in `tests/`; this runs all 134 official kernel tests (typechecker, Prolog, the works) and prints the final tally:
 
 ```bash
-luajit run-41.1-tests.lua 2>/dev/null | grep -E "^(passed|failed|pass rate)" | tail -3
+luajit run-kernel-tests.lua 2>/dev/null | grep -E "^(passed|failed|pass rate)" | tail -3
 ```
 
 ```output
@@ -144,7 +144,7 @@ pass rate ... 100%
 Same result under the legacy (pure compiled-KL) engine — the native FFI substrate is an optimization, never a semantic dependency:
 
 ```bash
-SHEN_FASL=off SHEN_PROLOG_ENGINE=legacy luajit run-41.1-tests.lua 2>/dev/null | grep -E "^(passed|failed)" | tail -2
+SHEN_FASL=off SHEN_PROLOG_ENGINE=legacy luajit run-kernel-tests.lua 2>/dev/null | grep -E "^(passed|failed)" | tail -2
 ```
 
 ```output
