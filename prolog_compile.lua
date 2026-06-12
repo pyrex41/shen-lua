@@ -918,6 +918,7 @@ local function body_pred_names(body)
 end
 
 local query_runners = {}   -- arity -> F name
+local bootstrapping = 0    -- >0 while inside (bootstrap ...): emit portable KL
 
 local function native_query_expansion(body)
   local names = body_pred_names(body)
@@ -1071,11 +1072,32 @@ function M.install(Pmod, Emod)
     local orig_callp = F["shen.call-prolog"]
     if orig_callp then
       F["shen.call-prolog"] = function(body)
+        -- compile-to-file (bootstrap): the native expansion is a port-local
+        -- hook — (shen.lua-run-queryK "qname" ...) plus a Lua-side registry
+        -- entry — and does not survive as self-contained KL. Emit the
+        -- kernel's portable CPS expansion instead.
+        if bootstrapping > 0 then return orig_callp(body) end
         local ok, expansion = pcall(native_query_expansion, body)
         if ok and expansion then return expansion end
         return orig_callp(body)
       end
       P.FA[F["shen.call-prolog"]] = 1
+    end
+
+    -- (bootstrap "f.shen") writes f.kl; macroexpansion (incl. shen.call-prolog
+    -- for prolog?) runs inside its read-file, so gating its dynamic extent
+    -- keeps the emitted KL portable while in-process eval/load keep the
+    -- native fast path.
+    local orig_bootstrap = F["bootstrap"]
+    if orig_bootstrap then
+      F["bootstrap"] = function(file)
+        bootstrapping = bootstrapping + 1
+        local ok, r = pcall(orig_bootstrap, file)
+        bootstrapping = bootstrapping - 1
+        if not ok then error(r, 0) end
+        return r
+      end
+      P.FA[F["bootstrap"]] = 1
     end
   end
 
