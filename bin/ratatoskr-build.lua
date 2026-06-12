@@ -1,10 +1,10 @@
--- bin/yggdrasil-build.lua : Yggdrasil stage-2 builder for shen-lua.
+-- bin/ratatoskr-build.lua : Ratatoskr stage-2 builder for shen-lua.
 --
---   luajit bin/yggdrasil-build.lua <shaken-dir> <out.lua> [--linked]
+--   luajit bin/ratatoskr-build.lua <shaken-dir> <out.lua> [--linked]
 --
--- <shaken-dir> is a Yggdrasil stage-1 output directory: a tree-shaken
+-- <shaken-dir> is a Ratatoskr stage-1 output directory: a tree-shaken
 -- kernel (kernel.kl, ShenOSKernel-41.2 defuns in load order), the user
--- program as KL (one or more user= files), and yggdrasil.manifest.txt.
+-- program as KL (one or more user= files), and ratatoskr.manifest.txt.
 -- The builder compiles every KL form ahead of time with the port's own
 -- compiler (compiler.lua C.compile_top) and emits ONE runnable Lua
 -- program <out.lua>:
@@ -57,7 +57,7 @@
 -- generated program needs no KDATA serialization/rebuild step.
 
 -- ---- locate the repo root from this script's own path ---------------------
-local self = arg and arg[0] or "bin/yggdrasil-build.lua"
+local self = arg and arg[0] or "bin/ratatoskr-build.lua"
 local root = self:match("^(.*)[/\\]bin[/\\][^/\\]+$") or "."
 if not root:match("^[/\\]") and not root:match("^%a:[/\\]") then
   -- absolutize so --linked outputs bake a path that works from any cwd
@@ -71,7 +71,7 @@ if not root:match("^[/\\]") and not root:match("^%a:[/\\]") then
 end
 package.path = root .. "/?.lua;" .. package.path
 
-local USAGE = "usage: luajit bin/yggdrasil-build.lua <shaken-dir> <out.lua> [--linked]\n"
+local USAGE = "usage: luajit bin/ratatoskr-build.lua <shaken-dir> <out.lua> [--linked]\n"
 
 local shaken_dir, outpath, linked
 for i = 1, #arg do
@@ -80,7 +80,7 @@ for i = 1, #arg do
   elseif a == "-h" or a == "--help" then io.write(USAGE); os.exit(0)
   elseif not shaken_dir then shaken_dir = a
   elseif not outpath then outpath = a
-  else io.stderr:write("yggdrasil-build: unexpected argument " .. a .. "\n" .. USAGE); os.exit(2) end
+  else io.stderr:write("ratatoskr-build: unexpected argument " .. a .. "\n" .. USAGE); os.exit(2) end
 end
 if not (shaken_dir and outpath) then
   io.stderr:write(USAGE); os.exit(2)
@@ -95,7 +95,7 @@ local function read_file(path)
 end
 
 -- ---- 1. parse the manifest -------------------------------------------------
-local MANIFEST = shaken_dir .. "/yggdrasil.manifest.txt"
+local MANIFEST = shaken_dir .. "/ratatoskr.manifest.txt"
 local man = { user = {}, primitive = {} }
 for line in read_file(MANIFEST):gmatch("[^\r\n]+") do
   local k, v = line:match("^([%w%-]+)=(.*)$")
@@ -109,7 +109,7 @@ assert(man.kernel, MANIFEST .. ": missing kernel=")
 assert(man.init, MANIFEST .. ": missing init=")
 assert(#man.user > 0, MANIFEST .. ": no user= entries")
 if man["kernel-version"] ~= "41.2" then
-  io.stderr:write(("yggdrasil-build: warning: manifest kernel-version=%s, this port is certified against 41.2\n")
+  io.stderr:write(("ratatoskr-build: warning: manifest kernel-version=%s, this port is certified against 41.2\n")
     :format(tostring(man["kernel-version"])))
 end
 
@@ -137,7 +137,7 @@ local BOOT_GLOBALS = {
 local GUARDED_DEAD = { ["shen.write-string"]=true, ["shen.read-unit-string"]=true }
 for _, name in ipairs(man.primitive) do
   if not (P.F[name] or SPECIAL[name] or BOOT_GLOBALS[name] or GUARDED_DEAD[name]) then
-    io.stderr:write("yggdrasil-build: warning: manifest primitive not provided by this port: "
+    io.stderr:write("ratatoskr-build: warning: manifest primitive not provided by this port: "
       .. name .. "\n")
   end
 end
@@ -161,7 +161,7 @@ end
 -- in the shaken output. Any such name found in the port's vendored certified
 -- 41.2 kernel (klambda/*.kl) is BACKFILLED into the kernel chunk — with a
 -- loud warning, because each backfill is a stage-1 shaker bug that should be
--- fixed in yggdrasil.shen. Names found nowhere are warn-only (they may be
+-- fixed in ratatoskr.shen. Names found nowhere are warn-only (they may be
 -- guarded-dead, like shen.write-string behind shen.char-stoutput?).
 -- Limitation (same one stage 1 has): only head-position references are
 -- traced; a function passed by bare name in argument position is invisible.
@@ -239,7 +239,7 @@ do
     if not (defined[n] or P.F[n] or SPECIAL[n]) then
       local form = certified[n]
       if form then
-        io.stderr:write("[yggdrasil] STAGE-1 UNDER-SHAKE: " .. n
+        io.stderr:write("[ratatoskr] STAGE-1 UNDER-SHAKE: " .. n
           .. " is called but missing from " .. man.kernel
           .. "; backfilling from certified kernel\n")
         kernel_forms[#kernel_forms+1] = form
@@ -258,7 +258,7 @@ do
     end
   end
   for _, n in ipairs(unresolved) do
-    io.stderr:write("yggdrasil-build: warning: " .. n
+    io.stderr:write("ratatoskr-build: warning: " .. n
       .. " is referenced but provided nowhere (may be guarded-dead)\n")
   end
 end
@@ -304,11 +304,11 @@ local function compile_chunks(forms, label)
   return chunks
 end
 
-io.stderr:write(("[yggdrasil] compiling %s: %d kernel forms\n"):format(man.kernel, #kernel_forms))
+io.stderr:write(("[ratatoskr] compiling %s: %d kernel forms\n"):format(man.kernel, #kernel_forms))
 local kernel_chunks = compile_chunks(kernel_forms, man.kernel)
 local user_chunks = {}
 for _, uf in ipairs(user_files) do
-  io.stderr:write(("[yggdrasil] compiling %s: %d user forms\n"):format(uf.name, #uf.forms))
+  io.stderr:write(("[ratatoskr] compiling %s: %d user forms\n"):format(uf.name, #uf.forms))
   for _, ch in ipairs(compile_chunks(uf.forms, uf.name)) do
     user_chunks[#user_chunks+1] = ch
   end
@@ -328,7 +328,7 @@ local out = {}
 local function emit(s) out[#out+1] = s end
 
 local jitv = rawget(_G, "jit")
-emit(("-- %s : shaken Shen program (generated by bin/yggdrasil-build.lua)\n"):format(
+emit(("-- %s : shaken Shen program (generated by bin/ratatoskr-build.lua)\n"):format(
   outpath:match("[^/\\]+$") or outpath))
 emit(("-- source: %s (kernel-version=%s, %d kernel defuns/forms, user: %s)\n"):format(
   shaken_dir, tostring(man["kernel-version"]), #kernel_forms, table.concat(man.user, ", ")))
@@ -349,7 +349,7 @@ local loadstr = loadstring or load
 for name, src in pairs(sources) do
   if package.loaded[name] == nil then
     package.preload[name] = function(...)
-      return assert(loadstr(src, "@yggdrasil/" .. name .. ".lua"))(...)
+      return assert(loadstr(src, "@ratatoskr/" .. name .. ".lua"))(...)
     end
   end
 end
@@ -453,5 +453,5 @@ local fh = assert(io.open(outpath, "wb"))
 local blob = table.concat(out)
 fh:write(blob)
 fh:close()
-io.stderr:write(("[yggdrasil] wrote %s (%d bytes, %d kernel + %d user chunks%s)\n")
+io.stderr:write(("[ratatoskr] wrote %s (%d bytes, %d kernel + %d user chunks%s)\n")
   :format(outpath, #blob, #kernel_chunks, #user_chunks, linked and ", linked" or ", self-contained"))
