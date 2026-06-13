@@ -1,0 +1,51 @@
+name: CI
+
+# Port-authored test tiers for shen-lua, mirroring shen-go's split:
+#   - port specs (fast, the unit tier)
+#   - canonical Shen kernel certification (the external "Certified" bar)
+# Coverage is best-effort and never fails the build.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Port specs + kernel certification (LuaJIT)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LuaJIT
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit
+
+      - name: Show interpreter
+        run: luajit -v
+
+      # Tier 1: port-authored specs (fast). Fails the job on any red spec.
+      - name: Port specs (make test)
+        run: make test LUA=luajit
+
+      # Tier 2: canonical kernel certification. Always run for real.
+      - name: Kernel certification (make certify)
+        run: make certify LUA=luajit
+
+  coverage:
+    name: Coverage (best-effort)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LuaJIT + luarocks + luacov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit luarocks
+          sudo luarocks install luacov || echo "luacov install failed; coverage will skip"
+
+      - name: Coverage (make coverage)
+        run: make coverage LUA=luajit

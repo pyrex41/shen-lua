@@ -1,0 +1,33 @@
+-- .luacov — LuaCov configuration for the shen-lua port test suite.
+-- Used by `make coverage` / scripts/coverage.sh. Coverage is best-effort:
+-- if luacov is not installed the coverage script skips gracefully.
+
+return {
+  -- Statistics + report files (kept out of git; see .gitignore).
+  statsfile = "luacov.stats.out",
+  reportfile = "luacov.report.out",
+
+  -- Measure the port's runtime/compiler modules. Exclude the vendored kernel
+  -- bundle, the specs themselves, and third-party paths.
+  include = {
+    "boot",
+    "compiler",
+    "prims",
+    "runtime",
+    "repl",
+    "shen",
+    "lua_interop",
+    "prolog_engine",
+    "prolog_compile",
+    "typecheck_native",
+  },
+
+  exclude = {
+    "test/.*",
+    "scripts/.*",
+    "build/.*",
+    "bench.*",
+    "%.luarocks/.*",
+    "/usr/.*",
+  },
+}

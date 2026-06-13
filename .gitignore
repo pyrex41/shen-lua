@@ -3,3 +3,5 @@
 .shen-kernel-cache.bin.tmp
 build/shen-bundle.lua
 .fasl-test/
+luacov.stats.out
+luacov.report.out
