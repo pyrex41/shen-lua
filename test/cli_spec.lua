@@ -11,10 +11,10 @@
 --   * the REPL survives adversarial input (apply-non-function) and keeps going;
 --   * an adversarial `-e` exits nonzero with a clean error (no Lua traceback);
 --   * unknown option exits 2;
---   * the *hush*/-q divergence: on shen-lua, `-q` SILENCES pr to file streams,
---     producing a ZERO-BYTE file, whereas without -q the file gets the payload.
---     (This is the documented cross-impl divergence vs shen-cl/shen-go/ShenScript,
---     which route pr to files regardless of *hush*.)
+--   * pr-to-file under -q/*hush* (issue #22): -q sets *hush*, but *hush* only
+--     suppresses writes to STANDARD OUTPUT. A `pr` to a FILE stream writes the
+--     payload regardless of *hush*, matching shen-cl/shen-go/ShenScript. (This
+--     used to diverge: -q produced a zero-byte file; fixed in #22.)
 --
 -- Every subprocess is wrapped in `timeout` when available, so an EOF-loop
 -- regression FAILS (nonzero/empty output) rather than HANGS the whole suite.
@@ -176,21 +176,22 @@ do
 end
 
 -- ---------------------------------------------------------------------------
--- THE -q / *hush* DIVERGENCE.  On shen-lua, -q sets *hush*, which SILENCES pr
--- to file streams -> a ZERO-BYTE file. Without -q the file gets "payload".
--- This intentionally differs from shen-cl/shen-go/ShenScript, which write the
--- payload regardless of *hush*. Lock in shen-lua's documented behavior.
+-- pr-to-file under -q / *hush* (issue #22 regression).  -q sets *hush*, but
+-- *hush* must suppress only STANDARD-OUTPUT writes — a `pr` to a FILE stream
+-- writes the payload regardless of *hush*, matching shen-cl/shen-go/ShenScript.
+-- (Pre-#22 this produced a ZERO-BYTE file.)
 -- ---------------------------------------------------------------------------
 do
   local pq = os.tmpname()
   local expr = '(let S (open "' .. pq .. '" out) (do (pr "payload" S) (close S)))'
   local _, codeq = run(SHEN .. " -q -e " .. sh_quote(expr))
   check(codeq == 0, "-q pr-to-file exits 0")
-  -- read the file size
-  local sizeq = 0
+  -- read the file back
+  local contentq = ""
   local hf = io.open(pq, "rb")
-  if hf then local d = hf:read("*a") or ""; sizeq = #d; hf:close() end
-  check(sizeq == 0, "-q SILENCES pr to file (zero-byte file) — documented divergence")
+  if hf then contentq = hf:read("*a") or ""; hf:close() end
+  check(contentq == "payload",
+        "issue #22: -q (*hush*) does NOT silence pr to a file stream — payload is written")
   os.remove(pq)
 
   -- without -q, the same write produces the payload
@@ -203,6 +204,28 @@ do
   if hf2 then content = hf2:read("*a") or ""; hf2:close() end
   check(content == "payload", "without -q, pr writes the payload to the file")
   os.remove(pn)
+end
+
+-- ---------------------------------------------------------------------------
+-- issue #22 (other half): *hush* STILL silences standard-output writes. With
+-- -q, a `pr` to (stoutput) must produce no stdout — only the file path above
+-- is exempted, not the gate itself.
+-- ---------------------------------------------------------------------------
+do
+  -- `pr` returns its string argument, and `-e` echoes the expression's value,
+  -- so the pr text would appear in stdout via the echo regardless of *hush*.
+  -- Return a DISTINCT value (99) so the only way the marker can appear is the
+  -- pr write itself — which must be silenced under -q.
+  local marker = "NOISE_22_MARKER"
+  local expr = '(do (pr "' .. marker .. '" (stoutput)) 99)'
+  local outq, codeq = run(SHEN .. " -q -e " .. sh_quote(expr))
+  check(codeq == 0, "-q pr-to-stdout exits 0")
+  check(outq:find(marker, 1, true) == nil,
+        "issue #22: -q (*hush*) still silences pr to standard output")
+  -- and without -q the marker IS written to stdout (sanity: the gate exists)
+  local outn = run(SHEN .. " -e " .. sh_quote(expr))
+  check(outn:find(marker, 1, true) ~= nil,
+        "without -q, pr to standard output is written")
 end
 
 io.write(string.format("cli_spec: %d pass, %d fail\n", npass, nfail))
