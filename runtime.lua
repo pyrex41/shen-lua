@@ -197,6 +197,19 @@ M.read_all = read_all
 -- mtoint: PUC 5.3+ %d-format guard (string.format("%d", x) errors there for
 -- an integral float outside int64 range). nil under LuaJIT/5.1: path unchanged.
 local mtoint = math.tointeger
+-- Shortest round-trippable decimal for a non-integer float. LuaJIT's tostring
+-- (and %g) default to 14 significant digits, which is lossy: (+ 0.1 0.2) would
+-- print "0.3" instead of the actual double "0.30000000000000004". Emit the
+-- smallest %.<p>g (p = 1..17) that parses back to exactly the same double, so
+-- the output round-trips and matches the shen-cl/shen-rust/shen-go/ShenScript
+-- reference (issue #24).
+local function shortest_float(n)
+  for p = 1, 17 do
+    local s = string.format("%." .. p .. "g", n)
+    if tonumber(s) == n then return s end
+  end
+  return string.format("%.17g", n)
+end
 local function to_str(x, seen)
   local t = type(x)
   if t == "number" then
@@ -208,7 +221,7 @@ local function to_str(x, seen)
       end
       return string.format("%d", x)
     end
-    return tostring(x)
+    return shortest_float(x)
   elseif t == "boolean" then return x and "true" or "false"
   elseif t == "string" then return '"' .. x .. '"'
   elseif x == NIL then return "()"
@@ -229,5 +242,6 @@ local function to_str(x, seen)
   else return tostring(x) end
 end
 M.to_str = to_str
+M.shortest_float = shortest_float
 
 return M

@@ -270,7 +270,8 @@ local function numToStr(n)
     end
     return string.format("%d", n)
   end
-  return tostring(n)
+  -- non-integer: shortest round-trippable form, not LuaJIT's lossy %.14g (#24)
+  return R.shortest_float(n)
 end
 
 defprim("str", 1, function(x)
