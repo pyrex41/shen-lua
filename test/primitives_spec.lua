@@ -90,9 +90,17 @@ checkeq('(cn "foo" "bar")', '"foobar"')
 checkeq('(tlstr "hello")', '"ello"')
 checkeq('(pos "hello" 1)', '"e"')
 checkeq("(str 42)", '"42"')
-checkeq("(str 4.5)", '"4.5"')          -- divergence: bare float
+checkeq("(str 4.5)", '"4.5"')          -- bare float (exactly representable)
 checkeq("(str foo)", '"foo"')
 checkeq("(str true)", '"true"')
+
+-- issue #24: non-integer floats render in SHORTEST round-trippable form, not
+-- LuaJIT's lossy %.14g. (+ 0.1 0.2) is genuinely 0.30000000000000004 as a
+-- double; printing "0.3" would not round-trip. Matches shen-cl/rust/go/ShenScript.
+checkeq("(str (+ 0.1 0.2))", '"0.30000000000000004"')
+checkeq("(str (/ 10 4))",    '"2.5"')   -- exactly representable -> short form
+checkeq("(str (+ 3.5 1.25))",'"4.75"')
+checkeq("(str 2.0)", '"2"')             -- integer-valued float still prints bare
 checkeq('(string? "hi")', "true")
 checkeq("(string? 1)", "false")
 -- str on () is NOT representable in this port's kernel — it raises a clean,
