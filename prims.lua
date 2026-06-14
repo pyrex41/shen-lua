@@ -737,7 +737,36 @@ function P.install_native_stdlib()
     return orig_variable(x)
   end
 
+  -- pr (issue #22): the canonical kernel `pr` (klambda/writer.kl) gates ALL
+  -- output on *hush*:
+  --     (defun pr (S ST) (if (value *hush*) S (...write S to ST...)))
+  -- That silences writes to ANY stream under -q/*hush*, so `pr` to a FILE
+  -- stream produced a zero-byte file — a divergence from shen-cl/shen-go/
+  -- ShenScript, which write to files regardless of *hush*. *hush* is meant to
+  -- suppress only the interactive/echo output that goes to standard output.
+  -- This native override consults *hush* ONLY when the target is the standard
+  -- output stream (*stoutput*); writes to any other stream always occur. The
+  -- actual write delegates to the original compiled-KL pr (with *hush* cleared)
+  -- so the write path stays byte-identical.
+  local orig_pr = F["pr"]
+  local function pr(s, st)
+    if GLOBALS["*hush*"] and st == GLOBALS["*stoutput*"] then return s end
+    if GLOBALS["*hush*"] then
+      -- non-stdout stream under *hush*: write unconditionally. Temporarily
+      -- clear *hush* so the original kernel pr takes its write branch, then
+      -- restore it so we don't perturb global state.
+      local saved = GLOBALS["*hush*"]
+      GLOBALS["*hush*"] = false
+      local ok, res = pcall(orig_pr, s, st)
+      GLOBALS["*hush*"] = saved
+      if not ok then error(res, 0) end
+      return res
+    end
+    return orig_pr(s, st)
+  end
+
   local function install(name, fn, arity) F[name] = fn; FA[fn] = arity end
+  install("pr", pr, 2)
   install("variable?", variable_q, 1)
   install("fail", fail, 0)
   install("shen.parse-failure", parse_failure, 0)
