@@ -746,9 +746,11 @@ function P.install_native_stdlib()
   -- ShenScript, which write to files regardless of *hush*. *hush* is meant to
   -- suppress only the interactive/echo output that goes to standard output.
   -- This native override consults *hush* ONLY when the target is the standard
-  -- output stream (*stoutput*); writes to any other stream always occur. The
-  -- actual write delegates to the original compiled-KL pr (with *hush* cleared)
-  -- so the write path stays byte-identical.
+  -- output stream (*stoutput*); writes to any other stream always occur. That
+  -- is a deliberate policy: writes to FILE streams and to *sterror* (error /
+  -- diagnostic output) are NOT silenced by *hush* — only standard-output
+  -- chatter is. The actual write delegates to the original compiled-KL pr
+  -- (with *hush* cleared) so the write path stays byte-identical.
   local orig_pr = F["pr"]
   local function pr(s, st)
     if GLOBALS["*hush*"] and st == GLOBALS["*stoutput*"] then return s end

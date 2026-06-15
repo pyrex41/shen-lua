@@ -228,5 +228,22 @@ do
         "without -q, pr to standard output is written")
 end
 
+-- ---------------------------------------------------------------------------
+-- *hush* gates ONLY standard output: a `pr` to the *sterror* (error/diagnostic)
+-- stream must STILL be written under -q, like file streams. This locks in the
+-- policy that quiet mode silences stdout chatter only, not diagnostics.
+-- run() captures stdout+stderr combined, so the marker appears via stderr.
+-- ---------------------------------------------------------------------------
+do
+  local marker = "ERR_22_MARKER"
+  -- distinct return value (99) so the marker can only come from the pr write,
+  -- not the -e value echo.
+  local expr = '(do (pr "' .. marker .. '" (value *sterror*)) 99)'
+  local outq, codeq = run(SHEN .. " -q -e " .. sh_quote(expr))
+  check(codeq == 0, "-q pr-to-stderr exits 0")
+  check(outq:find(marker, 1, true) ~= nil,
+        "-q (*hush*) does NOT silence pr to *sterror* — diagnostics still write")
+end
+
 io.write(string.format("cli_spec: %d pass, %d fail\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)
