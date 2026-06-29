@@ -40,8 +40,6 @@ local function set_store(s) store = s end
 -- `host` is a global so the dotted paths below ("host.store_add", ...) resolve
 -- through lua.call / lua.function, the same convention as examples/config_check.
 host = {
-  -- string.match as a boolean predicate (Shen's stdlib has no Lua patterns)
-  matches    = function(s, pat) return string.match(s, pat) ~= nil end,
   -- storage, delegated to whatever store is installed
   store_add  = function(name, message) return store.add(name, message) end,
   store_list = function() return store.list() end,
@@ -49,14 +47,13 @@ host = {
 
 shen.boot{quiet = true}
 
--- Register the typed bridges, then load the typed core under (tc +) and the
--- router under (tc -). Mirrors examples/config_check.lua exactly.
-shen.eval([[
-  (lua.function strlen "string.len"   [string --> number])
-  (lua.function fmt    "string.format" [string --> string --> string])
-]])
+-- Load the typed core under (tc +) and the router under (tc -). rules.shen is
+-- the SAME file the browser loads via ShenScript (see public/index.html) — one
+-- source of truth for the field rules. It needs no Lua bridges: it is pure,
+-- portable Shen (cn/str/tlstr only), which is exactly why it runs unchanged on
+-- both ports. A type error in it aborts startup, before the first request.
 shen.eval("(tc +)")
-P.F["load"](APP_DIR .. "/validate.shen")
+P.F["load"](APP_DIR .. "/rules.shen")
 shen.eval("(tc -)")
 P.F["load"](APP_DIR .. "/app.shen")
 
