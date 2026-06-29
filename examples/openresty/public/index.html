@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<!--
+  examples/openresty/public/index.html — the guestbook front end.
+
+  This page runs Shen IN THE BROWSER. It imports vendor/shen-rules.client.js — a
+  Ratatoskr-shaken, ShenScript-compiled build of the SAME rules.shen the server
+  loads — and runs validate-message client-side for instant feedback. The server
+  then re-runs the identical rules as the authoritative check.
+
+  "Shaken" = tree-shaken: Ratatoskr (https://github.com/pyrex41/ratatoskr) walks
+  the Shen kernel call graph and emits only the ~100 functions rules.shen can
+  reach, so the client module is ~140 KB and inits in ~20 ms — versus the full
+  ~660 KB ShenScript kernel bundle booting in ~2.3 s. The artifact is generated
+  by scripts/build-client.sh from rules.shen; rerun it when the rules change so
+  the client and server can't drift.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>shen-lua · OpenResty guestbook</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 44rem; margin: 3rem auto; padding: 0 1rem; color: #1f2937; }
+    h1 { font-size: 1.4rem; }
+    a { color: #2563eb; }
+    code { background: #f0f0f0; padding: 0 .25em; border-radius: 3px; }
+    form { display: grid; gap: .5rem; margin: 1.5rem 0; }
+    input, textarea { font: inherit; padding: .5rem; border: 1px solid #ccc; border-radius: 4px; }
+    button { font: inherit; padding: .5rem 1rem; border: 0; border-radius: 4px; background: #2563eb; color: #fff; cursor: pointer; width: max-content; }
+    button[disabled] { background: #9ca3af; cursor: progress; }
+    .errors { color: #b91c1c; margin: .5rem 0; white-space: pre-line; }
+    .status { font-size: .85rem; color: #555; margin: .5rem 0; }
+    .status b { color: #15803d; }
+
+    /* the explainer */
+    .arch { background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem 1.25rem; margin: 1.5rem 0; }
+    .arch h2 { font-size: 1rem; margin: .2rem 0 .6rem; }
+    .arch p { margin: .4rem 0; }
+    .arch ul { list-style: disc; padding-left: 1.2rem; margin: .5rem 0; }
+    .arch li { border: 0; padding: .15rem 0; }
+    .arch pre, details pre { background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: .78rem; line-height: 1.5; }
+    details { margin: .75rem 0; }
+    summary { cursor: pointer; font-weight: 600; }
+    .viewlink { font-size: .85rem; }
+
+    /* the guestbook list */
+    ul#list { list-style: none; padding: 0; }
+    ul#list li { border-top: 1px solid #eee; padding: .6rem 0; }
+    ul#list li b { display: block; }
+  </style>
+</head>
+<body>
+  <h1>Guestbook <small>— validated by Shen, on both ends</small></h1>
+  <p>The field rules live in one file,
+     <a href="/rules.shen" target="_blank"><code>rules.shen</code></a>, and run
+     <b>twice</b>: in your browser (a <a href="https://github.com/pyrex41/ratatoskr">Ratatoskr</a>-shaken,
+     <a href="https://github.com/pyrex41/ShenScript">ShenScript</a>-compiled build of those rules) for
+     instant feedback, and on the server (shen-lua under OpenResty) as the
+     authoritative check. Sign the guestbook below — then see
+     <a href="#how">how it works ↓</a>.</p>
+
+  <p class="status" id="status">loading the Shen validator…</p>
+
+  <form id="form">
+    <input id="name" placeholder="name (1–40 chars)" autocomplete="off">
+    <textarea id="message" placeholder="message (1–280 chars)" rows="3"></textarea>
+    <div class="errors" id="errors"></div>
+    <button type="submit" id="submit" disabled>Sign</button>
+  </form>
+
+  <ul id="list"></ul>
+
+  <section class="arch" id="how">
+    <h2>What this demonstrates</h2>
+    <p>The <b>same Shen source</b>, <code>rules.shen</code>, is the single source
+       of truth for validation on the client and the server — two ports of one
+       language, one type system, no client/server drift.</p>
+    <ul>
+      <li><b>Same language, two runtimes.</b> The server is <b>shen-lua</b>
+          (Shen on LuaJIT, embedded in OpenResty); the browser runs
+          <b>ShenScript</b> (Shen compiled to JavaScript). Both execute the rules
+          from <a href="/rules.shen" target="_blank"><code>rules.shen</code></a>.</li>
+      <li><b>Typed core, proven at startup.</b> The server loads
+          <code>rules.shen</code> under <code>(tc +)</code>, so Shen's
+          sequent-calculus typechecker proves every rule sound <i>before the
+          first request</i> — a type error aborts boot.</li>
+      <li><b>Tree-shaken for fast loading.</b>
+          <a href="https://github.com/pyrex41/ratatoskr">Ratatoskr</a> walks the
+          Shen kernel call graph and emits only the ~100 functions these rules
+          can reach (eval, the reader and the typechecker fall away). The client
+          module is ~140 KB and inits in tens of ms, versus the full ~660 KB
+          kernel bundle at ~2.3 s. <code>scripts/build-client.sh</code> rebuilds
+          it from <code>rules.shen</code>.</li>
+      <li><b>No drift, by construction.</b> The client artifact is <i>generated
+          from</i> <code>rules.shen</code>; rebuild it when the rules change and
+          client and server stay in lockstep — one source, two targets.</li>
+      <li><b>The boundary.</b> JSON is marshaled to a tagged Shen
+          <code>val</code> shape (<code>"x"&nbsp;→&nbsp;[s&nbsp;"x"]</code>,
+          <code>{…}&nbsp;→&nbsp;[obj&nbsp;[[k&nbsp;v]…]]</code>) on both ends;
+          storage is an nginx <code>lua_shared_dict</code> reached from Shen via
+          Lua interop.</li>
+    </ul>
+    <pre>
+BROWSER  — ShenScript (Shen → JS), tree-shaken by Ratatoskr
+   you fill the form
+        │
+        ▼
+   validate-message   ◀── shaken build of rules.shen (~140 KB, ~20 ms init)
+        │
+        ├─ invalid ──▶  error shown instantly, request never sent
+        │
+        └─ valid ────▶  POST /api/messages   (JSON body)
+                              │
+══════════════════════════════│══════════════════════════════
+                              ▼
+SERVER   — shen-lua (Shen on LuaJIT) inside OpenResty
+   app.lua     JSON  ──▶  tagged Shen `val`
+   app.shen    (route …)  ──▶  validate-message   ◀── the SAME rules.shen,
+                                                      loaded under (tc +):
+                                                      typechecked & proven
+                                                      sound at worker boot
+   storage     ──▶  lua_shared_dict   (survives across requests)</pre>
+    <details>
+      <summary>Show <code>rules.shen</code> (the rules running on both ends)</summary>
+      <p class="viewlink">Fetched live from <a href="/rules.shen" target="_blank"><code>/rules.shen</code></a> — the source the server typechecked at boot and the client artifact was shaken from.</p>
+      <pre id="rules-src">loading…</pre>
+    </details>
+  </section>
+
+  <script type="module">
+    import { createValidator } from "/vendor/shen-rules.client.js";
+
+    const $$ = (id) => document.getElementById(id);
+    const setStatus = (html) => { $$("status").innerHTML = html; };
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"]/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    }
+
+    async function refresh() {
+      const res = await fetch("/api/messages");
+      const { messages } = await res.json();
+      $$("list").innerHTML = messages
+        .map((m) => `<li><b>${escapeHtml(m.name)}</b>${escapeHtml(m.message)}</li>`)
+        .join("");
+    }
+
+    // ---- load the shaken Shen validator -------------------------------------
+    // createValidator() builds the ShenScript env from the embedded shaken
+    // slice and returns (name, message) -> string[] ([] means valid).
+    let checkFields = null;
+
+    // Show the shared rule source on the page (purely informational).
+    fetch("/rules.shen").then((r) => r.text())
+      .then((src) => { $$("rules-src").textContent = src; })
+      .catch(() => { $$("rules-src").textContent = "(could not load /rules.shen)"; });
+
+    (async () => {
+      try {
+        const t0 = performance.now();
+        checkFields = await createValidator();
+        const ms = Math.round(performance.now() - t0);
+        setStatus(`<b>Shen ready in the browser</b> (${ms} ms) — a Ratatoskr-shaken `
+                  + `build of <code>rules.shen</code>, the same rules the server runs.`);
+        $$("submit").disabled = false;
+      } catch (e) {
+        console.error(e);
+        setStatus("client-side Shen failed to load — the server still validates. "
+                  + "(" + e + ")");
+        $$("submit").disabled = false;   // fall back to server-only validation
+      }
+    })();
+
+    // ---- submit: validate client-side first, then POST ----------------------
+    $$("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $$("errors").textContent = "";
+      const name = $$("name").value, message = $$("message").value;
+
+      // Instant client-side check with the in-browser Shen rules.
+      if (checkFields) {
+        const errs = await checkFields(name, message);
+        if (errs.length) {
+          $$("errors").textContent = "checked in your browser by Shen:\n" + errs.join("\n");
+          return;                         // never hits the network
+        }
+      }
+
+      // Authoritative server check (the same rules.shen, under shen-lua).
+      const res = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, message }),
+      });
+      if (res.ok) {
+        $$("name").value = $$("message").value = "";
+        refresh();
+      } else {
+        const { errors } = await res.json();
+        $$("errors").textContent = "rejected by the server:\n" + (errors || ["request failed"]).join("\n");
+      }
+    });
+
+    refresh();
+  </script>
+</body>
+</html>

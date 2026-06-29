@@ -1,13 +1,14 @@
 # Examples
 
-Three examples, smallest first (all run with plain `luajit`/`bin/shen`,
-no external dependencies, no network):
+Four examples, smallest first (the first three run with plain
+`luajit`/`bin/shen`, no external dependencies, no network):
 
 | | |
 |---|---|
 | [`hello_embed.lua`](hello_embed.lua) | the smallest useful embedding: boot, define a typed Shen function, call it from Lua, pass lists both ways. `luajit examples/hello_embed.lua` |
 | [`family.shen`](family.shen) | Shen Prolog in twenty lines — facts, rules, yes/no and binding queries. `bin/shen examples/family.shen` |
 | [`config_check.lua`](config_check.lua) | the showcase, walked through below. `luajit examples/config_check.lua` |
+| [`openresty/`](openresty/) | a complete web app — typed Shen validators + a Shen router on OpenResty (nginx + LuaJIT), with a front end that runs the **same** rules in the browser (Ratatoskr-shaken, ShenScript-compiled). Runs standalone via `luajit examples/openresty/selftest.lua`; see [its README](openresty/README.md) to serve it. |
 
 ---
 

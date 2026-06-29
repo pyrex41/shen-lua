@@ -257,11 +257,20 @@ exhaustively at the top of [`lua_interop.lua`](lua_interop.lua).
 
 ## Examples
 
+The flagship is **[`examples/openresty/`](examples/openresty/)** — a complete
+guestbook web app whose validation rules are written once in Shen and run on
+*both* ends: as a typechecked core on the server (shen-lua inside OpenResty) and
+as a [Ratatoskr](https://github.com/pyrex41/ratatoskr)-shaken,
+[ShenScript](https://github.com/pyrex41/ShenScript)-compiled module in the
+browser. One `rules.shen`, two runtimes, no client/server drift. See its
+[README](examples/openresty/README.md) for the walkthrough.
+
 | | |
 |---|---|
 | [`examples/hello_embed.lua`](examples/hello_embed.lua) | the smallest useful embedding: boot, define a typed function, call it both ways (~25 lines) |
 | [`examples/family.shen`](examples/family.shen) | Shen Prolog in twenty lines: facts, rules, queries via `bin/shen` |
 | [`examples/config_check.lua`](examples/config_check.lua) | the showcase: Shen datatypes + rules as a **typed validation layer** for nested Lua config tables — the typechecker rejects buggy rules at load time ([walkthrough](examples/README.md)) |
+| [`examples/openresty/`](examples/openresty/) | a **complete web app in Shen on OpenResty** (nginx + LuaJIT): typed request validators + a Shen router behind a JSON API, with a front end that runs the **same** typed rules in the browser — Ratatoskr-shaken and ShenScript-compiled to a ~140 KB module. One `rules.shen`, validated client- and server-side. Runs standalone (`luajit examples/openresty/selftest.lua`) or under `openresty` ([README](examples/openresty/README.md)) |
 
 ## Certification / Testing
 
