@@ -262,6 +262,7 @@ exhaustively at the top of [`lua_interop.lua`](lua_interop.lua).
 | [`examples/hello_embed.lua`](examples/hello_embed.lua) | the smallest useful embedding: boot, define a typed function, call it both ways (~25 lines) |
 | [`examples/family.shen`](examples/family.shen) | Shen Prolog in twenty lines: facts, rules, queries via `bin/shen` |
 | [`examples/config_check.lua`](examples/config_check.lua) | the showcase: Shen datatypes + rules as a **typed validation layer** for nested Lua config tables — the typechecker rejects buggy rules at load time ([walkthrough](examples/README.md)) |
+| [`examples/openresty/`](examples/openresty/) | a **complete web app in Shen on OpenResty** (nginx + LuaJIT): typed request validators + a Shen router behind a JSON API, with a plain-HTML front end. Runs standalone (`luajit examples/openresty/selftest.lua`) or under `openresty` ([README](examples/openresty/README.md)) |
 
 ## Certification / Testing
 

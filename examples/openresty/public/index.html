@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<!--
+  examples/openresty/public/index.html — the guestbook front end.
+
+  Deliberately a plain HTML + fetch() page with no build step, so the example
+  runs with nothing but OpenResty. It talks to the same /api/messages endpoints
+  that the Shen router (app.shen) serves.
+
+  THE SHENSCRIPT ANGLE: this hand-written JS is exactly the layer you would
+  replace with ShenScript (https://github.com/pyrex41/ShenScript), which
+  compiles Shen to JavaScript. Because shen-lua (server) and ShenScript
+  (browser) are two ports of the SAME language, the win is sharing real code:
+  lift the field rules out of validate.shen into a shared .shen module, compile
+  it to JS for instant client-side validation, and run the identical file on
+  the server as the authoritative check — one type system, no client/server
+  drift. This page just stands in for that compiled output.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>shen-lua · OpenResty guestbook</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.4rem; }
+    code { background: #f0f0f0; padding: 0 .25em; border-radius: 3px; }
+    form { display: grid; gap: .5rem; margin: 1.5rem 0; }
+    input, textarea { font: inherit; padding: .5rem; border: 1px solid #ccc; border-radius: 4px; }
+    button { font: inherit; padding: .5rem 1rem; border: 0; border-radius: 4px; background: #2563eb; color: #fff; cursor: pointer; width: max-content; }
+    .errors { color: #b91c1c; margin: .5rem 0; }
+    ul { list-style: none; padding: 0; }
+    li { border-top: 1px solid #eee; padding: .6rem 0; }
+    li b { display: block; }
+  </style>
+</head>
+<body>
+  <h1>Guestbook <small>— validated by Shen</small></h1>
+  <p>Every entry is checked by typed rules in
+     <code>validate.shen</code> and routed by <code>app.shen</code>,
+     running on shen-lua inside OpenResty.</p>
+
+  <form id="form">
+    <input id="name" placeholder="name (1–40 chars)" autocomplete="off">
+    <textarea id="message" placeholder="message (1–280 chars)" rows="3"></textarea>
+    <div class="errors" id="errors"></div>
+    <button type="submit">Sign</button>
+  </form>
+
+  <ul id="list"></ul>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    async function refresh() {
+      const res = await fetch("/api/messages");
+      const { messages } = await res.json();
+      $("list").innerHTML = messages
+        .map((m) => `<li><b>${escape(m.name)}</b>${escape(m.message)}</li>`)
+        .join("");
+    }
+
+    function escape(s) {
+      return String(s).replace(/[&<>"]/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    }
+
+    $("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $("errors").textContent = "";
+      const res = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: $("name").value, message: $("message").value }),
+      });
+      if (res.ok) {
+        $("name").value = $("message").value = "";
+        refresh();
+      } else {
+        const { errors } = await res.json();
+        // These come straight from the typed Shen validators.
+        $("errors").textContent = (errors || ["request failed"]).join(" · ");
+      }
+    });
+
+    refresh();
+  </script>
+</body>
+</html>
