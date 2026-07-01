@@ -177,6 +177,18 @@ do
   -- The kernel hash clusters near-identical keys; >=20 buckets for 100 keys is
   -- enough to prove it is not collapsing everything to a single bucket.
   check(n >= 20, "hash spreads 100 distinct keys over >=20 buckets (got " .. n .. ")")
+
+  -- Golden values pin the native `hash` (prims.install_native_stdlib) to the
+  -- compiled-KL semantics it replaces: a symbol hashes identically to a string
+  -- of the same bytes, the empty key maps 0 -> 1, and long keys exercise the
+  -- prodbutzero >1e10 multiply->add overflow guard. If a future change to the
+  -- native fold diverges from the kernel `hash`, these break.
+  checkeq('(hash (intern "lambda") 20000)', "3297")
+  checkeq('(hash "lambda" 20000)', "3297")   -- symbol/string parity
+  checkeq('(hash (intern "shen.initialise") 997)', "889")
+  checkeq('(hash "" 13)', "1")               -- mod 0 -> 1
+  checkeq('(hash "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" 20000)', "12575")  -- overflow path
+  checkeq('(hash "the quick brown fox jumps" 65536)', "19259")
 end
 
 -- ---------------------------------------------------------------------------

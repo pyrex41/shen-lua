@@ -768,7 +768,45 @@ function P.install_native_stdlib()
     return orig_pr(s, st)
   end
 
+  -- hash (sys.kl:117) drives EVERY dict operation — get/put and the whole
+  -- property system (arities, source, types, ...). The kernel computes it as
+  --   (shen.mod (shen.prodbutzero (map string->n (explode V)) 1) Bound)
+  -- i.e. explode V into its printed characters, take each char's first BYTE
+  -- (string->n = string.byte), and fold them with prodbutzero: multiply while
+  -- the accumulator stays <= 1e10, switch to ADD once it exceeds (the kernel's
+  -- own overflow guard — so the key never leaves the double-exact range), then
+  -- reduce mod Bound with 0 mapped to 1. For a symbol explode yields the bytes
+  -- of its name; for a string, the bytes of the string (tlstr/pos/string->n
+  -- are all byte-based here) — verified identical to the compiled-KL hash over
+  -- every kernel F-name x 5 bounds plus edge strings (empty, embedded NUL,
+  -- UTF-8, >1e10-triggering lengths): 0 mismatches. Any other value type
+  -- delegates to the original so its exact printed form is never second-guessed.
+  -- Boot alone calls hash ~800 times (all on symbol keys); a native fold there
+  -- and at runtime avoids the per-call explode list + map + KL recursion.
+  local orig_hash = F["hash"]
+  local sbyte = string.byte
+  local function hashkey_bytes(s)
+    local acc = 1
+    for i = 1, #s do
+      local b = sbyte(s, i)
+      if b ~= 0 then
+        if acc > 10000000000 then acc = acc + b else acc = acc * b end
+      end
+    end
+    return acc
+  end
+  local function hash(v, bound)
+    local s
+    if is_symbol(v) then s = v.name
+    elseif type(v) == "string" then s = v
+    else return orig_hash(v, bound) end
+    local h = hashkey_bytes(s) % bound
+    if h == 0 then return 1 end
+    return h
+  end
+
   local function install(name, fn, arity) F[name] = fn; FA[fn] = arity end
+  install("hash", hash, 2)
   install("pr", pr, 2)
   install("variable?", variable_q, 1)
   install("fail", fail, 0)
