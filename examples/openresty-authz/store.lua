@@ -69,8 +69,9 @@ end
 
 -- Faithful adapter for lua-resty-lmdb (production, under OpenResty). Kept
 -- deliberately small: the event log is `evt:<n>` with an `evtseq` counter,
--- written in one ACID transaction. Not exercised by selftest.lua (needs the
--- resty.lmdb module + nginx); the file backend above is the tested path.
+-- written in one ACID transaction. selftest.lua exercises THIS code path
+-- in-process against a faithful fake of resty.lmdb (get + transaction commit);
+-- only the real memory-mapped, MVCC environment needs OpenResty.
 local function lmdb_backend()
   local lmdb = require("resty.lmdb")
   local txn  = require("resty.lmdb.transaction")

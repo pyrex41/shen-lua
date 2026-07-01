@@ -38,8 +38,9 @@ luajit examples/openresty-authz/selftest.lua
 
 It provisions two tenants over the JSON API, runs the proof chain (grants,
 cross-tenant denials, editor-only writes, a revocation), then **reopens the
-store from its on-disk log** to prove the facts and the audit trail survive a
-restart, and finally prints the durable decision log.
+store from its durable log** to prove the facts and the audit trail survive a
+restart. It does this for **both** the file and lua-resty-lmdb backends and
+asserts they agree decision-for-decision, then prints the durable decision log.
 
 ## The policy is a proof chain (Shen-Backpressure, at runtime)
 
@@ -120,11 +121,17 @@ revocation still denies access.
 
 Two backends sit behind one `append` + `each` interface:
 
-- **file** — append-only JSONL on disk. Durable across restarts; this is the
-  path `selftest.lua` and CI exercise under plain LuaJIT.
+- **file** — append-only JSONL on disk. Durable across restarts; the default
+  under plain LuaJIT.
 - **lmdb** — the same log in [`lua-resty-lmdb`][lmdb] (memory-mapped, MVCC,
   ACID, zero-copy FFI reads — the store Kong ships). Production path under
   OpenResty; `nginx.conf` shows the two-line swap.
+
+`selftest.lua` runs the **whole scenario against both backends** — the lmdb one
+in-process against a faithful fake of `resty.lmdb` — and asserts they produce an
+identical, decision-for-decision audit trail. So the lmdb adapter's logic
+(transactional append, replay) is tested here; only the real memory-mapped
+environment needs OpenResty.
 
 [lmdb]: https://github.com/openresty/lua-resty-lmdb
 
