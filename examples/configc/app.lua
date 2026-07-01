@@ -36,10 +36,12 @@ local function to_val(v)
   if t == "number"  then return { sym("n"), v } end
   if t == "boolean" then return { sym("b"), v } end
   if t == "table" then
-    if v[1] ~= nil or next(v) == nil then
+    if v[1] ~= nil then                       -- has index 1 => a JSON array
       local a = {}; for i, e in ipairs(v) do a[i] = to_val(e) end
       return { sym("arr"), a }
     end
+    -- an empty table is treated as an empty OBJECT here (a config is an object
+    -- at every level), so POST {} yields field errors, not "must be an object".
     local es, i = {}, 0
     for k, val in pairs(v) do
       if type(k) == "string" then i = i + 1; es[i] = { k, to_val(val) } end

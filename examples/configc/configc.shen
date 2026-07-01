@@ -152,6 +152,8 @@
             "  selector:"
             (cn "    matchLabels: { app: " (cn Service " }"))
             "  template:"
+            "    metadata:"
+            (cn "      labels: { app: " (cn Service " }"))   \\ must match the selector
             "    spec:"
             "      containers:"
             (cn "        - name: " Service)

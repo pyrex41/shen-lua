@@ -124,8 +124,10 @@
         "<tbody>" + (keys.length
           ? keys.map((k) => {
               const r = doc[k];
-              return `<tr><th>${k}</th><td class="win">${escapeHtml(r.v)}</td>`
-                   + `<td>ts ${r.ts}</td><td>by ${r.id}</td></tr>`;
+              // escape EVERY interpolated field: keys and ids arrive from POSTs
+              // with arbitrary content, so unescaped they are stored XSS.
+              return `<tr><th>${escapeHtml(k)}</th><td class="win">${escapeHtml(r.v)}</td>`
+                   + `<td>ts ${Number(r.ts)}</td><td>by ${escapeHtml(r.id)}</td></tr>`;
             }).join("")
           : "<tr><td>(empty)</td></tr>") + "</tbody>";
     }

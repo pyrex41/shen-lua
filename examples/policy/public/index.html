@@ -67,6 +67,8 @@
 
   <script type="module">
     const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s).replace(/[&<>"]/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
     const fields = ["s-name", "s-role", "s-tenant", "action", "r-owner", "r-tenant"];
 
     async function recheck() {
@@ -84,8 +86,9 @@
       } catch (e) { $("verdict").className = "verdict deny"; $("verdict").textContent = "server unreachable"; return; }
       const v = $("verdict");
       v.className = "verdict " + (res.allowed ? "allow" : "deny");
+      // the reason embeds user-controlled role/tenant/name strings — escape it
       v.innerHTML = `<b>${res.allowed ? "ALLOW" : "DENY"}</b>`
-                  + `<div class="reason">${res.reason || ""}</div>`;
+                  + `<div class="reason">${esc(res.reason || "")}</div>`;
     }
 
     fields.forEach((f) => { $(f).addEventListener("input", recheck); $(f).addEventListener("change", recheck); });

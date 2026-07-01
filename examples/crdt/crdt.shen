@@ -52,37 +52,34 @@
   ===================
   [gc Ts] : gcounter;)
 
-\\ this replica's recorded count for Id (0 if it has never been seen)
+\\ this replica's effective count for Id (0 if unseen). Takes the MAX over all
+\\ matching entries, so it is correct even for a malformed counter that carries
+\\ a key more than once — which is what lets the laws below hold for EVERY typed
+\\ gcounter, not only the well-formed (one-entry-per-id) ones gc-inc produces.
 (define gc-get
   {string --> (list gtally) --> number}
   _ [] -> 0
-  Id [[Id N] | _] -> N
+  Id [[Id N] | Ts] -> (max-num N (gc-get Id Ts))
   Id [_ | Ts] -> (gc-get Id Ts))
 
-(define gc-has?
-  {string --> (list gtally) --> boolean}
-  _ [] -> false
-  Id [[Id _] | _] -> true
-  Id [_ | Ts] -> (gc-has? Id Ts))
-
-\\ the join: for each id, take the larger of the two replicas' counts
+\\ the join: canonicalize the union of both counters to one entry per id, each
+\\ the max count seen for that id. Folding with gc-absorb dedups as it goes, so
+\\ merge is idempotent/commutative/associative even on duplicate-key inputs.
 (define gc-merge
   {gcounter --> gcounter --> gcounter}
-  [gc As] [gc Bs] -> [gc (append (gc-pointwise-max As Bs)
-                                 (gc-only Bs As))])
+  [gc As] [gc Bs] -> [gc (gc-collect Bs (gc-collect As []))])
 
-(define gc-pointwise-max
-  {(list gtally) --> (list gtally) --> (list gtally)}
-  [] _ -> []
-  [[Id N] | Rest] Bs -> [[Id (max-num N (gc-get Id Bs))] | (gc-pointwise-max Rest Bs)])
+\\ insert one tally into an accumulator, keeping the max if its id is present
+(define gc-absorb
+  {gtally --> (list gtally) --> (list gtally)}
+  [Id N] [] -> [[Id N]]
+  [Id N] [[Id M] | Ts] -> [[Id (max-num N M)] | Ts]
+  T [T2 | Ts] -> [T2 | (gc-absorb T Ts)])
 
-\\ tallies present in the FIRST counter but absent from the second
-(define gc-only
+(define gc-collect
   {(list gtally) --> (list gtally) --> (list gtally)}
-  [] _ -> []
-  [[Id N] | Rest] As -> (if (gc-has? Id As)
-                            (gc-only Rest As)
-                            [[Id N] | (gc-only Rest As)]))
+  [] Acc -> Acc
+  [T | Ts] Acc -> (gc-collect Ts (gc-absorb T Acc)))
 
 (define gc-value
   {gcounter --> number}
@@ -152,18 +149,27 @@
   =====================================
   [lww V Ts Id] : register;)
 
-\\ strict "A was written after B": later timestamp wins; ties by replica id
+\\ strict "A dominates B": later timestamp wins; ties broken by replica id, and
+\\ then by value. Breaking the final tie by value matters: two writes that
+\\ collide on the same (timestamp, id) but carry different values are malformed
+\\ (a replica never reuses a clock), yet they are still well-typed — so making
+\\ the order TOTAL over (ts, id, value) keeps merge commutative/associative for
+\\ every typed register, not just the well-formed ones.
 (define lww-after?
-  {number --> string --> number --> string --> boolean}
-  T1 I1 T2 I2 -> (if (> T1 T2)
-                     true
-                     (if (< T1 T2)
-                         false
-                         (str-gt? I1 I2))))
+  {string --> number --> string --> string --> number --> string --> boolean}
+  V1 T1 I1 V2 T2 I2 -> (if (> T1 T2)
+                           true
+                           (if (< T1 T2)
+                               false
+                               (if (str-gt? I1 I2)
+                                   true
+                                   (if (str-gt? I2 I1)
+                                       false
+                                       (str-gt? V1 V2))))))
 
 (define lww-merge
   {register --> register --> register}
-  [lww V1 T1 I1] [lww V2 T2 I2] -> (if (lww-after? T1 I1 T2 I2)
+  [lww V1 T1 I1] [lww V2 T2 I2] -> (if (lww-after? V1 T1 I1 V2 T2 I2)
                                        [lww V1 T1 I1]
                                        [lww V2 T2 I2]))
 
@@ -205,30 +211,20 @@
   K [[K R] | _] -> [R]
   K [_ | Fs] -> (doc-get K Fs))
 
-(define doc-has?
-  {string --> (list field) --> boolean}
-  _ [] -> false
-  K [[K _] | _] -> true
-  K [_ | Fs] -> (doc-has? K Fs))
-
+\\ per-field merge, canonicalized the same way as gc-merge: fold every field of
+\\ both documents into one accumulator, lww-merging when a key recurs. One entry
+\\ per field name in the result, whatever order (or duplicates) the inputs had.
 (define doc-merge
   {doc --> doc --> doc}
-  [doc As] [doc Bs] -> [doc (append (doc-merge-shared As Bs)
-                                    (doc-only Bs As))])
+  [doc As] [doc Bs] -> [doc (doc-collect Bs (doc-collect As []))])
 
-(define doc-merge-shared
+(define doc-absorb
+  {field --> (list field) --> (list field)}
+  [K R] [] -> [[K R]]
+  [K R] [[K R2] | Fs] -> [[K (lww-merge R R2)] | Fs]
+  F [F2 | Fs] -> [F2 | (doc-absorb F Fs)])
+
+(define doc-collect
   {(list field) --> (list field) --> (list field)}
-  [] _ -> []
-  [[K R] | Rest] Bs -> [[K (doc-field-merge R (doc-get K Bs))] | (doc-merge-shared Rest Bs)])
-
-(define doc-field-merge
-  {register --> (list register) --> register}
-  R [] -> R
-  R [R2] -> (lww-merge R R2))
-
-(define doc-only
-  {(list field) --> (list field) --> (list field)}
-  [] _ -> []
-  [[K R] | Rest] As -> (if (doc-has? K As)
-                           (doc-only Rest As)
-                           [[K R] | (doc-only Rest As)]))
+  [] Acc -> Acc
+  [F | Fs] Acc -> (doc-collect Fs (doc-absorb F Acc)))

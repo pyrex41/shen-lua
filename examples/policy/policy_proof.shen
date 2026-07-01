@@ -17,6 +17,9 @@
   ______________________________
   [owns-fact] : (owns alice doc1);
 
+  ______________________________________
+  [alice-tenant] : (same-tenant alice doc1);
+
   _________________________________
   [member-fact] : (has-role bob member);
 
@@ -24,10 +27,13 @@
   [tenant-fact] : (same-tenant bob doc1);
 
   \\ -- grant rules (universal in S, A, R) ------------------------------------
-  \\ an owner may take ANY action on what they own
-  P : (owns S R);
-  ===============
-  [by-owner P] : (may S A R);
+  \\ an owner may take ANY action on what they own — but tenant isolation is
+  \\ absolute, so ownership ALONE is not enough: the owner must also be in the
+  \\ resource's tenant. This premise mirrors decide() in policy.shen, which
+  \\ checks the tenant boundary before it ever considers ownership.
+  P : (owns S R); Q : (same-tenant S R);
+  ======================================
+  [by-owner P Q] : (may S A R);
 
   \\ a member, in the resource's tenant, may READ it
   P : (has-role S member); Q : (same-tenant S R);
@@ -38,10 +44,10 @@
 \\ Each function's RESULT TYPE is the permission; the body is the proof. If the
 \\ file loads under (tc +), the type checker has verified every authorization.
 
-\\ alice OWNS doc1, so she may perform ANY action A on it (A is universal):
+\\ alice OWNS doc1 AND is in its tenant, so she may perform ANY action A on it:
 (define perm-alice-any
   { unit --> (may alice A doc1) }
-  _ -> [by-owner [owns-fact]])
+  _ -> [by-owner [owns-fact] [alice-tenant]])
 
 \\ bob is a member in doc1's tenant, so he may READ it:
 (define perm-bob-read

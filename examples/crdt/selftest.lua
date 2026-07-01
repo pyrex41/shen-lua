@@ -96,6 +96,20 @@ ok(shen.call("gc-commutative?", shen.call("gA"), shen.call("gB")) == true,
 ok(shen.call("gc-associative?", shen.call("gA"), shen.call("gB"), shen.call("gC")) == true,
    "gc-associative? (merge a (merge b c) = merge (merge a b) c)")
 
+-- adversarial: the laws must hold for EVERY typed value, not just well-formed
+-- ones. These are the exact counterexamples a review found before the merge
+-- was made dedup-canonicalizing / the LWW order made total over the value.
+shen.eval([==[ (define gDup -> [gc [["a" 1] ["a" 3]]])   \\ malformed: duplicate key
+               (define gOne -> [gc [["a" 2]]])
+               (define rX -> [lww "x" 1 "A"])            \\ same (ts,id), differ in value
+               (define rY -> [lww "y" 1 "A"]) ]==])
+ok(shen.call("gc-commutative?", shen.call("gDup"), shen.call("gOne")) == true,
+   "gc-commutative? on a duplicate-key counter")
+ok(shen.call("gc-idempotent?", shen.call("gDup")) == true,
+   "gc-idempotent? on a duplicate-key counter")
+ok(shen.call("lww-commutative?", shen.call("rX"), shen.call("rY")) == true,
+   "lww-commutative? on same (ts,id), different value")
+
 -- ===========================================================================
 print("\n== 3. universally-quantified proofs, checked by the type system (tier c) ==")
 shen.eval("(tc +)")
