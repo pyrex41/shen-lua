@@ -31,9 +31,15 @@ local store = {
 }
 local function set_store(s) store = s end
 
+-- Identity resolution (token -> user) is pluggable so it can go over a cosocket
+-- to a networked session store under nginx (see auth.lua / use_auth) while
+-- defaulting to the local store off-nginx. Everything else stays local.
+local auth = { token_user = function(tok) return store.token_user(tok) end }
+local function set_auth(a) auth = a end
+
 -- ---- host services the Shen policy calls (Shen -> Lua) ----------------------
 host = {
-  token_user   = function(tok)      return store.token_user(tok) end,
+  token_user   = function(tok)      return auth.token_user(tok) end,
   is_admin     = function(tok)      return store.is_admin(tok) end,
   owner_tenant = function(res)      return store.owner_tenant(res) end,
   member       = function(u, t)     return store.member(u, t) end,
@@ -104,7 +110,7 @@ local function dispatch(method, path, decoded_body)
 end
 
 local M = { dispatch = dispatch, to_val = to_val, from_val = from_val,
-            use_store = set_store, json = cjson }
+            use_store = set_store, use_auth = set_auth, json = cjson }
 
 function M.handle()
   local method = ngx.req.get_method()
