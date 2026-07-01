@@ -341,7 +341,15 @@ function M.install(Pmod, Emod)
   local drivers_ready = false
   local function ensure_drivers()
     if drivers_ready then return end
-    drivers_ready = true
+    -- Translate into FRESH accumulators and commit `drivers_ready` (plus the
+    -- n_fail the dispatch consults) only AFTER the whole pass and the
+    -- hand-ports succeed. If R.read_all or an unexpected translator error
+    -- throws partway, drivers_ready stays false and n_fail stays 0-but-uncommitted,
+    -- so the next typecheck re-runs this from scratch rather than dispatching to
+    -- native_typecheck over a half-filled NP. Re-running is safe: the driver
+    -- source is fixed, so NP[name] writes are idempotent and the counters are
+    -- local, not accumulated across attempts.
+    local ok, fail, errors = 0, 0, {}
     for _, form in ipairs(R.read_all(tstar_src)) do
       if getmt(form) == Cons and getmt(form[2][1]) == Symbol
          and DRIVER_FNS[form[2][1].name] then
@@ -349,16 +357,19 @@ function M.install(Pmod, Emod)
         local name = form[2][1].name
         if fn then
           NP[name] = fn
-          n_ok = n_ok + 1
+          ok = ok + 1
         else
-          M.translate_errors[name] = err
-          n_fail = n_fail + 1
+          errors[name] = err
+          fail = fail + 1
         end
       end
     end
-    M.n_ok, M.n_fail = n_ok, n_fail
     -- hand-ports (shen.lookupsig / shen.sigf, ...): also native-path only.
     install_handports()
+    M.translate_errors = errors
+    n_ok, n_fail = ok, fail
+    M.n_ok, M.n_fail = ok, fail
+    drivers_ready = true
   end
   M.ensure_drivers = ensure_drivers
 
@@ -409,7 +420,14 @@ function M.install(Pmod, Emod)
     F["shen.typecheck"] = typecheck_dispatch
     P.FA[F["shen.typecheck"]] = 2
   end
-  M.native_typecheck = native_typecheck
+  -- Export a GUARDED entry: the drivers are translated lazily, so a caller that
+  -- reaches native_typecheck directly (embedders/tests) must trigger that first,
+  -- or it reads nil driver predicates out of NP and crashes. The internal
+  -- dispatch path already calls ensure_drivers(), so it uses the raw local.
+  M.native_typecheck = function(expr, type_)
+    ensure_drivers()
+    return native_typecheck(expr, type_)
+  end
 end
 
 return M
