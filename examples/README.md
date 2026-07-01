@@ -1,6 +1,6 @@
 # Examples
 
-Four examples, smallest first (the first three run with plain
+Five examples, smallest first (the first three run with plain
 `luajit`/`bin/shen`, no external dependencies, no network):
 
 | | |
@@ -9,6 +9,7 @@ Four examples, smallest first (the first three run with plain
 | [`family.shen`](family.shen) | Shen Prolog in twenty lines — facts, rules, yes/no and binding queries. `bin/shen examples/family.shen` |
 | [`config_check.lua`](config_check.lua) | the showcase, walked through below. `luajit examples/config_check.lua` |
 | [`openresty/`](openresty/) | a complete web app — typed Shen validators + a Shen router on OpenResty (nginx + LuaJIT), with a front end that runs the **same** rules in the browser (Ratatoskr-shaken, ShenScript-compiled). Runs standalone via `luajit examples/openresty/selftest.lua`; see [its README](openresty/README.md) to serve it. |
+| [`openresty-authz/`](openresty-authz/) | durable multi-tenant **authorization**: the policy as a Prolog proof chain (`token → user → tenant → resource`), a typed `decision` witness that gates every response, and an event-sourced store (file + `lua-resty-lmdb`) whose append-only log makes decisions durable and auditable. Runs standalone via `luajit examples/openresty-authz/selftest.lua`; see [its README](openresty-authz/README.md). |
 
 ---
 

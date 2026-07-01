@@ -6,3 +6,4 @@ build/shen-bundle.lua
 luacov.stats.out
 luacov.report.out
 examples/openresty/logs/
+examples/openresty-authz/logs/
