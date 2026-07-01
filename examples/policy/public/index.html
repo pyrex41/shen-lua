@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<!--
+  examples/policy/public/index.html — a live authorization explorer.
+
+  Set a subject, an action, and a resource; the page POSTs the triple to
+  /api/check and shows the verdict and the REASON, computed by decide() in
+  policy.shen (shen-lua, under OpenResty, loaded under (tc +)). The very same
+  decide() guards /protected/ as an edge gate — this UI previews exactly what
+  the gateway will enforce.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>shen-lua · authorization explorer</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 2.5rem auto; padding: 0 1rem; color: #1f2937; }
+    h1 { font-size: 1.4rem; } a { color: #2563eb; } code { background: #f0f0f0; padding: 0 .25em; border-radius: 3px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem 1.5rem; margin: 1.5rem 0; }
+    fieldset { border: 1px solid #e5e7eb; border-radius: 8px; }
+    legend { font-size: .8rem; color: #6b7280; padding: 0 .4rem; }
+    label { display: block; font-size: .8rem; color: #6b7280; margin-top: .4rem; }
+    input, select { font: inherit; padding: .4rem; border: 1px solid #ccc; border-radius: 4px; width: 100%; box-sizing: border-box; }
+    .verdict { border-radius: 8px; padding: 1.25rem; margin: 1rem 0; font-size: 1.1rem; }
+    .allow { background: #dcfce7; border: 1px solid #86efac; color: #166534; }
+    .deny  { background: #fee2e2; border: 1px solid #fca5a5; color: #991b1b; }
+    .verdict b { font-size: 1.3rem; display: block; }
+    .reason { font-size: .95rem; opacity: .85; margin-top: .25rem; }
+    .arch { background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem 1.25rem; margin: 1.5rem 0; font-size: .95rem; }
+  </style>
+</head>
+<body>
+  <h1>Authorization explorer <small>— decided by Shen</small></h1>
+  <p>Pick a subject, action, and resource. The verdict and reason are computed
+     by <code>decide</code> in <a href="/policy.shen" target="_blank"><code>policy.shen</code></a>,
+     the same typed rules that guard <code>/protected/</code> at the edge.
+     Try a cross-tenant request, or a viewer trying to write.</p>
+
+  <div class="grid">
+    <fieldset>
+      <legend>subject</legend>
+      <label>name</label>   <input id="s-name" value="ada">
+      <label>role</label>
+      <select id="s-role"><option>member</option><option>admin</option><option>viewer</option></select>
+      <label>tenant</label> <input id="s-tenant" value="t1">
+    </fieldset>
+    <fieldset>
+      <legend>resource</legend>
+      <label>action</label>
+      <select id="action"><option>read</option><option>write</option><option>delete</option></select>
+      <label>owner</label>  <input id="r-owner" value="ada">
+      <label>tenant</label> <input id="r-tenant" value="t1">
+    </fieldset>
+  </div>
+
+  <div class="verdict" id="verdict">…</div>
+
+  <section class="arch">
+    <b>What this demonstrates.</b> Authorization is a single typed rule set
+    (<code>policy.shen</code>), proven well-typed at boot under <code>(tc +)</code>,
+    shared by the edge gate and this preview — so what you see is what the
+    gateway enforces, with no drift. Tenant isolation is checked first and is
+    absolute. The companion <code>policy_proof.shen</code> takes it further:
+    a permission is a <i>proof term</i>, and a denied request is an uninhabited
+    type — "deny by default" you cannot forget to write.
+  </section>
+
+  <script type="module">
+    const $ = (id) => document.getElementById(id);
+    const fields = ["s-name", "s-role", "s-tenant", "action", "r-owner", "r-tenant"];
+
+    async function recheck() {
+      const body = {
+        subject:  { name: $("s-name").value, role: $("s-role").value, tenant: $("s-tenant").value },
+        action:   $("action").value,
+        resource: { owner: $("r-owner").value, tenant: $("r-tenant").value },
+      };
+      let res;
+      try {
+        res = await (await fetch("/api/check", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        })).json();
+      } catch (e) { $("verdict").className = "verdict deny"; $("verdict").textContent = "server unreachable"; return; }
+      const v = $("verdict");
+      v.className = "verdict " + (res.allowed ? "allow" : "deny");
+      v.innerHTML = `<b>${res.allowed ? "ALLOW" : "DENY"}</b>`
+                  + `<div class="reason">${res.reason || ""}</div>`;
+    }
+
+    fields.forEach((f) => { $(f).addEventListener("input", recheck); $(f).addEventListener("change", recheck); });
+    recheck();
+  </script>
+</body>
+</html>

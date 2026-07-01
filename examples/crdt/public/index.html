@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<!--
+  examples/crdt/public/index.html — a two-replica CRDT convergence demo.
+
+  Two panels are two replicas of one shared document. Edit them in EITHER
+  order, with the network "offline", then Sync: the server merges each POST
+  into one canonical document with the typed `doc-merge` from crdt.shen — the
+  same join-semilattice merge proved commutative/associative/idempotent in
+  crdt_laws.shen — so the replicas always converge, whatever the sync order.
+
+  The merge that decides the outcome runs in Shen (shen-lua, under OpenResty).
+  Running that SAME crdt.shen in the browser via ShenScript — as
+  examples/openresty/ does for its rules — is the documented next step; here
+  the browser is a thin replica and the server is the authoritative one.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>shen-lua · CRDT sync hub</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 52rem; margin: 2.5rem auto; padding: 0 1rem; color: #1f2937; }
+    h1 { font-size: 1.4rem; }
+    a { color: #2563eb; } code { background: #f0f0f0; padding: 0 .25em; border-radius: 3px; }
+    .replicas { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.5rem 0; }
+    .replica { border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem; }
+    .replica h2 { font-size: 1rem; margin: 0 0 .5rem; display: flex; justify-content: space-between; }
+    .clock { font: .8rem ui-monospace, monospace; color: #6b7280; }
+    label { display: block; font-size: .8rem; color: #6b7280; margin-top: .5rem; }
+    input { font: inherit; padding: .4rem; border: 1px solid #ccc; border-radius: 4px; width: 100%; box-sizing: border-box; }
+    .row { display: flex; gap: .5rem; margin-top: .75rem; align-items: center; }
+    button { font: inherit; padding: .4rem .8rem; border: 0; border-radius: 4px; background: #2563eb; color: #fff; cursor: pointer; }
+    button.ghost { background: #e5e7eb; color: #1f2937; }
+    .canonical { background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+    .canonical h2 { font-size: 1rem; margin: 0 0 .5rem; color: #93c5fd; }
+    table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    td, th { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid #1e293b; }
+    .arch { background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem 1.25rem; margin: 1.5rem 0; }
+    .arch h2 { font-size: 1rem; } .arch li { padding: .15rem 0; }
+    .win { color: #34d399; }
+  </style>
+</head>
+<body>
+  <h1>CRDT sync hub <small>— two replicas, one converged document</small></h1>
+  <p>Each panel is a replica of a shared record. Edit them <b>independently</b>
+     (pretend the network is down), then <b>Sync</b> each one. However you
+     interleave the syncs, both replicas converge to the same document —
+     because the server merges with <a href="/crdt.shen" target="_blank"><code>doc-merge</code></a>,
+     a join-semilattice merge whose convergence laws are
+     <a href="#how">proved, not hoped for ↓</a>. Per field, the write with the
+     greater <code>(timestamp, replica-id)</code> wins.</p>
+
+  <div class="replicas">
+    <div class="replica" id="rep-A">
+      <h2>Replica A <span class="clock" id="clock-A">clock 0</span></h2>
+      <label>name</label>      <input data-f="name">
+      <label>role</label>      <input data-f="role">
+      <label>team</label>      <input data-f="team">
+      <div class="row"><button data-sync="A">Sync A → hub</button>
+                       <button class="ghost" data-pull="A">Pull</button></div>
+    </div>
+    <div class="replica" id="rep-B">
+      <h2>Replica B <span class="clock" id="clock-B">clock 0</span></h2>
+      <label>name</label>      <input data-f="name">
+      <label>role</label>      <input data-f="role">
+      <label>team</label>      <input data-f="team">
+      <div class="row"><button data-sync="B">Sync B → hub</button>
+                       <button class="ghost" data-pull="B">Pull</button></div>
+    </div>
+  </div>
+
+  <div class="canonical">
+    <h2>canonical document (on the server)</h2>
+    <table id="canon"><tbody><tr><td>(empty)</td></tr></tbody></table>
+  </div>
+
+  <section class="arch" id="how">
+    <h2>What this demonstrates</h2>
+    <ul>
+      <li><b>One typed merge, shared.</b> The server merges every replica's
+          document with <code>doc-merge</code> from
+          <a href="/crdt.shen" target="_blank"><code>crdt.shen</code></a>,
+          loaded under <code>(tc +)</code> — proved well-typed before the first
+          request. The browser runs the identical source nowhere yet; pointing
+          ShenScript at the same file (as the OpenResty guestbook example does)
+          makes the client merge too, with zero drift.</li>
+      <li><b>Convergence is proved, not tested.</b> A state-based CRDT converges
+          iff its merge is a join-semilattice — commutative, associative,
+          idempotent. <code>crdt_laws.shen</code> has Shen's sequent-calculus
+          type checker verify those laws (and a consequence, absorption)
+          <i>universally</i>; <code>crdt.shen</code> also checks them by
+          execution. Order of syncs cannot change the result.</li>
+      <li><b>No coordination.</b> No locks, no "who wins" round-trip — each
+          field keeps the write with the greater <code>(timestamp, id)</code>,
+          and that tiebreak is a total order in pure portable Shen, identical
+          on every port.</li>
+    </ul>
+  </section>
+
+  <script type="module">
+    const $$ = (s, r = document) => r.querySelector(s);
+    const $$$ = (s, r = document) => [...r.querySelectorAll(s)];
+
+    // Each replica keeps a local document {field: {v, ts, id}} and a Lamport
+    // clock. Editing a field stamps it with ++clock and the replica id.
+    const replicas = {
+      A: { id: "A", clock: 0, doc: {} },
+      B: { id: "B", clock: 0, doc: {} },
+    };
+
+    function renderReplica(which) {
+      const r = replicas[which];
+      $$(`#clock-${which}`).textContent = `clock ${r.clock}`;
+      $$$(`#rep-${which} input`).forEach((inp) => {
+        const reg = r.doc[inp.dataset.f];
+        // only overwrite the box when not focused, so typing isn't clobbered
+        if (document.activeElement !== inp) inp.value = reg ? reg.v : "";
+      });
+    }
+
+    function renderCanon(doc) {
+      const keys = Object.keys(doc).sort();
+      $$("#canon").innerHTML =
+        "<tbody>" + (keys.length
+          ? keys.map((k) => {
+              const r = doc[k];
+              return `<tr><th>${k}</th><td class="win">${escapeHtml(r.v)}</td>`
+                   + `<td>ts ${r.ts}</td><td>by ${r.id}</td></tr>`;
+            }).join("")
+          : "<tr><td>(empty)</td></tr>") + "</tbody>";
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"]/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    }
+
+    // local edit: stamp the field with the next logical time
+    $$$(".replica input").forEach((inp) => {
+      inp.addEventListener("change", () => {
+        const which = inp.closest(".replica").id.slice(-1);
+        const r = replicas[which];
+        r.clock += 1;
+        r.doc[inp.dataset.f] = { v: inp.value, ts: r.clock, id: r.id };
+        renderReplica(which);
+      });
+    });
+
+    async function getCanon() {
+      const res = await fetch("/api/doc");
+      return res.ok ? res.json() : {};
+    }
+
+    // sync = POST our whole doc; the server merges and returns the converged
+    // doc. Adopt it locally and advance our clock past everything we've seen
+    // (standard Lamport merge), so future edits beat what we just pulled.
+    async function sync(which) {
+      const r = replicas[which];
+      const res = await fetch("/api/doc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(r.doc),
+      });
+      const merged = await res.json();
+      adopt(which, merged);
+      renderCanon(merged);
+    }
+
+    async function pull(which) {
+      const merged = await getCanon();
+      adopt(which, merged);
+      renderCanon(merged);
+    }
+
+    function adopt(which, merged) {
+      const r = replicas[which];
+      r.doc = merged;
+      for (const k of Object.keys(merged)) r.clock = Math.max(r.clock, merged[k].ts);
+      renderReplica(which);
+    }
+
+    $$$("[data-sync]").forEach((b) => b.addEventListener("click", () => sync(b.dataset.sync)));
+    $$$("[data-pull]").forEach((b) => b.addEventListener("click", () => pull(b.dataset.pull)));
+
+    // initial paint
+    renderReplica("A"); renderReplica("B");
+    getCanon().then(renderCanon);
+  </script>
+</body>
+</html>
