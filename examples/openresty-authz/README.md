@@ -25,8 +25,8 @@ examples/openresty-authz/
                  the router. Leaf facts are read from the durable store.
   store.lua      durable, event-sourced fact store + append-only proof log.
                  File backend (tested) and an lua-resty-lmdb backend (production).
-  auth.lua       identity at the head of the chain: token -> user over a cosocket
-                 (ngx.socket.tcp) to a networked session store, cached + local fallback.
+  auth.lua       identity at the head of the chain: local verification by default
+                 (JWT-style, no I/O); an opt-in cosocket resolver for opaque tokens.
   app.lua        the glue: boots Shen, wires host bridges, marshals JSON <-> val.
   selftest.lua   drives the whole thing under plain luajit — no nginx needed.
   nginx.conf     OpenResty config: boot once per worker, replay the log, serve.
@@ -142,21 +142,29 @@ The decision events double as the **discharge report** from Shen-Backpressure:
 one failed (`not a member of tenant acme`, `requires the editor role`, `access
 … was revoked`). "Why was this allowed?" is answerable from durable state.
 
-## Identity over a cosocket (never block the worker)
+## Identity: local by default, a cosocket only when the store is remote
 
-The head of the proof chain — `token → authenticated user` — is the one leaf
-fact that, in production, does **not** live in the worker's memory. End-user
-tokens sit in a networked session/identity store (Redis, an OIDC introspection
-endpoint). Reaching it with a blocking socket would freeze the whole
-single-threaded nginx worker for the entire round-trip.
+The head of the proof chain is `token → authenticated user`. Whether resolving
+it touches the network is a **token-format** decision, not a given — and the
+default here is **no network at all**:
 
-OpenResty's answer is the **cosocket API** — `ngx.socket.tcp()`, whose
-`connect`/`send`/`receive`/`setkeepalive` yield to the event loop instead of
-blocking and pool connections across requests. `auth.lua` uses it directly (a
-minimal Redis `GET auth:<token>`; `lua-resty-redis` / `lua-resty-http` are the
-production wrappers over exactly these calls), with a short-TTL `lua_shared_dict`
-cache in front so the common request never touches the socket, and a fallback
-to the local store so a store outage degrades rather than fails:
+- **Signed tokens (JWT/PASETO)** — the usual choice for a stateless gate. You
+  verify **locally**: signature + `exp`/`aud`/`iss`. That is CPU (crypto), not
+  I/O; the only network is a JWKS key fetch, cached for hours. No cosocket on the
+  hot path. This is `M.local_resolver` and the default the app ships with.
+- **Opaque tokens (session ids / OAuth2 introspection)** — the token means
+  nothing on its own, so it *must* be looked up in a remote store. **Only then**
+  is identity network I/O, and a blocking socket would stall the whole
+  single-threaded worker for the round-trip.
+
+For that opaque case — and only that case — OpenResty's answer is the **cosocket
+API**, `ngx.socket.tcp()`, whose `connect`/`send`/`receive`/`setkeepalive` yield
+to the event loop instead of blocking and pool connections across requests.
+`M.cosocket_resolver` uses it directly (a minimal Redis `GET auth:<token>`;
+`lua-resty-redis` / `lua-resty-http` wrap these same calls), with a short-TTL
+`lua_shared_dict` cache in front so even then the common request never touches
+the socket, and a fallback to the local resolver so a store outage degrades
+rather than fails:
 
 ```lua
 local sock = ngx.socket.tcp()
@@ -168,11 +176,14 @@ sock:setkeepalive(60000, 20)         -- return the conn to the per-worker pool
 ```
 
 `token_user` is pluggable (`app.use_auth`), so this is the only place identity
-I/O changes: the Prolog policy is untouched. Two stores, two I/O models — a
-networked session store over a cosocket, the local policy store over in-process
-FFI. `selftest.lua` exercises this cosocket path in-process against a fake
-`ngx.socket.tcp`, checking a first lookup does one round-trip, a second is
-served from cache, and a missing key takes the Redis `$-1` path.
+resolution changes — the Prolog policy is untouched. `selftest.lua` still
+exercises the cosocket path in-process against a fake `ngx.socket.tcp` (first
+lookup does one round-trip, second is cache-served, a missing key takes the
+Redis `$-1` path), so the opaque-token path is covered even though it isn't the
+default. Note that the durable *policy* store stays local (LMDB, zero-copy FFI
+reads) by design — so a well-tuned gate leans on cosockets **sparingly**: JWKS
+refresh, opaque-token introspection, or replicating the event log off the
+request path. It is not a per-request hop you want if you can avoid it.
 
 ## Leaning on LuaJIT
 

@@ -1,19 +1,22 @@
 -- examples/openresty-authz/auth.lua — resolve a bearer token to a user at the
--- HEAD of the proof chain, WITHOUT blocking the nginx worker.
+-- HEAD of the proof chain.
 --
--- In a real deployment the end-user's token is not a local table lookup: it
--- lives in a networked session/identity store (Redis, an OIDC introspection
--- endpoint, ...). Reaching it with a blocking socket would stall the whole
--- single-threaded nginx worker for the round-trip. OpenResty's answer is the
--- COSOCKET API — ngx.socket.tcp() — whose connect/send/receive/setkeepalive
--- yield to the event loop instead of blocking, and pool connections across
--- requests. This module uses it directly (lua-resty-redis / lua-resty-http are
--- the production-grade wrappers over exactly these calls).
+-- Whether this touches the network is a TOKEN-FORMAT decision, not a given:
 --
--- token_user(token) is the ONE leaf fact the Prolog policy reads for identity;
--- everything downstream (membership, ownership) stays in the local durable
--- store. Two stores, two I/O models: a networked session store over a cosocket,
--- the local policy store over in-process FFI.
+--   * Signed tokens (JWT/PASETO) — verify LOCALLY: check the signature + exp/
+--     aud/iss. That is CPU (crypto), no per-request I/O; the only network is a
+--     JWKS key fetch, cached for hours. This is the default and the common case
+--     for a stateless authz gate.
+--   * Opaque tokens (session ids / OAuth2 introspection) — must be looked up in
+--     a REMOTE store, so THEN it is network I/O. On a single-threaded nginx
+--     worker a blocking socket would stall the whole worker for the round-trip,
+--     so use a COSOCKET (ngx.socket.tcp, whose connect/send/receive/setkeepalive
+--     yield to the event loop and pool connections) and cache the result.
+--
+-- So the DEFAULT resolver is local (`local_resolver`); `cosocket_resolver` is an
+-- opt-in for the opaque-token case only. Either way, token_user(token) is the
+-- ONE leaf fact the Prolog policy reads for identity — everything downstream
+-- (membership, ownership) stays in the local durable store.
 
 local M = {}
 
@@ -49,16 +52,20 @@ end
 -- ---- resolvers --------------------------------------------------------------
 -- A resolver is just { token_user = function(token) -> user }.
 
--- Local resolver: identity from the in-process store. The off-nginx default and
--- the fallback when the network path errors.
+-- DEFAULT resolver: identity verified/looked up locally, no per-request I/O.
+-- In production this is where a JWT signature check lives (lua-resty-jwt);
+-- `token_user_fn` returns the subject. It is also the fallback for the cosocket
+-- resolver when the remote store errors.
 function M.local_resolver(token_user_fn)
   return { token_user = token_user_fn }
 end
 
--- Cosocket resolver: a short-TTL shared-dict cache in front of a Redis lookup
--- over ngx.socket.tcp. The cache means the common case never touches the socket
--- at all; a miss does one non-blocking round-trip; any error degrades to the
--- fallback rather than failing the request open.
+-- OPT-IN resolver, for OPAQUE tokens only (session ids / introspection) whose
+-- store is remote. A short-TTL shared-dict cache sits in front of a Redis lookup
+-- over ngx.socket.tcp, so the common case never touches the socket at all; a
+-- miss does one non-blocking round-trip; any error degrades to the local
+-- fallback rather than failing the request open. Do NOT use this for signed
+-- tokens — verify those locally with M.local_resolver instead.
 --
 -- opts = { redis = {host,port,timeout_ms,keepalive_ms,pool_size},
 --          cache = <ngx.shared dict or nil>, ttl = <seconds>,

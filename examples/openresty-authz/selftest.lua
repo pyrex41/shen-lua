@@ -179,7 +179,7 @@ do
 end
 
 -- ---- cosocket end-to-end: whole policy with identity over the cosocket ------
-local c_fail, c_audit = run_scenario("file backend, identity over a cosocket", file_open(), cosocket_auth)
+local c_fail, c_audit = run_scenario("file backend, opaque-token identity over a cosocket (opt-in)", file_open(), cosocket_auth)
 fail = fail + c_fail
 
 -- ---- all three substrates must agree, decision for decision -----------------
