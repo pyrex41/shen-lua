@@ -13,6 +13,7 @@ has a `selftest.lua` that runs off-nginx):
 | [`policy/`](policy/) | a typed **authorization** gateway: one rule set enforced at the OpenResty edge and previewed in the browser, plus authz-as-type-inhabitation (a permission *is* a proof). `luajit examples/policy/selftest.lua` |
 | [`crdt/`](crdt/) | a **CRDT** sync hub: replicas converge via a typed join-semilattice merge whose laws are checked by execution *and* by machine-checked sequent-calculus proof. `luajit examples/crdt/selftest.lua` |
 | [`openresty/`](openresty/) | a complete web app — typed Shen validators + a Shen router on OpenResty (nginx + LuaJIT), with a front end that runs the **same** rules in the browser (Ratatoskr-shaken, ShenScript-compiled). Runs standalone via `luajit examples/openresty/selftest.lua`; see [its README](openresty/README.md) to serve it. |
+| [`openresty-authz/`](openresty-authz/) | durable multi-tenant **authorization**: the policy as a Prolog proof chain (`token → user → tenant → resource`), a typed `decision` witness that gates every response, and an event-sourced store (file + `lua-resty-lmdb`) whose append-only log makes decisions durable and auditable. Runs standalone via `luajit examples/openresty-authz/selftest.lua`; see [its README](openresty-authz/README.md). |
 
 The last three (`configc/`, `policy/`, `crdt/`) are a themed trio: each extracts
 a correctness-critical kernel into one typed, portable Shen file that runs
