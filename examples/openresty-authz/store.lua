@@ -62,6 +62,9 @@ local function file_backend(path)
   function be:append(line)
     local f = self.fh
     if not f then f = assert(io.open(self.path, "a")); self.fh = f end
+    -- flush() pushes to the OS, so this is durable across a PROCESS crash, but
+    -- not across power loss (no fsync). Good enough for the demo; a real deploy
+    -- uses the lmdb backend (or an fsync policy) for power-loss durability.
     f:write(line, "\n"); f:flush()
   end
   return be
@@ -84,6 +87,11 @@ local function lmdb_backend()
     end
   end
   function be:append(line)
+    -- NOTE: this reads evtseq OUTSIDE the transaction, so it is NOT safe under
+    -- worker_processes > 1 — two workers can read the same n and one overwrites
+    -- the other's event. Single-worker only as written. To make it multi-worker
+    -- safe, allocate the seq atomically: do the read inside the transaction and
+    -- fail/retry on a version conflict, or use a compare-and-set on evtseq.
     local n = (tonumber(lmdb.get("evtseq")) or 0) + 1
     local t = txn.begin()
     t:set("evt:" .. n, line)
@@ -154,7 +162,7 @@ function M.new(opts)
                    decision=decision, reason=reason }
   end
 
-  -- audit trail as a Lua array of rows, for GET /api/audit
+  -- audit trail as a Lua array of rows, for POST /api/admin/audit
   function S.audit()
     local out = {}
     for i, d in ipairs(view.decisions) do out[i] = d end

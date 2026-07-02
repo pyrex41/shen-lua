@@ -125,6 +125,12 @@ local function run_scenario(title, open_store, make_auth)
   expect("bob now denied (revoked)", 403, "POST", "/api/read", { token = "tok-bob",   resource = "doc-1" })
   expect("alice still reads",        200, "POST", "/api/read", { token = "tok-alice", resource = "doc-1" })
 
+  print("\n== request-shape guards ==")
+  expect("write w/o content -> 400", 400, "POST", "/api/write", { token = "tok-alice", resource = "doc-1" })
+  expect("...doc NOT wiped",         200, "POST", "/api/read",  { token = "tok-alice", resource = "doc-1" })
+  expect("bodyless POST -> 400",     400, "POST", "/api/read")
+  expect("audit needs admin -> 403", 403, "POST", "/api/admin/audit", { token = "tok-alice" })
+
   print("\n== durable execution: simulate a restart (reopen + replay the log) ==")
   local seq_before = s.seq()
   local s2 = open_store()             -- brand-new store object, same durable log
@@ -134,7 +140,7 @@ local function run_scenario(title, open_store, make_auth)
   expect("alice reads after restart",  200, "POST", "/api/read", { token = "tok-alice", resource = "doc-1" })
   expect("revocation survived restart",403, "POST", "/api/read", { token = "tok-bob",   resource = "doc-1" })
 
-  local _, audit = req("GET", "/api/audit")
+  local _, audit = req("POST", "/api/admin/audit", { token = "tok-admin" })
   return fail, (audit and audit.log) or {}
 end
 
@@ -151,9 +157,9 @@ local function local_auth(s)
   return Auth.local_resolver(function(t) return s.token_user(t) end)
 end
 local REDIS = { host = "127.0.0.1", port = 6379 }
-local function cosocket_auth(s)
-  return Auth.cosocket_resolver{ redis = REDIS, cache = fake_cache(), ttl = 5,
-                                 fallback = function(t) return s.token_user(t) end }
+local function cosocket_auth(_)
+  -- no fallback: fail closed on a store error (the default recommendation)
+  return Auth.cosocket_resolver{ redis = REDIS, cache = fake_cache(), ttl = 5 }
 end
 
 local fail = 0
@@ -166,8 +172,7 @@ print("\n########## cosocket identity resolver (ngx.socket.tcp fake) ##########"
 install_fake_cosocket{ ["tok-admin"]="admin", ["tok-alice"]="alice",
                        ["tok-bob"]="bob", ["tok-carol"]="carol" }
 do
-  local r = Auth.cosocket_resolver{ redis = REDIS, cache = fake_cache(), ttl = 5,
-                                    fallback = function() return "" end }
+  local r = Auth.cosocket_resolver{ redis = REDIS, cache = fake_cache(), ttl = 5 }
   local function check(label, cond) print("  " .. (cond and "ok  " or "FAIL") .. " " .. label)
                                      if not cond then fail = fail + 1 end end
   local u1 = r.token_user("tok-alice"); check("resolves tok-alice -> alice over cosocket", u1 == "alice")

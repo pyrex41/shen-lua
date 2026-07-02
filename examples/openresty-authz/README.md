@@ -123,8 +123,10 @@ revocation still denies access.
 
 Two backends sit behind one `append` + `each` interface:
 
-- **file** — append-only JSONL on disk. Durable across restarts; the default
-  under plain LuaJIT.
+- **file** — append-only JSONL on disk. `flush()`ed on each append, so it is
+  durable across a *process* crash; it does not `fsync`, so it is not power-loss
+  durable (use the lmdb backend, or add an fsync policy, if you need that). The
+  default under plain LuaJIT.
 - **lmdb** — the same log in [`lua-resty-lmdb`][lmdb] (memory-mapped, MVCC,
   ACID, zero-copy FFI reads — the store Kong ships). Production path under
   OpenResty; `nginx.conf` shows the two-line swap.
@@ -138,9 +140,10 @@ environment needs OpenResty.
 [lmdb]: https://github.com/openresty/lua-resty-lmdb
 
 The decision events double as the **discharge report** from Shen-Backpressure:
-`GET /api/audit` returns, for every decision, which premise carried it or which
-one failed (`not a member of tenant acme`, `requires the editor role`, `access
-… was revoked`). "Why was this allowed?" is answerable from durable state.
+`POST /api/admin/audit` (admin-gated — it lists users and denial reasons)
+returns, for every decision, which premise carried it or which one failed (`not
+a member of tenant acme`, `requires the editor role`, `access … was revoked`).
+"Why was this allowed?" is answerable from durable state.
 
 ## Identity: local by default, a cosocket only when the store is remote
 
@@ -185,6 +188,12 @@ reads) by design — so a well-tuned gate leans on cosockets **sparingly**: JWKS
 refresh, opaque-token introspection, or replicating the event log off the
 request path. It is not a per-request hop you want if you can avoid it.
 
+Two operational notes for the opaque path: the resolver **fails closed** by
+default — a store error resolves to no identity, so the chain denies (passing
+`opts.fallback` is an explicit opt-in to degrade to local data instead). And the
+shared-dict cache means a revocation recorded in the session store lags by up to
+its TTL (5s here) before every worker sees it — tune the TTL to your tolerance.
+
 ## Leaning on LuaJIT
 
 - The Prolog engine is the FFI/int32 soa32 machine — no boxing on the reasoning
@@ -213,16 +222,21 @@ curl -s localhost:8080/api/read  -d '{"token":"tok-alice","resource":"doc-1"}'
 curl -s localhost:8080/api/read  -d '{"token":"tok-carol","resource":"doc-1"}'
 # bob (viewer) cannot write — needs the editor role
 curl -s localhost:8080/api/write -d '{"token":"tok-bob","resource":"doc-1","content":"x"}'
-# the durable decision log
-curl -s localhost:8080/api/audit
+# the durable decision log (admin-gated)
+curl -s localhost:8080/api/admin/audit -d '{"token":"tok-admin"}'
 ```
 
 ## Things to know before building on this
 
 - **Single worker as written.** The materialized view is per-worker state, so
   with `worker_processes > 1` a mutation on one worker is not visible to another
-  until it re-replays. LMDB gives you the shared, durable substrate to fix that
-  (re-read on its txn id, or query it directly); the file backend does not.
+  until it re-replays. LMDB is the shared, durable substrate to fix that — but
+  note it is not automatic: the demo's `append` allocates the sequence number
+  with a read-modify-write *outside* the transaction, which races across
+  workers. Making it multi-worker safe means allocating the seq atomically (read
+  it inside the txn and retry on conflict, or a compare-and-set) and having
+  readers re-replay when the txn id advances. The file backend can't be shared
+  at all.
 - **Tokens stand in for JWTs.** Off-nginx, `token_user` is a local lookup; under
   nginx, `auth.lua` resolves it over a cosocket to a session store (or you'd
   verify a JWT signature and return the subject). Either way the proof chain is

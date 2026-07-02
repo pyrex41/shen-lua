@@ -38,6 +38,9 @@ local auth = { token_user = function(tok) return store.token_user(tok) end }
 local function set_auth(a) auth = a end
 
 -- ---- host services the Shen policy calls (Shen -> Lua) ----------------------
+-- `host` is an INTENTIONAL global: the Shen policy reaches these via
+-- (lua.call "host.xxx" ...), which resolves dotted names against _G. Do not
+-- make it local — that would break the bridge.
 host = {
   token_user   = function(tok)      return auth.token_user(tok) end,
   is_admin     = function(tok)      return store.is_admin(tok) end,

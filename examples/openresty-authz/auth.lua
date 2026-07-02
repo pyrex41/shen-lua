@@ -82,7 +82,12 @@ function M.cosocket_resolver(opts)
     local user, err = redis_get(cfg, "auth:" .. token)
     if err then
       if ngx and ngx.log then ngx.log(ngx.ERR, "auth cosocket: ", err) end
-      return fallback and fallback(token) or ""    -- fail closed-ish via fallback
+      -- FAIL CLOSED by default: on a store error, resolve to no identity so the
+      -- proof chain denies. `opts.fallback` is an EXPLICIT opt-in to degrade to
+      -- a local resolver instead — only safe if you accept that a session-store
+      -- outage lets tokens resolve from local (possibly stale) data, which can
+      -- bypass revocations recorded only in the remote store.
+      return fallback and fallback(token) or ""
     end
     if cache then cache:set(token, user, ttl) end
     return user
