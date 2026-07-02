@@ -312,34 +312,66 @@ function M.install(Pmod, Emod)
     end
     return nil
   end
-  local src = read_kl("t-star")
-  if not src then
-    error("typecheck_native: cannot locate t-star.kl")
-  end
-
   -- kernel signatures from init.kl; incomplete harvest forces legacy fallback
   M.sigs_complete = harvest_init_sigs(read_kl("init"))
 
+  -- Driver TRANSLATION is DEFERRED to the first typecheck; the t-star.kl READ
+  -- stays eager. Walking the 16 driver defuns through the KL->Lua prolog
+  -- compiler and loadstring'ing the emitted source is ~32ms — the bulk of the
+  -- engine's boot cost — and a plain boot never typechecks anything, so none
+  -- of it is needed until the first (shen.typecheck ...) call. But the *source
+  -- read* must happen now: read_kl resolves against the relative P.KLDIR, and a
+  -- caller may chdir between boot and its first typecheck (run-kernel-tests
+  -- does exactly this), which would leave a deferred read unable to find the
+  -- file. So we slurp the source string here — cheap, ~8ms — and defer only the
+  -- CPU-bound parse+translate, which needs nothing but the in-memory string.
+  -- ensure_drivers() runs that once, on demand; typecheck_dispatch calls it
+  -- before deciding native-vs-legacy (n_fail is only known after translation).
+  -- The drivers land in NP, the handports in NP too; both are consulted only
+  -- along the native typecheck path, so deferring them is behaviour-preserving.
+  -- Harvest and the declare/destroy wrappers below stay eager: they must
+  -- observe every kernel declare that initialise() issues after install.
+  local tstar_src = read_kl("t-star")
+  if not tstar_src then
+    error("typecheck_native: cannot locate t-star.kl")
+  end
   M.translate_errors = {}
   local n_ok, n_fail = 0, 0
-  for _, form in ipairs(R.read_all(src)) do
-    if getmt(form) == Cons and getmt(form[2][1]) == Symbol
-       and DRIVER_FNS[form[2][1].name] then
-      local fn, err = PC.translate_defun(form)
-      local name = form[2][1].name
-      if fn then
-        NP[name] = fn
-        n_ok = n_ok + 1
-      else
-        M.translate_errors[name] = err
-        n_fail = n_fail + 1
+  M.n_ok, M.n_fail = 0, 0   -- 0 until ensure_drivers runs on the first typecheck
+  local drivers_ready = false
+  local function ensure_drivers()
+    if drivers_ready then return end
+    -- Translate into FRESH accumulators and commit `drivers_ready` (plus the
+    -- n_fail the dispatch consults) only AFTER the whole pass and the
+    -- hand-ports succeed. If R.read_all or an unexpected translator error
+    -- throws partway, drivers_ready stays false and n_fail stays 0-but-uncommitted,
+    -- so the next typecheck re-runs this from scratch rather than dispatching to
+    -- native_typecheck over a half-filled NP. Re-running is safe: the driver
+    -- source is fixed, so NP[name] writes are idempotent and the counters are
+    -- local, not accumulated across attempts.
+    local ok, fail, errors = 0, 0, {}
+    for _, form in ipairs(R.read_all(tstar_src)) do
+      if getmt(form) == Cons and getmt(form[2][1]) == Symbol
+         and DRIVER_FNS[form[2][1].name] then
+        local fn, err = PC.translate_defun(form)
+        local name = form[2][1].name
+        if fn then
+          NP[name] = fn
+          ok = ok + 1
+        else
+          errors[name] = err
+          fail = fail + 1
+        end
       end
     end
+    -- hand-ports (shen.lookupsig / shen.sigf, ...): also native-path only.
+    install_handports()
+    M.translate_errors = errors
+    n_ok, n_fail = ok, fail
+    M.n_ok, M.n_fail = ok, fail
+    drivers_ready = true
   end
-  M.n_ok, M.n_fail = n_ok, n_fail
-
-  -- 2) hand-ports
-  install_handports()
+  M.ensure_drivers = ensure_drivers
 
   -- 3) declare wrapper: record raw type exprs for native lookupsig.
   --    boot.lua installs the engine before initialise(), so every kernel
@@ -371,6 +403,7 @@ function M.install(Pmod, Emod)
   --    rerun the whole query on the legacy engine.
   local orig_typecheck_ref = nil  -- resolved lazily: t-star loads before us
   local function typecheck_dispatch(expr, type_)
+    ensure_drivers()   -- translate the drivers on first typecheck (see above)
     if n_fail == 0 and M.sigs_complete
        and P.GLOBALS["shen.*spy*"] ~= true then
       local ok, r = pcall(native_typecheck, expr, type_)
@@ -387,7 +420,14 @@ function M.install(Pmod, Emod)
     F["shen.typecheck"] = typecheck_dispatch
     P.FA[F["shen.typecheck"]] = 2
   end
-  M.native_typecheck = native_typecheck
+  -- Export a GUARDED entry: the drivers are translated lazily, so a caller that
+  -- reaches native_typecheck directly (embedders/tests) must trigger that first,
+  -- or it reads nil driver predicates out of NP and crashes. The internal
+  -- dispatch path already calls ensure_drivers(), so it uses the raw local.
+  M.native_typecheck = function(expr, type_)
+    ensure_drivers()
+    return native_typecheck(expr, type_)
+  end
 end
 
 return M
