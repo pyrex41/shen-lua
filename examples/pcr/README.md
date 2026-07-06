@@ -24,6 +24,11 @@ mkdir -p examples/pcr/logs                # or serve it:
 openresty -p "$PWD/examples/pcr" -c nginx.conf
 ```
 
+An executable walkthrough lives in [`DEMO.md`](DEMO.md): `showboat verify
+examples/pcr/DEMO.md` (from the repo root) re-runs every block — the money
+shot, the engine-parity check, the full battery, the hostile-input defenses —
+and diffs the output against what is recorded.
+
 ## Check, don't search — and facts are live
 
 Two asymmetries make this affordable and correct at request time:
@@ -165,3 +170,4 @@ belongs, presented by the client).
 | `app.lua` | the gateway: pre-intern gates, judgment construction, the check, admin endpoints, the audit line |
 | `selftest.lua` | allow/deny/revocation-window/TTL/staleness/hostile-input/write-failure/corrupt-blob/intern cases + engine-parity + timing, off-nginx |
 | `nginx.conf` | two workers sharing one fact blob; the curl walkthrough |
+| `DEMO.md` | an executable showboat walkthrough — every block re-runs and diffs under `showboat verify` |
