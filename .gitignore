@@ -5,4 +5,9 @@ build/shen-bundle.lua
 .fasl-test/
 luacov.stats.out
 luacov.report.out
-examples/openresty/logs/
+examples/*/logs/
+examples/*/client_body_temp/
+examples/*/fastcgi_temp/
+examples/*/proxy_temp/
+examples/*/scgi_temp/
+examples/*/uwsgi_temp/

@@ -12,6 +12,7 @@ has a `selftest.lua` that runs off-nginx):
 | [`configc/`](configc/) | a typed config **compiler**: one config validates *and* generates a Kubernetes Deployment + nginx server block; a generator type-bug is caught at load. `luajit examples/configc/configc.lua` |
 | [`policy/`](policy/) | a typed **authorization** gateway: one rule set enforced at the OpenResty edge and previewed in the browser, plus authz-as-type-inhabitation (a permission *is* a proof). `luajit examples/policy/selftest.lua` |
 | [`crdt/`](crdt/) | a **CRDT** sync hub: replicas converge via a typed join-semilattice merge whose laws are checked by execution *and* by machine-checked sequent-calculus proof. `luajit examples/crdt/selftest.lua` |
+| [`pcr/`](pcr/) | **proof-carrying requests**: the client attaches a proof term, the OpenResty gate *checks* it against `(may subject action resource)` — never searches — and logs the proof as the audit trail; delegation makes proofs compose into justification chains. `luajit examples/pcr/selftest.lua` |
 | [`openresty/`](openresty/) | a complete web app — typed Shen validators + a Shen router on OpenResty (nginx + LuaJIT), with a front end that runs the **same** rules in the browser (Ratatoskr-shaken, ShenScript-compiled). Runs standalone via `luajit examples/openresty/selftest.lua`; see [its README](openresty/README.md) to serve it. |
 
 The last three (`configc/`, `policy/`, `crdt/`) are a themed trio: each extracts
