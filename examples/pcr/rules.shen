@@ -3,32 +3,31 @@
 \\ A term of type (may S A R) is a PROOF that subject S may perform action A on
 \\ resource R. The gateway never SEARCHES for such a term — the client carries
 \\ one with the request (X-Proof), and the gateway merely CHECKS it against the
-\\ judgment built from the request. Checking a given term is bounded by the
-\\ term's size; search is the expensive, open-ended direction, and it never
-\\ runs at request time.
+\\ judgment built from the request.
 \\
-\\ Same logic as examples/policy/policy_proof.shen, promoted from an offline
-\\ demonstration to the wire protocol — plus a delegation rule, because the
-\\ payoff of carrying PROOFS instead of booleans is that proofs COMPOSE: a
-\\ delegated permission is a nested term whose subterms are the entire audit
-\\ chain of *why*.
+\\ FACTS ARE LIVE. There are no fact axioms in this file: a fact leaf is a
+\\ self-describing claim — [fact owns alice doc1] — discharged by the single
+\\ side-condition rule below, which consults the gateway's versioned fact
+\\ store (facts.lua, via the typed pcr.fact? bridge) AT PROOF-CHECK TIME.
+\\ Grant a fact and proofs using it start checking; revoke it and the same
+\\ proof bytes stop checking on the very next request — the engine memoizes
+\\ no answers, so revocation has zero staleness at the checker.
+\\
+\\ The leaf carries its ground triple (Pred S R) because a side condition can
+\\ only CHECK values, never BIND them: unification of the leaf against the
+\\ client's proof term grounds Pred, S and R before the guard runs, which
+\\ keeps rules like by-delegation (where S is not in the final judgment)
+\\ working. It also makes every leaf readable in the audit log.
+\\
+\\ pcr.fact? must be registered (lua.function, app.lua) BEFORE this file is
+\\ loaded under (tc +). The guard allows only the fact predicates below —
+\\ a leaf can never assert a grant judgment like (may ...) directly.
 
 (datatype authz
-  \\ -- environment facts (axioms; a directory or DB would supply these) ------
-  ______________________________
-  [owns-fact] : (owns alice doc1);
-
-  ______________________________________
-  [alice-tenant] : (same-tenant alice doc1);
-
-  _________________________________
-  [member-fact] : (has-role bob member);
-
-  ____________________________________
-  [tenant-fact] : (same-tenant bob doc1);
-
-  ______________________________________
-  [deleg-fact] : (delegates alice carol);
+  \\ -- the ONE fact rule: a leaf is checked against the live store ----------
+  if (pcr.fact? Pred S R)
+  ________________________
+  [fact Pred S R] : (Pred S R);
 
   \\ -- grant rules (universal in S, A, R, T) ---------------------------------
   \\ an owner inside the resource's tenant may take ANY action on it
