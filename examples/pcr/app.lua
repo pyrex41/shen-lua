@@ -74,21 +74,22 @@ local STATIC_VOCAB = {
 local ATOM_BUDGET = 4096
 local seen_atoms, seen_count = {}, 0
 
+local function atom_ok(s)
+  return type(s) == "string" and s ~= "" and s:match("^[a-z][a-z0-9%-%.%_]*$") ~= nil
+end
+
 -- The gate is an intern-DoS backstop, not authorization: an atom admitted
 -- once is already interned, so admission is MONOTONE — revoking a
 -- subject's last fact does not make them "unknown" here; it makes their
 -- proofs fail at the type level, with the honest reason.
 local function admit(token, snap)
+  if not atom_ok(token) then return false end
   if STATIC_VOCAB[token] or seen_atoms[token] then return true end
   if not snap.atoms[token] then return false end
   if seen_count >= ATOM_BUDGET then return false end
   seen_count = seen_count + 1
   seen_atoms[token] = true
   return true
-end
-
-local function atom_ok(s)
-  return type(s) == "string" and s ~= "" and s:match("^[%w%-%.%_]+$") ~= nil
 end
 
 -- every proof token must be a known word; brackets are structure
@@ -159,7 +160,10 @@ local function dispatch(method, path, body)
     if not (atom_ok(body.pred) and atom_ok(body.s) and atom_ok(body.r)) then
       return 400, { error = "grant needs pred/s/r atoms" }
     end
-    local v = facts.grant(body.pred, body.s, body.r, tonumber(body.expiry))
+    local ok, v, err = facts.grant(body.pred, body.s, body.r, tonumber(body.expiry))
+    if not ok then
+      return 507, { ok = false, error = "grant failed", reason = err }
+    end
     return 200, { ok = true, version = v }
   end
   if path == "/admin/revoke" and method == "POST" then
@@ -167,7 +171,10 @@ local function dispatch(method, path, body)
     if not (atom_ok(body.pred) and atom_ok(body.s) and atom_ok(body.r)) then
       return 400, { error = "revoke needs pred/s/r atoms" }
     end
-    local v = facts.revoke(body.pred, body.s, body.r)
+    local ok, v, err = facts.revoke(body.pred, body.s, body.r)
+    if not ok then
+      return 507, { ok = false, error = "revoke failed", reason = err }
+    end
     return 200, { ok = true, version = v }
   end
   return 404, { error = "not found" }

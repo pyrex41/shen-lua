@@ -45,6 +45,7 @@ M.W    = 1        -- replica sync period (seconds); staleness hard cap = 3W
 -- blob change" test below is a pointer compare after the get.
 local shm = ngx and ngx.shared and ngx.shared.pcr_facts
 local cell = { v = nil }   -- fallback store
+M._simulate_write_failure = nil   -- selftest hook; normal plain-Lua fallback still succeeds
 
 local function blob_get()
   if shm then return shm:get("blob") end
@@ -52,7 +53,12 @@ local function blob_get()
 end
 
 local function blob_set(s)
-  if shm then return shm:set("blob", s) end
+  if M._simulate_write_failure then return false, M._simulate_write_failure end
+  if shm then
+    local ok, err = shm:set("blob", s)
+    if not ok then return false, err or "unknown shared-dict set failure" end
+    return true
+  end
   cell.v = s; return true
 end
 
@@ -67,15 +73,17 @@ end
 
 local function write(facts, version)
   local blob = json.encode{ version = version, synced_at = M.now(), facts = facts }
-  blob_set(blob)
-  return version
+  local ok, err = blob_set(blob)
+  if not ok then
+    return false, nil, "fact store write failed: " .. tostring(err)
+  end
+  return true, version
 end
 
 -- Seed only if no blob exists yet (both nginx workers race at init).
 function M.seed(facts)
   if blob_get() then return false end
-  write(facts, 1)
-  return true
+  return write(facts, 1)
 end
 
 local function mutate(f)
@@ -144,7 +152,7 @@ function M.reset_leaves() LEAVES = {} end
 function M.leaves() return LEAVES end
 
 local function atom_ok(x)
-  return type(x) == "string" and x ~= "" and x:match("^[%w%-%.%_]+$") ~= nil
+  return type(x) == "string" and x ~= "" and x:match("^[a-z][a-z0-9%-%.%_]*$") ~= nil
 end
 
 function M.factq(pred, s, r)
@@ -173,7 +181,12 @@ function M.start_sync_timer(fetch)
     local ok, facts = pcall(fetch)
     if ok and type(facts) == "table" then
       local t = decode_blob()
-      write(facts, ((t and t.version) or 0) + 1)
+      local wrote, _, err = write(facts, ((t and t.version) or 0) + 1)
+      if not wrote then
+        ngx.log(ngx.ERR, err)
+      end
+    elseif not ok then
+      ngx.log(ngx.ERR, "pcr fact sync fetch failed: ", tostring(facts))
     end
   end
   ngx.timer.every(M.W, pull)

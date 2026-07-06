@@ -26,6 +26,22 @@ local function expect(label, want, subject, action, resource, proof)
   if authorized ~= want then fail = fail + 1; print("      FAIL: expected " .. tostring(want)) end
 end
 
+local function expect_admin(label, want_ok, path, body)
+  local status, out = app.dispatch("POST", path, body)
+  io.write(("  %-30s HTTP %-3d %s\n"):format(label, status, out.reason or out.error or "ok"))
+  local matched
+  if want_ok then
+    matched = status == 200 and out.ok == true
+  else
+    matched = status ~= 200 and out.ok == false
+  end
+  if not matched then
+    fail = fail + 1
+    print(("      FAIL: expected admin ok=%s"):format(tostring(want_ok)))
+  end
+  return status, out
+end
+
 local owner_proof  = "[by-owner [fact owns alice doc1] [fact same-tenant alice doc1]]"
 local member_proof = "[by-member-read [fact has-role bob member] [fact same-tenant bob doc1]]"
 local deleg_proof  = "[by-delegation " .. owner_proof .. " [fact delegates alice carol]]"
@@ -49,6 +65,37 @@ expect("revoke root fact",        false, "alice", "write", "doc1", owner_proof)
 expect("...kills chains on it",   false, "carol", "write", "doc1", deleg_proof)
 facts.grant("owns", "alice", "doc1")
 expect("restore root fact",       true,  "alice", "write", "doc1", owner_proof)
+
+print("\n== fact-store write failures fail closed ==")
+local before = facts.snapshot()
+local before_version = before.version
+facts._simulate_write_failure = "simulated shared-dict full"
+expect_admin("failed revoke reports", false, "/admin/revoke",
+             { pred = "delegates", s = "alice", r = "carol" })
+expect("failed revoke keeps grant", true, "carol", "write", "doc1", deleg_proof)
+local after = facts.snapshot()
+if after.version ~= before_version then
+  fail = fail + 1
+  print("      FAIL: failed revoke advanced fact version")
+end
+
+local erin_proof = "[by-delegation " .. owner_proof .. " [fact delegates alice erin]]"
+expect_admin("failed grant reports", false, "/admin/grant",
+             { pred = "delegates", s = "alice", r = "erin" })
+expect("failed grant stays absent", false, "erin", "write", "doc1", erin_proof)
+after = facts.snapshot()
+if after.version ~= before_version then
+  fail = fail + 1
+  print("      FAIL: failed grant advanced fact version")
+end
+
+facts._simulate_write_failure = nil
+expect_admin("grant recovers", true, "/admin/grant",
+             { pred = "delegates", s = "alice", r = "erin" })
+expect("recovered grant allows", true, "erin", "write", "doc1", erin_proof)
+expect_admin("revoke recovers", true, "/admin/revoke",
+             { pred = "delegates", s = "alice", r = "erin" })
+expect("recovered revoke denies", false, "erin", "write", "doc1", erin_proof)
 
 print("\n== TTL facts: expiry is revocation with no revoke call ==")
 local real_now = facts.now
@@ -91,6 +138,14 @@ expect("oversized proof",     false, "alice", "write", "doc1",
        "[by-owner " .. string.rep("[fact owns alice doc1] ", 60) .. "]")
 expect("unbound-var leaf",    false, "alice", "write", "doc1",
        "[by-owner [fact owns X doc1] [fact same-tenant alice doc1]]")
+facts.grant("owns", "S", "doc1")      -- admit uppercase atoms into the fact world first
+facts.grant("owns", "alice", "R")     -- the request gate must still reject them
+facts.grant("owns", "alice", "A")     -- because Shen would read them as type variables
+expect("uppercase subject",   false, "S",     "write", "doc1", owner_proof)
+expect("uppercase action",    false, "alice", "A",     "doc1", owner_proof)
+expect("uppercase resource",  false, "alice", "write", "R",    owner_proof)
+expect("uppercase proof atom",false, "alice", "write", "doc1",
+       "[by-owner [fact owns S doc1] [fact same-tenant alice doc1]]")
 
 -- a throwing fact store denies, and the next check recovers
 local real_factq = facts.factq

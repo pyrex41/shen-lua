@@ -98,13 +98,16 @@ travels inside the blob so freshness can never be stamped by a failed sync.
 
 * **Demo (authoritative mode):** `/admin` writes the blob synchronously —
   staleness is structurally zero; the next check anywhere sees the new
-  world.
+  world. Grant/revoke endpoints return success only after the blob write
+  succeeds; shared-dict pressure or another persistence failure returns a
+  non-200 JSON error and leaves the previous fact world in force.
 * **Production (replica mode):** the store mirrors an external DB via a
   periodic pull of period `W` (stub in `facts.lua`; `synced_at` is stamped
-  only inside a *successful* pull). A revoked fact stops authorizing within
-  `W`. The window is **hard-capped at 3W**: when `now − synced_at > 3W` the
-  gate denies everything — a partitioned DB, dead timer, or evicted blob
-  degrades to denial, never to frozen grants (selftest: "replica mode").
+  only inside a *successful* pull and successful blob write). A revoked fact
+  stops authorizing within `W`. The window is **hard-capped at 3W**: when
+  `now − synced_at > 3W` the gate denies everything — a partitioned DB, dead
+  timer, failed write, or evicted blob degrades to denial, never to frozen
+  grants (selftest: "replica mode").
 
 **New Enemy analysis** (Zanzibar's framing): variant 1 — a check against
 pre-revocation facts — is bounded by `W` and cannot be extended by caching
@@ -125,6 +128,7 @@ implementable. Archiving `{version, facts}` per bump makes any logged
 | mint a fact or a grant | fact leaves pass a **predicate allowlist** (`owns`, `same-tenant`, `has-role`, `delegates`) — a leaf can never assert `(may ...)`; and the store, not the proof, decides whether the fact holds |
 | smuggle a judgment inside the proof | proof tokenizer rejects unknown tokens (incl. `:`); underneath it, `shen.typecheck` reads one `"PROOF : TYPE"` triple and rejects any other shape |
 | forge a store key | guard rejects any atom containing `/` (and all non-`[%w-._]` chars) before the lookup |
+| smuggle Shen type variables as data | external atoms must be lowercase-starting (`[a-z][a-z0-9-._]*`); uppercase `S`/`A`/`R` are rejected even if they appear in the fact world |
 | intern-table exhaustion (the symbol table is permanent, ~194 B/symbol) | **nothing reaches the reader un-vetted**: subject/action/resource and every proof token must be static vocabulary or an atom of a seen fact world; a bounded distinct-atom budget backstops even a tokenizer/reader divergence — selftest sends 10k distinct hostile atoms and the heap does not grow |
 | unbound-variable leaf `[fact owns X doc1]` | unbound vars reach the guard as non-strings — fail closed |
 | adversarially deep / oversized terms | per-check `*maxinferences*` budget + byte cap |
