@@ -56,6 +56,34 @@ check("datatype + verified premise holds", tyname(shen.typecheck('["hi"]', "spec
 check("verified premise fails", shen.typecheck('[""]', "spec-box"), false)
 check("wrong element type fails", shen.typecheck("[37]", "spec-box"), false)
 
+-- ---- the regression: compound types of 3+ elements ---------------------------
+-- The reader cooks expression and type positions differently: read standalone,
+-- (may alice write doc1) curries to ((((fn may) alice) write) doc1) and the
+-- check silently returns false. The helper must read "EXPR : TYPE" as ONE
+-- triple (the (load) work-through shape) so the type stays raw syntax. Simple
+-- (list X) types never trip this — currying starts at two arguments — so the
+-- checks above can't catch it; this is the examples/policy/policy_proof.shen
+-- authorization encoding, where a term of (may S A R) is a proof of permission.
+shen.eval([[
+(datatype spec-authz
+  ______________________________
+  [owns-fact] : (owns alice doc1);
+
+  ______________________________________
+  [alice-tenant] : (same-tenant alice doc1);
+
+  P : (owns S R); Q : (same-tenant S R);
+  ======================================
+  [by-owner P Q] : (may S A R);)
+]])
+check("4-ary compound type inhabited",
+      shen.typecheck("[by-owner [owns-fact] [alice-tenant]]", "(may alice write doc1)"))
+check("4-ary compound type: infs consumed (not a silent false)",
+      shen.value("shen.*infs*") > 0, true)
+check("4-ary compound type uninhabited fails",
+      shen.typecheck("[by-owner [owns-fact] [alice-tenant]]", "(may bob write doc1)"), false)
+check("2-ary compound type still fine", shen.typecheck("[owns-fact]", "(owns alice doc1)"))
+
 -- ---- the regression: cumulative inference exhaustion ------------------------
 -- Lower the budget so the bug (were it present) would trip in tens of checks,
 -- then run 200: with the per-call reset every check must keep agreeing.
