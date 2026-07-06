@@ -94,8 +94,11 @@ All fact state lives in **one atomically-written blob** —
 `{version, synced_at, facts}` in a single `lua_shared_dict` value — decoded
 into a per-worker snapshot revalidated on every request (one shm get; decode
 only on change). One blob means one epoch: a check can never mix two fact
-worlds, an evicted or undecodable blob is a **deny**, and `synced_at`
-travels inside the blob so freshness can never be stamped by a failed sync.
+worlds, an evicted or undecodable blob is a **deny** on the read side and a
+**refused write** on the mutate side (a grant/revoke over an undecodable blob
+returns an error rather than silently resetting the fact world and rewinding
+the version), and `synced_at` travels inside the blob so freshness can never
+be stamped by a failed sync.
 
 * **Demo (authoritative mode):** `/admin` writes the blob synchronously —
   staleness is structurally zero; the next check anywhere sees the new
@@ -160,5 +163,5 @@ belongs, presented by the client).
 | `rules.shen` | the logic: ONE live-fact rule + grant rules (owner, member-read, delegation) |
 | `facts.lua` | the versioned fact store: atomic epoch blob, snapshot, TTL facts, the guard, replica-pull stub |
 | `app.lua` | the gateway: pre-intern gates, judgment construction, the check, admin endpoints, the audit line |
-| `selftest.lua` | allow/deny/revocation-window/TTL/staleness/hostile-input/intern cases + timing, off-nginx |
+| `selftest.lua` | allow/deny/revocation-window/TTL/staleness/hostile-input/write-failure/corrupt-blob/intern cases + engine-parity + timing, off-nginx |
 | `nginx.conf` | two workers sharing one fact blob; the curl walkthrough |
