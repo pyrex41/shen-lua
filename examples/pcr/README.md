@@ -62,7 +62,8 @@ claim.
 $ curl -i -H 'X-Subject: carol' -H 'X-Resource: doc1' \
     -H 'X-Proof: [by-delegation [by-owner [fact owns alice doc1] [fact same-tenant alice doc1]] [fact delegates alice carol]]' \
     -X POST localhost:8093/protected/
-HTTP/1.1 200 OK        X-Proof-Checked: 50 inferences   X-Facts-Version: 1
+HTTP/1.1 200 OK        X-Facts-Version: 1
+# (start with PCR_DEBUG_HEADERS=1 to also get X-Proof-Checked: 50 inferences)
 
 # revoke the delegation (admin, localhost only):
 $ curl -X POST localhost:8093/admin/revoke -d '{"pred":"delegates","s":"alice","r":"carol"}'
@@ -129,7 +130,7 @@ implementable. Archiving `{version, facts}` per bump makes any logged
 | smuggle a judgment inside the proof | proof tokenizer rejects unknown tokens (incl. `:`); underneath it, `shen.typecheck` reads one `"PROOF : TYPE"` triple and rejects any other shape |
 | forge a store key | guard rejects any atom containing `/` (and all non-`[%w-._]` chars) before the lookup |
 | smuggle Shen type variables as data | external atoms must be lowercase-starting (`[a-z][a-z0-9-._]*`); uppercase `S`/`A`/`R` are rejected even if they appear in the fact world |
-| intern-table exhaustion (the symbol table is permanent, ~194 B/symbol) | **nothing reaches the reader un-vetted**: subject/action/resource and every proof token must be static vocabulary or an atom of a seen fact world; a bounded distinct-atom budget backstops even a tokenizer/reader divergence — selftest sends 10k distinct hostile atoms and the heap does not grow |
+| intern-table exhaustion (the symbol table is permanent, ~194 B/symbol) | **nothing reaches the reader un-vetted**: subject/action/resource and every proof token must be static vocabulary or an atom of the current fact world. The fact world is written only by admin grants, so the admissible-atom set is operator-controlled — an attacker's novel atoms are rejected before `read-from-string`. Selftest sends 10k distinct hostile atoms and the heap does not grow. |
 | unbound-variable leaf `[fact owns X doc1]` | unbound vars reach the guard as non-strings — fail closed |
 | adversarially deep / oversized terms | per-check `*maxinferences*` budget + byte cap |
 | store outage mid-check | a throwing guard becomes a trapped error — deny, next request unaffected |

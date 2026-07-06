@@ -47,22 +47,29 @@ shen.eval("(tc -)")
 -- per-check inference budget (shen.typecheck resets the counter per call)
 shen.eval("(set shen.*maxinferences* 10000)")
 local MAX_PROOF_BYTES = 1024
+local DEBUG_HEADERS   = os.getenv("PCR_DEBUG_HEADERS") == "1"
 
--- the demo fact base; add-if-absent so racing nginx workers seed once
+-- the demo fact base; add-if-absent so racing nginx workers seed once.
+-- carol is a known tenant member (same-tenant) but owns nothing and has no
+-- role — her only WRITE capability comes from alice's delegation, so revoking
+-- that delegation denies her at the TYPE layer ("proof does not establish"),
+-- honestly, while she stays a known atom.
 facts.seed{
   ["owns/alice/doc1"]        = true,
   ["same-tenant/alice/doc1"] = true,
   ["has-role/bob/member"]    = true,
   ["same-tenant/bob/doc1"]   = true,
   ["delegates/alice/carol"]  = true,
+  ["same-tenant/carol/doc1"] = true,
 }
 
--- ---- pre-intern gates ---------------------------------------------------------
+-- ---- pre-intern gate ----------------------------------------------------------
 -- Nothing reaches the Shen reader unless every atom in it is already known:
 -- rule names + predicates + actions (static vocabulary) or an atom of the
--- current fact world. A bounded budget of distinct admitted tokens
--- backstops any gate/reader divergence: exhaust it and the gate denies
--- everything rather than leak interned symbols forever.
+-- CURRENT fact world. That is what bounds the permanent symbol table — the
+-- fact world is written only by admin grants (facts.lua validates every
+-- pred/s/r), so the set of admissible atoms is operator-controlled and an
+-- attacker's novel atoms are rejected here, before read-from-string.
 local STATIC_VOCAB = {
   ["fact"] = true, ["by-owner"] = true, ["by-member-read"] = true,
   ["by-delegation"] = true,
@@ -71,25 +78,19 @@ local STATIC_VOCAB = {
   ["read"] = true, ["write"] = true, ["delete"] = true, ["member"] = true,
 }
 
-local ATOM_BUDGET = 4096
-local seen_atoms, seen_count = {}, 0
-
 local function atom_ok(s)
   return type(s) == "string" and s ~= "" and s:match("^[a-z][a-z0-9%-%.%_]*$") ~= nil
 end
 
--- The gate is an intern-DoS backstop, not authorization: an atom admitted
--- once is already interned, so admission is MONOTONE — revoking a
--- subject's last fact does not make them "unknown" here; it makes their
--- proofs fail at the type level, with the honest reason.
+-- Stateless on purpose. An earlier version kept a per-worker monotone
+-- seen-set with a fixed cap; the cap never bounded the attacker (fact-world
+-- membership already does) but DID false-deny legitimate atoms once a worker
+-- had handled more than the cap's worth of distinct principals. A principal
+-- whose facts are all revoked is simply unknown to this fact world and denies
+-- here; a production gateway wanting a type-level reason for recently-revoked
+-- principals would add an LRU grace set (see the Garmr implementation note).
 local function admit(token, snap)
-  if not atom_ok(token) then return false end
-  if STATIC_VOCAB[token] or seen_atoms[token] then return true end
-  if not snap.atoms[token] then return false end
-  if seen_count >= ATOM_BUDGET then return false end
-  seen_count = seen_count + 1
-  seen_atoms[token] = true
-  return true
+  return atom_ok(token) and (STATIC_VOCAB[token] == true or snap.atoms[token] == true)
 end
 
 -- every proof token must be a known word; brackets are structure
@@ -224,8 +225,13 @@ function M.gate()
           " by ", audit.proof,
           " (", audit.infs, " inferences, facts v", audit.facts_version,
           ", leaves ", table.concat(audit.leaves, " "), ")")
-  ngx.header["X-Proof-Checked"] = tostring(audit.infs) .. " inferences"
+  -- X-Facts-Version is a legitimate protocol element (the consistency token a
+  -- client uses to reason about staleness); the inference count is internal
+  -- detail, exposed only when PCR_DEBUG_HEADERS=1.
   ngx.header["X-Facts-Version"] = tostring(audit.facts_version)
+  if DEBUG_HEADERS then
+    ngx.header["X-Proof-Checked"] = tostring(audit.infs) .. " inferences"
+  end
   -- fall through to the protected content
 end
 

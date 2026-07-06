@@ -26,6 +26,18 @@ local function expect(label, want, subject, action, resource, proof)
   if authorized ~= want then fail = fail + 1; print("      FAIL: expected " .. tostring(want)) end
 end
 
+-- assert a DENY whose reason contains a substring — used to prove *which
+-- layer* denied (the type checker vs the pre-intern gate).
+local function expect_reason(label, want_sub, subject, action, resource, proof)
+  local authorized, reason = app.check(subject, action, resource, proof)
+  local ok = (not authorized) and reason:find(want_sub, 1, true) ~= nil
+  io.write(("  %-30s %-5s  %s\n"):format(label, authorized and "ALLOW" or "DENY", reason))
+  if not ok then
+    fail = fail + 1
+    print("      FAIL: expected deny with reason containing: " .. want_sub)
+  end
+end
+
 local function expect_admin(label, want_ok, path, body)
   local status, out = app.dispatch("POST", path, body)
   io.write(("  %-30s HTTP %-3d %s\n"):format(label, status, out.reason or out.error or "ok"))
@@ -66,10 +78,19 @@ expect("...kills chains on it",   false, "carol", "write", "doc1", deleg_proof)
 facts.grant("owns", "alice", "doc1")
 expect("restore root fact",       true,  "alice", "write", "doc1", owner_proof)
 
+-- a known principal (carol is a tenant member) whose delegated capability is
+-- revoked must deny at the TYPE layer with the honest reason — not be rejected
+-- at the gate as an unknown atom. This locks the admit() rework: fact-world
+-- atoms are always admitted, so carol reaches the checker and fails there.
+facts.revoke("delegates", "alice", "carol")
+expect_reason("de-authorized, still known", "proof does not establish",
+              "carol", "write", "doc1", deleg_proof)
+facts.grant("delegates", "alice", "carol")
+
 print("\n== fact-store write failures fail closed ==")
 local before = facts.snapshot()
 local before_version = before.version
-facts._simulate_write_failure = "simulated shared-dict full"
+facts._test.simulate_write_failure = "simulated shared-dict full"
 expect_admin("failed revoke reports", false, "/admin/revoke",
              { pred = "delegates", s = "alice", r = "carol" })
 expect("failed revoke keeps grant", true, "carol", "write", "doc1", deleg_proof)
@@ -89,7 +110,7 @@ if after.version ~= before_version then
   print("      FAIL: failed grant advanced fact version")
 end
 
-facts._simulate_write_failure = nil
+facts._test.simulate_write_failure = nil
 expect_admin("grant recovers", true, "/admin/grant",
              { pred = "delegates", s = "alice", r = "erin" })
 expect("recovered grant allows", true, "erin", "write", "doc1", erin_proof)
@@ -196,6 +217,22 @@ for _ = 1, N do app.check("carol", "write", "doc1", deleg_proof) end
 local us = (os.clock() - t0) * 1e6 / N
 io.write(("  nested delegation vs live facts: %.0f us/check (%d inferences), ~%d checks/sec/core\n")
          :format(us, shen.value("shen.*infs*"), math.floor(1e6 / us)))
+
+-- last, because it leaves the store corrupt: an undecodable blob must deny
+-- reads AND make a mutation refuse (not silently reset the fact world).
+print("\n== undecodable blob: reads deny, mutate refuses (no reset) ==")
+facts._test.corrupt_blob()
+if facts.snapshot() ~= nil then
+  fail = fail + 1; print("      FAIL: corrupt blob must make snapshot() deny")
+else
+  print("  corrupt blob -> snapshot denies       ok")
+end
+local st = app.dispatch("POST", "/admin/grant", { pred = "owns", s = "alice", r = "doc9" })
+if st == 200 then
+  fail = fail + 1; print("      FAIL: mutate over a corrupt blob must refuse, not reset")
+else
+  print(("  mutate over corrupt blob -> HTTP %d    ok"):format(st))
+end
 
 if fail == 0 then print("\nOK — all checks passed")
 else print(("\n%d check(s) FAILED"):format(fail)); os.exit(1) end

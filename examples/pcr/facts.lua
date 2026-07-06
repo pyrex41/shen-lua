@@ -45,7 +45,11 @@ M.W    = 1        -- replica sync period (seconds); staleness hard cap = 3W
 -- blob change" test below is a pointer compare after the get.
 local shm = ngx and ngx.shared and ngx.shared.pcr_facts
 local cell = { v = nil }   -- fallback store
-M._simulate_write_failure = nil   -- selftest hook; normal plain-Lua fallback still succeeds
+
+-- Test-only seam (used by selftest.lua); nil in normal operation. Grouped
+-- under one table so it reads as "not the public API." See M._test helpers
+-- at the bottom for the corrupt-blob / clear injectors.
+M._test = { simulate_write_failure = nil }
 
 local function blob_get()
   if shm then return shm:get("blob") end
@@ -53,7 +57,7 @@ local function blob_get()
 end
 
 local function blob_set(s)
-  if M._simulate_write_failure then return false, M._simulate_write_failure end
+  if M._test.simulate_write_failure then return false, M._test.simulate_write_failure end
   if shm then
     local ok, err = shm:set("blob", s)
     if not ok then return false, err or "unknown shared-dict set failure" end
@@ -63,11 +67,12 @@ local function blob_set(s)
 end
 
 -- ---- writes (authority side) -------------------------------------------------
-local function decode_blob()
-  local raw = blob_get()
+local function decode_blob(raw)
+  raw = raw or blob_get()
   if not raw then return nil end
   local ok, t = pcall(json.decode, raw)
-  if not ok or type(t) ~= "table" or type(t.facts) ~= "table" then return nil end
+  if not ok or type(t) ~= "table" or type(t.facts) ~= "table"
+     or type(t.version) ~= "number" then return nil end
   return t
 end
 
@@ -86,8 +91,23 @@ function M.seed(facts)
   return write(facts, 1)
 end
 
+-- Apply one grant/revoke. Distinguish an ABSENT blob (first write — start
+-- fresh at version 1) from a PRESENT-but-undecodable one: REFUSE the latter
+-- rather than silently reset. snapshot() already denies reads on an
+-- undecodable blob; a write must not "heal" it into a fresh 1-fact world,
+-- which would wipe every fact and rewind the version the audit trail depends
+-- on. The refusal propagates through grant/revoke to a 507 at the admin API.
 local function mutate(f)
-  local t = decode_blob() or { version = 0, facts = {} }
+  local raw = blob_get()
+  local t
+  if raw then
+    t = decode_blob(raw)
+    if not t then
+      return false, nil, "fact store undecodable; refusing to overwrite"
+    end
+  else
+    t = { version = 0, facts = {} }
+  end
   f(t.facts)
   return write(t.facts, t.version + 1)
 end
@@ -191,6 +211,20 @@ function M.start_sync_timer(fetch)
   end
   ngx.timer.every(M.W, pull)
   return true
+end
+
+-- ---- test-only injectors (selftest.lua) ----------------------------------------
+-- Not part of the public API. corrupt_blob() writes an undecodable blob so the
+-- selftest can prove reads deny and mutate refuses; clear() empties the store.
+function M._test.corrupt_blob()
+  local garbage = "{not-json"
+  if shm then shm:set("blob", garbage) else cell.v = garbage end
+  SNAP, SNAP_RAW = nil, nil
+end
+
+function M._test.clear()
+  if shm then shm:delete("blob") else cell.v = nil end
+  SNAP, SNAP_RAW = nil, nil
 end
 
 return M
