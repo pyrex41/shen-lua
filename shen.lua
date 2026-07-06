@@ -97,11 +97,21 @@ end
 -- `shen.typecheck("[1 2]", "(list number)")`, not an evaluated list value).
 -- `ty` may use type variables: shen.typecheck("[1 2]", "A") infers.
 --
--- Two kernel traps this helper absorbs, both learned in production embeds:
+-- Three kernel traps this helper absorbs, all learned in production embeds:
 --   1. (shen.typecheck X A) takes the SYNTAX TREE of X — the form the reader
 --      produces — not X's value. Passing an evaluated value silently returns
 --      false for anything non-atomic.
---   2. The kernel's inference counter (shen.*infs*) is GLOBAL and cumulative,
+--   2. The reader cooks expression and type positions DIFFERENTLY, so the
+--      two strings must be read together as one "EXPR : TYPE" triple — the
+--      shape (load)'s work-through consumes. In expression position a
+--      compound form of three or more elements is curried into application
+--      syntax: (may alice read doc1) read standalone becomes
+--      ((((fn may) alice) read) doc1), and a type in that shape makes every
+--      check silently return false. Only the form after : is kept as raw
+--      type syntax. ((list number) survives standalone reading — currying
+--      starts at two arguments — which is how this bug hid behind simple
+--      list types.)
+--   3. The kernel's inference counter (shen.*infs*) is GLOBAL and cumulative,
 --      and shen.typecheck never resets it; only the REPL's toplevel does.
 --      A long-lived embedder calling the kernel entry point directly crosses
 --      *maxinferences* (default 1,000,000) after enough checks, after which
@@ -111,16 +121,19 @@ end
 --      Override the budget with shen.eval("(set shen.*maxinferences* N)").
 function shen.typecheck(expr, ty)
   ensure_boot()
-  local eforms = P.F["read-from-string"](expr)
-  if not R.is_cons(eforms) then
-    error("shen.typecheck: no expression in " .. tostring(expr), 2)
+  local forms = P.F["read-from-string"](expr .. " : " .. ty)
+  local elems, n = {}, 0
+  while R.is_cons(forms) do
+    n = n + 1
+    elems[n] = forms[1]
+    forms = forms[2]
   end
-  local tforms = P.F["read-from-string"](ty)
-  if not R.is_cons(tforms) then
-    error("shen.typecheck: no type in " .. tostring(ty), 2)
+  if n ~= 3 or elems[2] ~= R.intern(":") then
+    error("shen.typecheck: expected one expression and one type in \""
+          .. tostring(expr) .. " : " .. tostring(ty) .. "\"", 2)
   end
   P.GLOBALS["shen.*infs*"] = 0
-  local ok, res = pcall(P.F["shen.typecheck"], eforms[1], tforms[1])
+  local ok, res = pcall(P.F["shen.typecheck"], elems[1], elems[3])
   if not ok then return false end   -- budget exhausted or kernel error: fail closed
   return res
 end
