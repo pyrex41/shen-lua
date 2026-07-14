@@ -1,7 +1,7 @@
 -- examples/pcr/facts.lua — the versioned live fact store behind pcr.fact?.
 --
 -- All fact state lives in ONE atomically-written blob:
---     { version = N, synced_at = T, facts = { ["owns/alice/doc1"] = true|expiry } }
+--     { version = N, synced_at = T, facts = { ["owns/alice/crm-contacts"] = true|expiry } }
 -- kept in ngx.shared.pcr_facts under a single key (falling back to a plain
 -- Lua cell under plain luajit, so the selftest exercises the same code).
 -- One blob means one epoch: a per-check snapshot can never mix two fact
@@ -164,7 +164,8 @@ end
 -- forge a different store key, and only fact predicates are consultable —
 -- a proof leaf can never assert a grant judgment like (may ...).
 local PRED_ALLOW = { ["owns"] = true, ["same-tenant"] = true,
-                     ["has-role"] = true, ["delegates"] = true }
+                     ["has-role"] = true, ["delegates"] = true,
+                     ["delegates-read"] = true }
 
 local LEAVES = {}
 

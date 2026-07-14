@@ -1,14 +1,15 @@
--- examples/pcr/app.lua — proof-carrying requests over LIVE facts.
+-- examples/pcr/app.lua — proof-carrying tool calls over LIVE facts.
 --
--- The client attaches a proof term (X-Proof). The gate builds the judgment
--- (may SUBJECT ACTION RESOURCE) from the request and asks the kernel's
--- sequent-calculus typechecker whether the presented term inhabits it. Fact
--- leaves ([fact owns alice doc1]) are discharged against the versioned fact
--- store (facts.lua) AT CHECK TIME, so granting a fact makes proofs start
--- checking and revoking it makes the same proof bytes stop checking on the
--- next request — the engine memoizes no answers. Allowed requests log their
--- proof, the fact-store version it was judged against, and the exact fact
--- leaves consumed: the audit trail is the justification itself.
+-- The caller (a human's client, an agent, a spawned subagent) attaches a
+-- proof term (X-Proof). The gate builds the judgment (may SUBJECT ACTION
+-- RESOURCE) from the request and asks the kernel's sequent-calculus
+-- typechecker whether the presented term inhabits it. Fact leaves
+-- ([fact owns alice crm-contacts]) are discharged against the versioned
+-- fact store (facts.lua) AT CHECK TIME, so granting a fact makes proofs
+-- start checking and revoking it makes the same proof bytes stop checking
+-- on the next request — the engine memoizes no answers. Allowed requests
+-- log their proof, the fact-store version it was judged against, and the
+-- exact fact leaves consumed: the audit trail is the justification itself.
 --
 -- The proof is UNTRUSTED input: judgment atoms and every proof token must
 -- pass allowlists BEFORE anything reaches the reader (the symbol table is
@@ -49,18 +50,29 @@ shen.eval("(set shen.*maxinferences* 10000)")
 local MAX_PROOF_BYTES = 1024
 local DEBUG_HEADERS   = os.getenv("PCR_DEBUG_HEADERS") == "1"
 
--- the demo fact base; add-if-absent so racing nginx workers seed once.
--- carol is a known tenant member (same-tenant) but owns nothing and has no
--- role — her only WRITE capability comes from alice's delegation, so revoking
--- that delegation denies her at the TYPE layer ("proof does not establish"),
--- honestly, while she stays a known atom.
+-- The demo authority graph; add-if-absent so racing nginx workers seed once.
+--
+--   alice (human) ──owns──> crm-contacts
+--     └─delegates (full)──> orchestrator (her agent session)
+--          └─delegates-read (attenuated)──> researcher (spawned subagent)
+--   bob (human teammate) has the member role: may read, never write.
+--
+-- Both agents are REGISTERED tenant principals (same-tenant facts) but hold
+-- no authority of their own: researcher's ONLY capability is the
+-- read-attenuated edge from orchestrator, whose ONLY capability is alice's
+-- delegation. Revoking delegates/alice/orchestrator therefore kills every
+-- proof built through it (the whole agent subtree, mid-run) at the TYPE
+-- layer ("proof does not establish") — the agents stay known atoms — while
+-- alice's and bob's own proofs keep working.
 facts.seed{
-  ["owns/alice/doc1"]        = true,
-  ["same-tenant/alice/doc1"] = true,
-  ["has-role/bob/member"]    = true,
-  ["same-tenant/bob/doc1"]   = true,
-  ["delegates/alice/carol"]  = true,
-  ["same-tenant/carol/doc1"] = true,
+  ["owns/alice/crm-contacts"]                = true,
+  ["same-tenant/alice/crm-contacts"]         = true,
+  ["has-role/bob/member"]                    = true,
+  ["same-tenant/bob/crm-contacts"]           = true,
+  ["delegates/alice/orchestrator"]           = true,
+  ["same-tenant/orchestrator/crm-contacts"]  = true,
+  ["delegates-read/orchestrator/researcher"] = true,
+  ["same-tenant/researcher/crm-contacts"]    = true,
 }
 
 -- ---- pre-intern gate ----------------------------------------------------------
@@ -72,9 +84,9 @@ facts.seed{
 -- attacker's novel atoms are rejected here, before read-from-string.
 local STATIC_VOCAB = {
   ["fact"] = true, ["by-owner"] = true, ["by-member-read"] = true,
-  ["by-delegation"] = true,
+  ["by-delegation"] = true, ["by-read-delegation"] = true,
   ["owns"] = true, ["same-tenant"] = true, ["has-role"] = true,
-  ["delegates"] = true,
+  ["delegates"] = true, ["delegates-read"] = true,
   ["read"] = true, ["write"] = true, ["delete"] = true, ["member"] = true,
 }
 
@@ -206,9 +218,10 @@ end
 
 -- ---- the enforcement gate (access_by_lua on /protected/) -----------------------
 -- Subject and resource come from headers for the demo; in production the
--- subject comes from a verified JWT/session. The PROOF is exactly where it
--- belongs: presented by the client, per request, judged against the facts
--- current at THIS moment.
+-- subject comes from a verified identity (JWT/session for a human, workload
+-- identity for an agent). The PROOF is exactly where it belongs: presented
+-- by the caller, per request, judged against the facts current at THIS
+-- moment.
 function M.gate()
   local h = ngx.req.get_headers()
   local action = ngx.req.get_method() == "GET" and "read" or "write"
