@@ -288,7 +288,11 @@ end
 function M.run(opts)
   opts = opts or {}
   local P = opts.P or require("boot")
-  if P.F["shen.initialise"] == nil then P.load_kernel(opts.verbose) end
+  -- "kernel loaded?" probe: `version` is a stable public kernel function
+  -- present in every Shen version. (Do NOT probe shen.initialise — the S41.2
+  -- 2026-07-11 refresh removed it, folding initialisation into declarations.kl
+  -- load-time forms; probing it would reload the kernel on every call.)
+  if P.F["version"] == nil then P.load_kernel(opts.verbose) end
   if P.GLOBALS["*property-vector*"] == nil then P.initialise() end
 
   local ed = make_editor()

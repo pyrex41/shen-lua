@@ -180,6 +180,39 @@ local function harvest_init_sigs(src)
   return total > 0 and total == got
 end
 
+-- Refreshed-kernel (S41.2 2026-07-11) signature harvest, from types.kl.
+-- The refresh dropped init.kl/shen.initialise-signedfuncs; the 161 kernel
+-- signatures now live as top-level (declare NAME TYPEFORM) forms in types.kl,
+-- where TYPEFORM is the same rcons tree — e.g. (cons (cons list (cons A ()))
+-- (cons --> ...)) — that `declare` evaluates into the type list at load. That
+-- is exactly what evalrcons decodes, so we read the declare's type argument
+-- directly (no CPS-lambda unwrapping). This yields the same raw, pre-rectify
+-- signatures the init.kl harvest produced, which import_fresh + unify_oc
+-- consume unchanged.
+local function harvest_types_sigs(src)
+  init_syms()
+  if not src then return false end
+  local SYM_declare = R.intern("declare")
+  local total, got = 0, 0
+  for _, form in ipairs(R.read_all(src)) do
+    if getmt(form) == Cons and form[1] == SYM_declare and getmt(form[2]) == Cons
+       and getmt(form[2][2]) == Cons then
+      local name = form[2][1]
+      local typeform = form[2][2][1]
+      if getmt(name) == Symbol then
+        total = total + 1
+        local ok, t = pcall(evalrcons, typeform)
+        if ok and t ~= nil then
+          NativeSig[name] = t
+          got = got + 1
+        end
+      end
+    end
+  end
+  M.sig_total, M.sig_got = total, got
+  return total > 0 and total == got
+end
+
 -- ---------------------------------------------------------------------------
 -- hand-ported drivers
 -- ---------------------------------------------------------------------------
@@ -312,8 +345,14 @@ function M.install(Pmod, Emod)
     end
     return nil
   end
-  -- kernel signatures from init.kl; incomplete harvest forces legacy fallback
-  M.sigs_complete = harvest_init_sigs(read_kl("init"))
+  -- Kernel signatures: refreshed kernels carry them as (declare ...) forms in
+  -- types.kl; pre-refresh kernels (reachable via SHEN_KL_DIR) carry them as
+  -- shen.initialise-signedfuncs CPS lambdas in init.kl. Try the refresh source
+  -- first, fall back to the legacy one. An incomplete harvest (missing source
+  -- or an unrecognised form) leaves sigs_complete false, which forces the
+  -- legacy in-kernel typecheck path — slower, but identical verdicts.
+  M.sigs_complete = harvest_types_sigs(read_kl("types"))
+    or harvest_init_sigs(read_kl("init"))
 
   -- Driver TRANSLATION is DEFERRED to the first typecheck; the t-star.kl READ
   -- stays eager. Walking the 16 driver defuns through the KL->Lua prolog
