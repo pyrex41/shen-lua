@@ -3,13 +3,13 @@
 --
 -- This is NOT the canonical kernel certification suite (run-kernel-tests.lua).
 --
--- NB on scope: a handful of list functions present in some Shen distributions
--- (filter/take/drop/fold-*) are NOT defined in the kernel this port loads —
--- calling them raises "fn: <name> is undefined". We therefore cover the set
--- the port actually provides (map / reverse / append / element? / length /
--- head / tail / sum / remove / occurrences / reverse-involution / cons?/empty?)
--- and assert that the genuinely-absent ones report a clean catchable error
--- rather than crashing — that absence is itself a documented port fact.
+-- NB on scope: the standard library is loaded at boot from the S-lineage
+-- lib/StLib Shen sources (see boot.lua load_stdlib), so list functions like
+-- filter / take / drop are present and covered here alongside the kernel-core
+-- functions (map / reverse / append / element? / length / head / tail / sum /
+-- remove / occurrences / cons? / empty?). See also test/stdlib_spec.lua for
+-- the (fn filter) / bare-(filter …) regression that motivated loading stdlib
+-- from source.
 --
 --   luajit test/library_spec.lua
 local shen = require("shen")
@@ -106,15 +106,17 @@ checkeq("(lib-spec-sumlist [1 2 3 4 5])", "15")
 checkeq("(lib-spec-sumlist [])", "0")
 
 -- ---------------------------------------------------------------------------
--- DOCUMENTED ABSENCE: filter/take/drop are not provided by the loaded kernel;
--- calling them raises a clean catchable error rather than crashing the process.
--- (If a future kernel revision adds them, flip these to behavior assertions.)
+-- stdlib higher-order + list functions. These come from the S-lineage
+-- lib/StLib sources (Lists/lists.shen etc.), loaded through the kernel's own
+-- define pipeline at boot (see boot.lua load_stdlib). Before the stdlib was
+-- loaded from source, filter/take/drop were absent and this block asserted a
+-- clean "undefined" error; now they are present and we assert behaviour.
 -- ---------------------------------------------------------------------------
 shen.eval("(define lib-spec-gt1 X -> (> X 1))")
-check(trap("(filter lib-spec-gt1 [1 2 3])"):find("filter is undefined", 1, true) ~= nil,
-      "absent stdlib filter reports a clean 'undefined' error (not a crash)")
-check(trap("(take 2 [1 2 3])"):find("take is undefined", 1, true) ~= nil,
-      "absent stdlib take reports a clean 'undefined' error (not a crash)")
+checkeq("(filter lib-spec-gt1 [1 2 3])", "(2 3)")
+checkeq("(filter (/. X (> X 2)) [1 2 3 4 5])", "(3 4 5)")
+checkeq("(take 2 [1 2 3])", "(1 2)")
+checkeq("(drop 2 [1 2 3])", "(3)")
 
 io.write(string.format("library_spec: %d pass, %d fail\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)

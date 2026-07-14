@@ -281,8 +281,9 @@ browser. One `rules.shen`, two runtimes, no client/server drift. See its
 
 ## Certification / Testing
 
-The port loads and initialises the full 41.2 kernel (including `stlib` and the new
-extensions) and **passes the official 41.2 kernel test suite, 134/134**:
+The port loads and initialises the full 41.2 kernel plus the standard library
+(loaded at boot from the S-lineage Shen sources under `lib/StLib/`) and the
+extensions, and **passes the official 41.2 kernel test suite, 134/134**:
 
 ```sh
 luajit run-kernel-tests.lua    # => "passed ... 134 / failed ... 0 / pass rate ... 100%"

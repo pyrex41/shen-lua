@@ -93,17 +93,19 @@ P.KLDIR = KLDIR   -- resolved .kl directory (trailing /), for typecheck_native
 --     types; the refresh moved shen.rectify-type into t-star, so t-star must
 --     now precede types. Hence the tail: macros declarations t-star types.
 --
--- The trailing four are the community ShenOSKernel extensions + stlib, which
--- Tarver's refresh no longer ships as KLambda (stlib is now lazy Shen sources
--- under Lib/StLib). shen-lua keeps vendoring them on top so the standard
--- library and the CLI launcher stay available and the kernel test suite still
--- certifies. They are pure defuns/defmacros and reference only public kernel
--- functions (get/put/… — never the removed dict.* or shen.initialise-*), so
--- they load unchanged against the refreshed kernel. See klambda/PROVENANCE.md.
+-- The trailing three are the community ShenOSKernel extensions, which Tarver's
+-- refresh no longer ships as KLambda. shen-lua keeps vendoring them on top so
+-- the CLI launcher etc. stay available; they are pure defuns/defmacros
+-- referencing only public kernel functions, so they load unchanged.
+--
+-- NOTE: stlib is NOT here. The standard library is no longer a precompiled
+-- klambda/stlib.kl; it is loaded from the S-lineage Shen sources under
+-- lib/StLib/ by load_stdlib() (below), which the refresh's own install.shen
+-- drives. See lib/StLib/PROVENANCE.md and klambda/PROVENANCE.md.
 local FILES = {
   "yacc","core","load","prolog","reader","sequent","sys","toplevel",
   "track","writer","backend","macros","declarations","t-star","types",
-  "extension-features","extension-expand-dynamic","extension-launcher","stlib"
+  "extension-features","extension-expand-dynamic","extension-launcher"
 }
 
 -- ---- standard streams ----------------------------------------------------
@@ -830,6 +832,96 @@ local function install_fasl()
 end
 
 -- ---- initialise ----------------------------------------------------------
+-- ---- standard library (S-lineage lib/StLib sources) ----------------------
+-- Tarver's S41.2 refresh ships the standard library as Shen SOURCES under
+-- Lib/StLib (loaded into the SBCL image at install time), not as a precompiled
+-- stlib.kl. shen-lua vendors those sources under lib/StLib/ and loads them the
+-- same way: through the kernel's own (load ...) / define pipeline. Unlike raw
+-- stlib.kl defuns (which the pre-refresh port booted as a kernel module), the
+-- define path registers each function's arity property + shen.*lambdatable*
+-- entry, so `(fn filter)` and a bare top-level `(filter ...)` now resolve
+-- instead of raising "fn: filter is undefined".
+--
+-- We run upstream's own install.shen (its factorise toggles, the package +
+-- systemf externals block, everything) with two mechanical rewrites:
+--   1. its relative (load "Sub/file.shen") paths are made absolute against the
+--      vendored directory, so no process chdir is needed (a chdir would
+--      invalidate the KLDIR-relative reads the fasl kernel-key hashing does);
+--   2. its (tc +) toggles are neutralised to (tc -), i.e. the stdlib is loaded
+--      WITHOUT typechecking. This matches the pre-refresh behaviour (the old
+--      precompiled stlib.kl registered no stdlib type signatures either — its
+--      stlib.initialise was never called), it is markedly faster, and it keeps
+--      the native typecheck drivers deferred at boot (a tc+ load would trigger
+--      the typechecker and translate them eagerly). Functions are still fully
+--      defined and arity-registered — only their type signatures are skipped.
+-- SHEN_NO_STDLIB=1 skips the whole thing (a kernel-only embed); SHEN_STDLIB_DIR
+-- overrides the location.
+local STDLIB_LOADED = false
+local function find_stdlib_dir()
+  local env = os.getenv("SHEN_STDLIB_DIR")
+  if env and env ~= "" then return env end
+  -- module-relative first (chdir-independent: boot.lua sits at the repo root)
+  local src = debug.getinfo(1, "S").source
+  local here = src:match("^@(.*)[/\\][^/\\]*$")
+  local candidates = {}
+  if here then candidates[#candidates+1] = here .. "/lib/StLib" end
+  candidates[#candidates+1] = "lib/StLib"
+  for _, d in ipairs(candidates) do
+    local f = io.open(d .. "/install.shen", "r")
+    if f then f:close(); return d end
+  end
+  -- Single-file bundle: no lib/StLib on disk, but make-bundle.lua embedded the
+  -- whole tree as P.STDLIB_SOURCES (relpath -> content). Materialise it once to
+  -- a temp dir and load from there (reuses the ordinary file-based load path).
+  if P.STDLIB_SOURCES then
+    local base = os.tmpname(); os.remove(base)
+    os.execute("mkdir -p '" .. base .. "'")
+    for rel, content in pairs(P.STDLIB_SOURCES) do
+      local full = base .. "/" .. rel
+      local sub = full:match("^(.*)/[^/]*$")
+      if sub then os.execute("mkdir -p '" .. sub .. "'") end
+      local fh = io.open(full, "wb")
+      if fh then fh:write(content); fh:close() end
+    end
+    return base
+  end
+  return nil
+end
+
+local function load_stdlib(verbose)
+  if STDLIB_LOADED then return end
+  if os.getenv("SHEN_NO_STDLIB") == "1" then return end
+  local dir = find_stdlib_dir()
+  if not dir then
+    if verbose then io.stderr:write("  stdlib: lib/StLib not found; skipping (kernel-only)\n") end
+    return
+  end
+  local script = read_file(dir .. "/install.shen")
+  if not script then return end
+  -- Rewrite the relative (load "X") targets to absolute so no chdir is needed.
+  -- All install.shen load paths are relative; the replacement text is escaped
+  -- for gsub's % handling.
+  local prefix = ("(load \"" .. dir .. "/"):gsub("%%", "%%%%")
+  script = script:gsub('%(load "', prefix)
+  script = script:gsub("%(tc %+%)", "(tc -)")   -- load without typechecking (see above)
+  local hush0 = P.GLOBALS["*hush*"]
+  P.GLOBALS["*hush*"] = true       -- suppress the ~20 "loaded" echoes
+  local ok, err = pcall(function()
+    local forms = P.F["read-from-string"](script)
+    while R.is_cons(forms) do
+      P.F["eval"](forms[1])
+      forms = forms[2]
+    end
+  end)
+  P.GLOBALS["*hush*"] = hush0
+  if not ok then
+    error("stdlib load failed: " .. tostring(P.F["error-to-string"](err)), 0)
+  end
+  STDLIB_LOADED = true
+  if verbose then io.stderr:write("  loaded stdlib from " .. dir .. "\n") end
+end
+P.load_stdlib = load_stdlib
+
 local function initialise()
   -- Kernel environment setup (env globals, *property-vector*, arity table).
   --
@@ -846,6 +938,11 @@ local function initialise()
   -- Register the lua.* interop entries in Shen's own arity/lambda-form
   -- tables (needs the *property-vector* the kernel just created).
   require("lua_interop").post_initialise()
+  -- Load the standard library from its S-lineage Shen sources (lib/StLib).
+  -- Done here, at the single post-kernel-init chokepoint every boot path runs
+  -- (shen.boot, run-kernel-tests, the port specs), so the stdlib is present
+  -- for all of them. SHEN_NO_STDLIB=1 opts out.
+  load_stdlib()
   return r
 end
 
