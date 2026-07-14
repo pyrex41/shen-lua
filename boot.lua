@@ -1,5 +1,7 @@
 -- boot.lua : load the full Shen KLambda kernel into the Lua runtime and
--- run (shen.initialise).  Returns the prims module P with everything live.
+-- initialise it. Returns the prims module P with everything live. (On the
+-- S41.2 2026-07-11 kernel the kernel self-initialises at load time; see FILES
+-- and initialise() below.)
 local R = require("runtime")
 local C = require("compiler")
 local P = require("prims")
@@ -69,11 +71,39 @@ local function find_kldir()
 end
 local KLDIR = find_kldir() .. "/"
 P.KLDIR = KLDIR   -- resolved .kl directory (trailing /), for typecheck_native
+-- Boot order for the S41.2 (2026-07-11 refresh) kernel. The first 15 entries
+-- are the refreshed KLambda modules. The refreshed kernel initialises itself
+-- at LOAD time: declarations.kl runs top-level forms — (set *property-vector*
+-- (vector 20000)), the environment `set`s, (shen.initialise-arity-table ...),
+-- (put shen shen.external-symbols ...) and (shen.build-lambda-table ...) — that
+-- the removed init.kl used to run from shen.initialise (see initialise()).
+--
+-- Order is NOT upstream Sources/make.shen order. make.shen relies on the
+-- factorise pass + a macros bootstrap that runs last; shen-lua compiles KL
+-- directly, so what matters is that a module's LOAD-TIME side effects see
+-- their dependencies already defined:
+--   * declarations' top-level init calls put/vector/hash/shen.lambda-entry
+--     (sys), so sys precedes declarations;
+--   * types.kl's 161 top-level (declare ...) forms actually RUN the type
+--     checker at load (each declare infers the signature's variance), so every
+--     function `declare` reaches transitively must already be defined:
+--     shen.prolog-vector (macros.kl), shen.*sigf* + the arity table
+--     (declarations.kl), and — new in the refresh — shen.rectify-type and the
+--     rest of the inference machinery (t-star.kl). Pre-refresh t-star trailed
+--     types; the refresh moved shen.rectify-type into t-star, so t-star must
+--     now precede types. Hence the tail: macros declarations t-star types.
+--
+-- The trailing four are the community ShenOSKernel extensions + stlib, which
+-- Tarver's refresh no longer ships as KLambda (stlib is now lazy Shen sources
+-- under Lib/StLib). shen-lua keeps vendoring them on top so the standard
+-- library and the CLI launcher stay available and the kernel test suite still
+-- certifies. They are pure defuns/defmacros and reference only public kernel
+-- functions (get/put/… — never the removed dict.* or shen.initialise-*), so
+-- they load unchanged against the refreshed kernel. See klambda/PROVENANCE.md.
 local FILES = {
-  "toplevel","core","sys","dict","sequent","yacc","reader","prolog",
-  "track","load","writer","macros","declarations","types","t-star","init",
-  "extension-features","extension-expand-dynamic","extension-launcher",
-  "compiler","stlib"
+  "yacc","core","load","prolog","reader","sequent","sys","toplevel",
+  "track","writer","backend","macros","declarations","t-star","types",
+  "extension-features","extension-expand-dynamic","extension-launcher","stlib"
 }
 
 -- ---- standard streams ----------------------------------------------------
@@ -93,7 +123,7 @@ P.GLOBALS["*implementation*"] = rawget(_G, "jit") and "LuaJIT" or _VERSION
 P.GLOBALS["*port*"]           = "shen-lua"
 P.GLOBALS["*porters*"]        = "shen-lua contributors"
 P.GLOBALS["*os*"]             = (package.config and package.config:sub(1,1) == "\\") and "Windows" or "Unix"
-P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes from init.kl ("41.2")
+P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes from declarations.kl ("41.2")
 
 -- ---- kernel bytecode cache -------------------------------------------------
 -- Loading the kernel from .kl sources costs ~0.8s (read + parse + KL->Lua
@@ -282,10 +312,11 @@ local function read_cache(path, key)
 end
 
 -- ---- load the kernel -----------------------------------------------------
--- Loads the 21 .kl modules that make up Shen 41.2 (core + stlib + extensions;
--- same boot list as shen-cl 41.2 — the opt-in
--- extension-programmable-pattern-matching.kl is vendored but not booted).
--- The 41.2 KLambda sources are vendored under `klambda/` so the repository
+-- Loads the 19 .kl modules in FILES (see above): the 15 refreshed S41.2
+-- (2026-07-11) KLambda modules plus the vendored community stlib + 3 booted
+-- extensions. The opt-in extension-programmable-pattern-matching.kl is
+-- vendored but not booted.
+-- The KLambda sources are vendored under `klambda/` so the repository
 -- is self-contained. You can still override with SHEN_KL_DIR (e.g. to point
 -- at a full ShenOSKernel checkout during development).
 
@@ -800,13 +831,20 @@ end
 
 -- ---- initialise ----------------------------------------------------------
 local function initialise()
-  -- (shen.initialise) sets up the environment, lambda-form tables, etc.
-  local sym = R.intern("shen.initialise")
+  -- Kernel environment setup (env globals, *property-vector*, arity table).
+  --
+  -- On the S41.2 (2026-07-11 refresh) kernel this all happens at LOAD time via
+  -- top-level forms in declarations.kl — there is no `shen.initialise` function
+  -- to call, so load_kernel() has already done it by the time we get here.
+  --
+  -- Older kernels (pre-refresh community ShenOSKernel, reachable via
+  -- SHEN_KL_DIR) instead define `shen.initialise` and expect it to be called
+  -- once, post-load. Preserve that path when the function is present.
+  local r
   local fn = P.F["shen.initialise"]
-  if not fn then error("shen.initialise not defined after kernel load") end
-  local r = fn()
+  if fn then r = fn() end
   -- Register the lua.* interop entries in Shen's own arity/lambda-form
-  -- tables (needs the *property-vector* that shen.initialise just created).
+  -- tables (needs the *property-vector* the kernel just created).
   require("lua_interop").post_initialise()
   return r
 end

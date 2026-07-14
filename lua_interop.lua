@@ -255,20 +255,20 @@ end
 -- ---- install: the Shen-side surface -----------------------------------------
 
 -- Shen-LEVEL registration of name/arity: the `arity` property plus the
--- shen.lambda-form entry that (fn name) and Shen's evaluator consult. NOT via
--- the kernel's update-lambda-table: in 41.2 that does
--- (set-lambda-form-entry [F | LambdaEntry]) with LambdaEntry already the
--- (name . fn) pair, so the stored lambda-form is a CONS, and any tc+ call
--- site — which compiles declare-only functions to ((fn name) A B ...) —
--- dies with "attempt to apply a non-function". We do exactly what the
--- kernel's own build-lambda-table does: put the arity, then hand
--- set-lambda-form-entry the (name . fn) entry from shen.lambda-entry.
--- Both writes go through the LIVE F entries, so the fasl wrapper sees them
--- ("p" + "lf" records) when called outside a chunk, and is correctly silent
--- when called from inside one.
+-- shen.*lambdatable* entry that (fn name) and Shen's evaluator consult.
+--
+-- The S41.2 (2026-07-11 refresh) kernel dropped shen.set-lambda-form-entry
+-- (and the whole lambda-FORM property the pre-refresh kernel keyed on). Its
+-- lambda table is now the assoc list shen.*lambdatable*, whose entries are
+-- (name . curried-fn) exactly as returned by shen.lambda-entry, and (fn name)
+-- resolves by `assoc` into it. The kernel's own update-lambda-table does
+-- precisely the pair of writes we need — (put name arity …) then cons
+-- (shen.lambda-entry name) onto shen.*lambdatable* — and stores the CURRIED
+-- FUNCTION as the value (not a cons), so the old "apply a non-function" hazard
+-- at tc+ call sites is gone. Route through it. The internal put goes through
+-- the LIVE F entry so the fasl "p" wrapper still sees it when outside a chunk.
 local function shen_register(nm, arity)
-  F["put"](nm, R.intern("arity"), arity, P.GLOBALS["*property-vector*"])
-  F["shen.set-lambda-form-entry"](F["shen.lambda-entry"](nm))
+  F["update-lambda-table"](nm, arity)
 end
 
 function M.install(prims)

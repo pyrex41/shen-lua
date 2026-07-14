@@ -70,7 +70,8 @@ do
     if nm then kl_names[#kl_names + 1] = nm end
   end
   p:close()
-  assert(#kl_names >= 21, "klambda/ looks incomplete (" .. #kl_names .. " files)")
+  -- 20 vendored .kl: 15 refreshed S41.2 kernel modules + stlib + 4 extensions.
+  assert(#kl_names >= 20, "klambda/ looks incomplete (" .. #kl_names .. " files)")
 end
 
 -- ---- 3. emit ---------------------------------------------------------------

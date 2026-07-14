@@ -14,9 +14,10 @@ primitives on a host runtime and (b) translating the kernel's `.kl` files into
 that host. This port does both by **compiling KLambda to Lua source** that
 LuaJIT then trace-compiles to machine code.
 
-It targets **Shen 41.2** (via the KLambda in `ShenOSKernel-41.2/klambda`) and
-passes the official 41.2 kernel test suite (134/134). Earlier versions were
-certified against the Shen 22.4 kernel test suite.
+It targets **Shen 41.2** (the KLambda is vendored under `klambda/`; see
+[`klambda/PROVENANCE.md`](klambda/PROVENANCE.md)) and passes the official 41.2
+kernel test suite (134/134). Earlier versions were certified against the Shen
+22.4 kernel test suite.
 
 ## Quick start
 
@@ -64,7 +65,7 @@ not a tree-walker:
 | `runtime.lua`  | data representation, symbol interning, the KLambda reader |
 | `compiler.lua` | KLambda → Lua source compiler (statement-based codegen, tail-call → loop lowering) |
 | `prims.lua`    | runtime env: the primitive set, apply/curry machinery, native overrides, loader |
-| `boot.lua`     | kernel loading, the bytecode + fasl caches, `shen.initialise` |
+| `boot.lua`     | kernel loading + initialisation, the bytecode + fasl caches |
 | `shen.lua`     | the public embedding API (`require("shen")`) |
 | `lua_interop.lua` | the Lua ⇄ Shen bridge (`lua.call`, `lua.function`, marshaling) |
 | `repl.lua`     | the interactive REPL (multiline input, error translation, backtraces) |
@@ -103,8 +104,9 @@ designed around what LuaJIT's tracing JIT rewards:
 * **`typecheck_native.lua` — the t-star driver.** The ~16 CPS driver functions
   are machine-translated from `klambda/t-star.kl` through the same translator
   (they share the goal vocabulary); the four that escape it (entry,
-  signature lookup, datatype search, spy display) are hand-ported. The 162
-  kernel signatures are harvested from `init.kl` into a native table. The
+  signature lookup, datatype search, spy display) are hand-ported. The 161
+  kernel signatures are harvested from the `(declare …)` forms in `types.kl`
+  into a native table (pre-refresh kernels harvest from `init.kl` instead). The
   native driver performs the **byte-identical inference sequence** to the
   legacy engine (431,741 inferences on the reference typecheck, exactly).
 * **Legacy native overrides** (`prims.lua`): native Prolog deref core with
