@@ -70,8 +70,24 @@ do
     if nm then kl_names[#kl_names + 1] = nm end
   end
   p:close()
-  -- 20 vendored .kl: 15 refreshed S41.2 kernel modules + stlib + 4 extensions.
-  assert(#kl_names >= 20, "klambda/ looks incomplete (" .. #kl_names .. " files)")
+  -- 19 vendored .kl: 15 refreshed S41.2 kernel modules + 4 extensions
+  -- (the standard library is no longer a .kl — see the stdlib payload below).
+  assert(#kl_names >= 19, "klambda/ looks incomplete (" .. #kl_names .. " files)")
+end
+
+-- Standard-library Shen sources (lib/StLib). The refresh ships stdlib as
+-- sources, loaded at boot by boot.lua load_stdlib; embed the whole tree
+-- (relative paths, incl. install.shen) so the bundle stays self-contained.
+-- On boot with no lib/StLib on disk, load_stdlib materialises these to a temp
+-- dir and loads from there.
+local stdlib_names = {}
+do
+  local p = io.popen("cd '" .. root .. "/lib/StLib' && find . -type f | sed 's|^\\./||'")
+  for line in p:lines() do
+    if line ~= "" then stdlib_names[#stdlib_names + 1] = line end
+  end
+  p:close()
+  assert(#stdlib_names >= 20, "lib/StLib looks incomplete (" .. #stdlib_names .. " files)")
 end
 
 -- ---- 3. emit ---------------------------------------------------------------
@@ -106,6 +122,11 @@ for _, nm in ipairs(kl_names) do
   emit(("kl[%q] = %s\n"):format(nm, quote(read_file(root .. "/klambda/" .. nm .. ".kl"))))
 end
 
+emit("\nlocal stdlib = {}\n")
+for _, rel in ipairs(stdlib_names) do
+  emit(("stdlib[%q] = %s\n"):format(rel, quote(read_file(root .. "/lib/StLib/" .. rel))))
+end
+
 emit("\nlocal KERNEL = " .. quote(blob) .. "\n")
 
 emit([[
@@ -122,6 +143,7 @@ end
 local P = require("boot")
 P.KERNEL_CACHE_DATA = KERNEL   -- boot.load_kernel() takes the embedded path
 P.KL_SOURCES = kl              -- source fallback for a foreign LuaJIT
+P.STDLIB_SOURCES = stdlib      -- lib/StLib tree; load_stdlib materialises it
 return require("shen")
 ]])
 

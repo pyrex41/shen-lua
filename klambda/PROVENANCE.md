@@ -54,40 +54,36 @@ that tag — equivalently, to the zip's `KLambda/` directory (both verified with
   `-signedfuncs` / `-environment` are gone; `shen.initialise-lambda-tables`
   (~renamed) and the arity table remain.
 - **Removed: `stlib.kl`** — the standard library is no longer shipped as a
-  precompiled KLambda blob; upstream now ships it as **lazy Shen sources** under
-  `Lib/StLib/` to be loaded on demand. See section 2 for how shen-lua bridges
-  this gap.
+  precompiled KLambda blob; upstream now ships it as **Shen sources** under
+  `Lib/StLib/`. shen-lua vendors those sources under `lib/StLib/` and loads them
+  at boot (see section 2 and `lib/StLib/PROVENANCE.md`); `stlib.kl` is gone.
 - Other renames observed: `hush` → `shen.hush`, `input+` → `shen.input-h+` /
   `shen.process-input+`, plus new `shen.rdecons`, `shen.shen`, pointer helpers.
 
-## 2. Standard library + extensions — community ShenOSKernel-41.2 (retained)
+## 2. Extensions — community ShenOSKernel-41.2 (retained); stdlib moved out
 
-Because Tarver's refresh no longer ships a precompiled `stlib.kl` and shen-lua
-does not yet have a lazy `Lib/StLib` loader, these five files are **retained
-byte-identical from the community `ShenOSKernel-41.2`** release
-(zip SHA-256 `49f1b85d02348d9b3ebc461570c5c56cc066270ab81e35d5257625fb9d17fe82`)
-so the standard library and the CLI launcher stay available and the kernel test
-suite still certifies 134/134:
+**Extensions.** Tarver's refresh does not ship these; they are **retained
+byte-identical from the community `ShenOSKernel-41.2`** release (zip SHA-256
+`49f1b85d02348d9b3ebc461570c5c56cc066270ab81e35d5257625fb9d17fe82`) so the CLI
+launcher etc. stay available:
 
-- `stlib.kl` — the precompiled standard library (`filter`, `take`, `drop`,
-  `reduce`, string/list/vector helpers, …).
 - `extension-features.kl`, `extension-expand-dynamic.kl` — booted.
 - `extension-launcher.kl` — booted; provides the launcher the CLI can use.
 - `extension-programmable-pattern-matching.kl` — vendored, opt-in, **not** booted.
 
-These are all pure `defun`/`defmacro` and reference only public kernel functions
+They are pure `defun`/`defmacro` referencing only public kernel functions
 (`get`/`put`/`arity`/…) — never the removed `dict.*`, `shen.<-dict`, or
-`shen.initialise-*` functions — so they load unchanged against the refreshed
-kernel. They are library/Shen-level code, effectively version-stable.
+`shen.initialise-*` — so they load unchanged against the refreshed kernel.
 
-> **Known limitation (pre-existing, not introduced by the refresh).** stlib
-> functions get an `F` entry from their `defun` and a compiler arity from the
-> boot prescan, so they compile as direct calls and work in loaded programs and
-> the test suite. But `stlib.initialise` is never called, so their runtime
-> `arity` *property* stays `-1`; a bare `(fn filter)` / top-level `(filter …)`
-> reference that resolves through the lambda table fails with "fn: filter is
-> undefined". This behaves identically on the pre-refresh kernel. The clean fix
-> is a lazy `Lib/StLib` loader (see the PR's "remaining work").
+**Standard library.** No longer a `.kl` file here. It is loaded at boot from the
+S-lineage Shen sources vendored under `lib/StLib/` — see
+[`lib/StLib/PROVENANCE.md`](../lib/StLib/PROVENANCE.md) and `boot.lua`
+`load_stdlib`. Loading through the kernel's own `define` path (rather than as
+raw `stlib.kl` defuns) registers each function's `arity` property + lambda-table
+entry, which **fixes** the long-standing quirk where a bare `(fn filter)` /
+top-level `(filter …)` raised "fn: filter is undefined" (the pre-refresh
+`stlib.kl` never called `stlib.initialise`, so those functions had runtime
+`arity` = -1). A regression test lives in `test/stdlib_spec.lua`.
 
 ## Boot order
 
