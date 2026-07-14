@@ -3,15 +3,22 @@
 The vendored `klambda/` tree has **two lineages**. Read both sections — they
 come from different upstreams and are updated independently.
 
-## 1. Kernel proper — S41.2 (2026-07-11 refresh), from shenlanguage.org
+## 1. Kernel proper — S41.2 (2026-07-11 refresh)
 
-- **Release**: Mark Tarver's `S41.2.zip` (the reference SBCL/Windows distribution)
-- **URL**: https://www.shenlanguage.org/Download/S41.2.zip
-- **Last-Modified**: 2026-07-11
-- **Zip SHA-256**: `51becbfd60fa8c93c3f8ae5b20b948eaa84c4b1d14ad2f5d2a056002a53ee836`
+- **Canonical source**: `pyrex41/shen-s41.1` — the designated mirror of Mark
+  Tarver's shenlanguage.org uploads (private repo).
+  - Tag: `s41.2-pristine-20260711`
+  - Commit: `11fc51bdf53a4dcb505adeec6ec8352754cbe50f`
+    ("Pristine import of the 2026-07-11 S41.2 refresh from shenlanguage.org")
+- **Upstream origin** (what the mirror imported): Mark Tarver's `S41.2.zip`,
+  the reference SBCL/Windows distribution.
+  - URL: https://www.shenlanguage.org/Download/S41.2.zip
+  - Last-Modified: 2026-07-11
+  - Zip SHA-256: `51becbfd60fa8c93c3f8ae5b20b948eaa84c4b1d14ad2f5d2a056002a53ee836`
 
-These 15 files are vendored **byte-identical** to the `KLambda/` directory of
-that zip (verified with `cmp`):
+These 15 files are vendored **byte-identical** to `KLambda/` in the mirror at
+that tag — equivalently, to the zip's `KLambda/` directory (both verified with
+`cmp`):
 
     yacc core load prolog reader sequent sys t-star toplevel
     track types writer backend declarations macros
