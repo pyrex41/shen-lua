@@ -245,5 +245,46 @@ do
         "-q (*hush*) does NOT silence pr to *sterror* — diagnostics still write")
 end
 
+-- ---------------------------------------------------------------------------
+-- Warm FASL-cache hit reproduces the per-form value echo (pyrex41/shen-lua#40).
+-- `(load FILE)` prints each top-level form's evaluated value (klambda/load.kl
+-- shen.eval-and-print) before returning `loaded`. That echo used to be DROPPED
+-- on a warm fasl hit — so `(load ...)` stdout depended on cache state, a
+-- cross-port divergence (shen-rust/shen-go always echo) and an intra-port
+-- nondeterminism. A hit now re-emits the recorded echo, so warm == cold. We use
+-- a private SHEN_FASL_DIR so the first run is a guaranteed miss and the second a
+-- guaranteed hit, independent of the developer's ~/.cache state.
+-- ---------------------------------------------------------------------------
+do
+  local fdir  = os.tmpname(); os.remove(fdir)   -- fresh, empty fasl dir
+  local fpath = os.tmpname() .. ".shen"
+  local h = io.open(fpath, "w")
+  h:write('"ECHO_PROBE"\n(+ 40 2)\n(define cli-echo-fn -> ok)\n'); h:close()
+  local expr = sh_quote('(load "' .. fpath .. '")')
+  -- `env` prefix (not a bare VAR=val) so it composes with the `timeout` wrapper.
+  local base = "env SHEN_FASL_DIR=" .. sh_quote(fdir) .. " "
+
+  run(base .. SHEN .. " -e " .. expr)                              -- miss: populate
+  local warm, wcode = run(base .. "SHEN_FASL_DEBUG=1 " .. SHEN .. " -e " .. expr)
+
+  check(wcode == 0, "#40: warm (load) hit exits 0")
+  check(warm:find("hit ", 1, true) ~= nil,
+        "#40: second run is a fasl HIT (replay path exercised)")
+  check(warm:find('"ECHO_PROBE"', 1, true) ~= nil,
+        "#40: warm fasl hit echoes the string form value")
+  check(warm:find("42", 1, true) ~= nil,
+        "#40: warm fasl hit echoes the numeric form value")
+  check(warm:find("(fn cli-echo-fn)", 1, true) ~= nil,
+        "#40: warm fasl hit echoes the define form value")
+  check(warm:find("loaded", 1, true) ~= nil,
+        "#40: warm fasl hit still returns loaded")
+  -- The cosmetic per-run "run time" banner must STAY dropped on a hit (only the
+  -- value echo comes back) — restoring it would re-inject per-run timing noise.
+  check(warm:find("run time:", 1, true) == nil,
+        "#40: warm fasl hit keeps the cosmetic run-time banner dropped")
+
+  os.remove(fpath); os.execute("rm -rf " .. sh_quote(fdir))
+end
+
 io.write(string.format("cli_spec: %d pass, %d fail\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)
