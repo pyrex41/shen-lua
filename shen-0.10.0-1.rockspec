@@ -1,24 +1,21 @@
 rockspec_format = "3.0"
 package = "shen"
-version = "0.9.0-1"
+version = "0.10.0-1"
 
 source = {
    url = "git+https://github.com/pyrex41/shen-lua.git",
-   tag = "v0.9.0",
+   tag = "v0.10.0",
 }
 
--- NOTE: this rockspec pins tag v0.9.0, which bundles the Shen 41.1 kernel.
--- For kernel 41.2 use shen-0.10.0-1.rockspec (tag v0.10.0) or later.
 description = {
-   summary = "A speed-focused LuaJIT port of the Shen language (kernel 41.1)",
+   summary = "A speed-focused LuaJIT port of the Shen language (kernel 41.2)",
    detailed = [[
 shen-lua runs the Shen language on LuaJIT 2.1 by compiling KLambda to Lua
 source. Embed with `local shen = require("shen")` (boot/eval/call/fn plus
 list/symbol marshaling), or use the `shen` launcher for a REPL, running
 .shen files, and -e one-liners. Requires LuaJIT (Lua 5.1 semantics + FFI);
-the Shen 41.1 KLambda sources are bundled and compiled on first boot, then
-served from a bytecode cache. NOTE: this version bundles kernel 41.1; for
-kernel 41.2 install shen 0.10.0 or later.
+the Shen 41.2 KLambda sources are bundled and compiled on first boot, then
+served from a bytecode cache.
 ]],
    homepage = "https://github.com/pyrex41/shen-lua",
    license = "BSD-3-Clause (Shen kernel: BSD)",
