@@ -473,12 +473,17 @@ end
 -- base (compiled bytecode hard-codes KDATA indices); a mismatch is a miss,
 -- never an error.
 --
--- Known fasl-style degrades: a replayed load does not echo per-form values/
--- types or the "run time"/"typechecked in N inferences" banners, and
--- (destroy ...) at the REPL between loads is not in the key.
+-- A replayed load reproduces the per-form value/type echo: the bytes
+-- shen.eval-and-print / shen.work-through write to (stoutput) are captured as
+-- "e" records during the miss and re-pr'd (in stream order, after each form's
+-- chunk) on replay, so warm-hit stdout matches cold. Still dropped by design:
+-- the cosmetic "run time"/"typechecked in N inferences" banners (they are
+-- emitted by `load` OUTSIDE shen.load-help and would add per-run timing noise).
+-- Known: (destroy ...) at the REPL between loads is not in the key.
 -- SHEN_FASL=off disables; SHEN_FASL_DIR overrides ~/.cache/shen-lua-fasl;
 -- SHEN_FASL_DEBUG=1 logs hits/misses to stderr.
-local FASL_FORMAT = "SHENFASL3"  -- 3: added "pc" (shen.compile-prolog) records
+local FASL_FORMAT = "SHENFASL4"  -- 4: added "e" (per-form value/type echo)
+                                 -- records; 3: "pc" (shen.compile-prolog)
 local FASL_STACK = {}
 local FASL_ROLL = 2166136261
 local FASL_DEBUG = os.getenv("SHEN_FASL_DEBUG") == "1"
@@ -525,6 +530,7 @@ end
 --   | D\n <ser name><ser type>          (declare ...) from assumetypes
 --   | M\n <ser name>                    shen.record-macro (fn rebuilt by name)
 --   | P\n <ser x><ser ptr><ser y>       (put ... *property-vector*)
+--   | E\n #bytes\n bytes                per-form value/type echo (stoutput)
 --   | G\n <ser name><ser val> }*        (set ...) outside any chunk
 --   narity\n {ar SP name\n}*  kbase\n nkdata\n entries  gensym\n
 local function fasl_write(path, rec, arity0)
@@ -560,6 +566,11 @@ local function fasl_write(path, rec, arity0)
       kdata_ser(r.x, parts)
       kdata_ser(r.pointer, parts)
       kdata_ser(r.y, parts)
+    elseif r.k == "e" then
+      -- raw echo bytes, length-prefixed (may contain newlines / non-ASCII);
+      -- mirrors the "C" chunk framing — no trailing separator, the next
+      -- record's kind letter starts immediately after the bytes.
+      parts[#parts+1] = "E\n" .. #r.bytes .. "\n" .. r.bytes
     else -- "g"
       parts[#parts+1] = "G\n"
       kdata_ser(r.name, parts)
@@ -633,6 +644,11 @@ local function fasl_read(path)
     elseif k == "P" then
       local v = de_n(3); if not v then return nil end
       recs[i] = { k = "p", x = v[1], pointer = v[2], y = v[3] }
+    elseif k == "E" then
+      local len = tonumber(line() or "")
+      if not len or pos + len - 1 > #data then return nil end
+      recs[i] = { k = "e", bytes = data:sub(pos, pos + len - 1) }
+      pos = pos + len
     elseif k == "G" then
       local v = de_n(2); if not v then return nil end
       recs[i] = { k = "g", name = v[1], val = v[2] }
@@ -689,6 +705,10 @@ local function fasl_replay(cached)
       P.F["shen.compile-prolog"](r.name, r.rules)
     elseif r.k == "p" then
       P.F["put"](r.x, r.pointer, r.y, P.GLOBALS["*property-vector*"])
+    elseif r.k == "e" then
+      -- re-emit the per-form echo through the live `pr` so replay-time *hush*
+      -- still gates it (a -q hit stays silent, exactly as a -q cold load).
+      P.F["pr"](r.bytes, P.GLOBALS["*stoutput*"])
     else -- "g"
       P.F["set"](r.name, r.val)
     end
@@ -792,6 +812,41 @@ local function install_fasl()
     if nm == "shen.*gensym*" then return nil end
     return { k = "g", name = name, val = val }
   end)
+
+  -- Per-form value/type echo (klambda/load.kl: shen.eval-and-print on the raw
+  -- path, shen.work-through on the tc path) is a pr to (stoutput) that happens
+  -- AFTER the form's eval-kl chunk has run and returned — i.e. with in_chunk
+  -- false, unlike the form's own (output ...) side-effects (in_chunk true, and
+  -- reproduced by re-running the chunk). Record those echo bytes as "e" records
+  -- in stream order so replay re-emits them right after each chunk. We scope
+  -- capture to the span of shen.load-help via rec.echoing, which excludes the
+  -- "run time"/"typechecked in N inferences" banners that `load` prints outside
+  -- load-help (those stay dropped by design). The bytes are captured even under
+  -- *hush* (the string is computed regardless; pr just doesn't write it), so a
+  -- miss recorded under -q still replays correctly to a non-hushed hit.
+  do
+    local orig_load_help = F["shen.load-help"]
+    F["shen.load-help"] = function(...)
+      local rec = P.FASL_REC
+      if not rec then return orig_load_help(...) end
+      local saved = rec.echoing
+      rec.echoing = true
+      local ok, res = pcall(orig_load_help, ...)
+      rec.echoing = saved
+      if not ok then error(res, 0) end
+      return res
+    end
+    local orig_pr = F["pr"]
+    F["pr"] = function(s, st)
+      local rec = P.FASL_REC
+      if rec and rec.echoing and not rec.in_chunk
+         and type(s) == "string" and st == P.GLOBALS["*stoutput*"] then
+        rec.n = rec.n + 1
+        rec[rec.n] = { k = "e", bytes = s }
+      end
+      return orig_pr(s, st)
+    end
+  end
 
   local orig_load = F["load"]
   F["load"] = function(fname)
