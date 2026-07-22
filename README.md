@@ -220,8 +220,9 @@ luarocks tree whose interpreter is LuaJIT, e.g.
 `luarocks --lua-dir=$(brew --prefix luajit) --lua-version=5.1 install shen`.)
 
 Rock versions map to kernels: **0.9.0** bundles kernel **41.1**, **0.10.0+**
-bundles **41.2** (check with `shen -e '(version)'`). If luarocks hands you
-0.9.0, ask for the newer rock explicitly (`luarocks install shen 0.10.0-1`)
+bundles **41.2** (check with `shen -e '(version)'`). **0.10.1** is the current
+release (0.10.0 + the warm-FASL `(load)` echo fix, #40). If luarocks hands you
+0.9.0, ask for the newer rock explicitly (`luarocks install shen 0.10.1-1`)
 or build from a checkout with the `scm` rockspec above.
 
 Prefer zero install? Grab `shen-bundle.lua` from the
