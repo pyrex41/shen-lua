@@ -162,6 +162,30 @@ at boot and degrades gracefully:
 Expect roughly **2x slower** than LuaJIT on the suite (legacy engine, no
 caches) — correct, but LuaJIT remains the recommended runtime.
 
+### aarch64 boot crash on old LuaJIT (`SHEN_JIT=off`)
+
+On **aarch64**, an **old LuaJIT** (the 2.1.0-beta3 era, still shipped by some
+distros and older OpenResty images) intermittently SIGSEGVs while compiling the
+kernel *during boot* (issue #43). Booting the kernel triggers ~1500 trace
+compilations up front, and beta3's arm64 JIT backend mis-compiles one of them:
+a trace branches to a bad target and jumps into unmapped memory. Once booted
+the process is stable — the crash surface is boot-time trace compilation. It is
+stochastic (observed ~0.3%/boot on a late beta3-string rolling build; **50/50**
+on the genuine 2017 v2.1.0-beta3 tag), so any workload that boots the kernel
+many times (a per-request CLI, a test matrix) will flake.
+
+**This is a LuaJIT bug, and it is already fixed upstream.** The primary fix is
+to run a **current LuaJIT 2.1 rolling release**: the same 50/50-crashing kernel
+boots cleanly (0 crashes) under today's `LuaJIT 2.1.ROLLING`. If you can update
+LuaJIT, do that.
+
+If you are pinned to an old LuaJIT, set **`SHEN_JIT=off`** to boot with the JIT
+disabled (`jit.off()`, the in-library equivalent of `luajit -j off`), which
+makes boot reproducibly crash-free. Embedders can equivalently pass
+`shen.boot{jit=false}`. Note this is **distinct from `SHEN_JIT_OPT=off`**, which
+only restores LuaJIT's default `jit.opt` limits and leaves the JIT *on* — it
+does not prevent the crash.
+
 ## Installation & embedding
 
 ### The `shen` module
