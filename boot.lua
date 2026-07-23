@@ -6,17 +6,55 @@ local R = require("runtime")
 local C = require("compiler")
 local P = require("prims")
 
--- LuaJIT's default mcode area (512KB, 1000 traces) is far too small for the
--- compiled kernel: on macOS arm64 the suite triggers dozens of full
+-- LuaJIT trace/mcode tuning, plus an optional switch to disable the JIT.
+--
+-- SHEN_JIT=off disables the LuaJIT compiler for the whole process (the
+-- in-library equivalent of `luajit -j off`). This is a mitigation for issue
+-- #43: on aarch64 an OLD LuaJIT (2.1.0-beta3 era) mis-compiles one of the
+-- ~1500 traces generated while loading the kernel, and the bad trace branches
+-- into unmapped memory (SIGSEGV during boot; stochastic, ~0.3%/boot on a late
+-- beta3 rolling build, 50/50 on the genuine 2017 tag). It is a LuaJIT backend
+-- bug, ALREADY FIXED upstream: the real fix is a current 2.1 rolling release
+-- (0 crashes on the same boot). SHEN_JIT=off is the fallback for hosts pinned
+-- to an old LuaJIT. NOTE it is distinct from SHEN_JIT_OPT=off, which only
+-- restores the host's default jit.opt limits and leaves the JIT ON — that does
+-- not prevent the crash.
+--
+-- With the JIT on, LuaJIT's default mcode area (512KB, 1000 traces) is far too
+-- small for the compiled kernel: on arm64 the suite triggers dozens of full
 -- trace-cache flushes per run ("failed to allocate mcode memory"), costing
 -- ~10-16% of total wall time re-JITting the same code. Raise the limits once
 -- at boot. SHEN_JIT_OPT=off restores the host's defaults (embedders that
 -- manage jit.opt themselves should set it).
-do
+local function disable_jit()
   local jit_ok, jit = pcall(require, "jit")
-  if jit_ok and jit and jit.opt and os.getenv("SHEN_JIT_OPT") ~= "off" then
-    pcall(jit.opt.start,
-      "sizemcode=2048", "maxmcode=131072", "maxtrace=8000", "maxside=400")
+  if jit_ok and jit and jit.off then pcall(jit.off) end
+end
+P.disable_jit = disable_jit   -- so shen.boot{jit=false} can drive it too
+do
+  if os.getenv("SHEN_JIT") == "off" then
+    disable_jit()
+  else
+    local jit_ok, jit = pcall(require, "jit")
+    if jit_ok and jit then
+      -- One-time heads-up on the known-bad combo (issue #43): a beta-versioned
+      -- LuaJIT on arm64 mis-compiles the boot traces and can SIGSEGV. Only
+      -- fires when the JIT is left on (SHEN_JIT neither off nor an explicit on)
+      -- on that exact combo; a current rolling LuaJIT reports "2.1.ROLLING"
+      -- (no "beta") and never trips it. Set SHEN_JIT=on to acknowledge and
+      -- silence, or SHEN_JIT=off to mitigate.
+      if jit.arch == "arm64" and tostring(jit.version):find("beta", 1, true)
+         and os.getenv("SHEN_JIT") ~= "on" then
+        io.stderr:write("shen-lua: warning: " .. tostring(jit.version)
+          .. " on arm64 has a JIT codegen bug that can SIGSEGV during boot"
+          .. " (issue #43). Upgrade to a current LuaJIT 2.1 rolling release,"
+          .. " or set SHEN_JIT=off.\n")
+      end
+      if jit.opt and os.getenv("SHEN_JIT_OPT") ~= "off" then
+        pcall(jit.opt.start,
+          "sizemcode=2048", "maxmcode=131072", "maxtrace=8000", "maxside=400")
+      end
+    end
   end
 end
 

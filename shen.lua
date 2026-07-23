@@ -29,10 +29,16 @@ shen.runtime = R
 --                      silent session do shen.eval("(hush +)") — in 41.2 the
 --                      *hush* global gates `pr` itself, i.e. ALL output.
 --   verbose = true  -> log each kernel file to stderr as it loads
+--   jit     = false -> disable the LuaJIT compiler before loading the kernel
+--                      (jit.off()). Mitigates the aarch64 boot-time trace
+--                      compiler SIGSEGV (issue #43); equivalent to setting
+--                      SHEN_JIT=off in the environment. No-op on PUC Lua / when
+--                      the JIT is already off. Leave unset to keep the JIT on.
 local booted = false
 function shen.boot(opts)
   if booted then return shen end
   opts = opts or {}
+  if opts.jit == false then P.disable_jit() end
   local hush0
   if opts.quiet then
     hush0 = P.GLOBALS["*hush*"]
