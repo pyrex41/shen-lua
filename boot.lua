@@ -772,7 +772,12 @@ local function fasl_replay(cached)
     elseif r.k == "e" then
       -- re-emit the per-form echo through the live `pr` so replay-time *hush*
       -- still gates it (a -q hit stays silent, exactly as a -q cold load).
-      P.F["pr"](r.bytes, P.GLOBALS["*stoutput*"])
+      -- hush-load likewise gates it here: on a replay `load`'s wrapper never
+      -- runs (orig_load is skipped entirely), so the depth-based pr gate
+      -- can't see these; check the flag directly for the same effect.
+      if not P.HUSH_LOAD_ECHO then
+        P.F["pr"](r.bytes, P.GLOBALS["*stoutput*"])
+      end
     else -- "g"
       P.F["set"](r.name, r.val)
     end
@@ -782,6 +787,43 @@ local function fasl_replay(cached)
   local g = P.GLOBALS["shen.*gensym*"]
   if type(g) == "number" and cached.gensym > g then
     P.GLOBALS["shen.*gensym*"] = cached.gensym
+  end
+end
+
+-- ---- hush-load quiet mode (issue #46 item 3) -------------------------------
+-- --hush-load / SHEN_HUSH_LOAD=1 silences ONLY what `load` itself prints to
+-- standard output — the per-form value/type echo (shen.eval-and-print on the
+-- raw path, shen.work-through on the tc path) and the "run time: N secs" /
+-- "typechecked in N inferences" banners — while user (output ...)/pr from the
+-- loaded forms still writes. That makes `bin/shen --hush-load FILE` output
+-- deterministic and cross-port comparable (only the program's own output),
+-- which -q cannot do: on the 41.2 kernel *hush* gates pr itself, so -q
+-- silences the tests' (output ...) lines too.
+--
+-- Mechanism: load's own chatter is pr'd to (stoutput) OUTSIDE any eval-kl
+-- chunk, i.e. at the same chunk-nesting depth `load` was entered at, whereas
+-- everything a loaded form prints runs INSIDE its chunk (depth+1) — the same
+-- distinction the fasl "e" capture uses. Wrap `load` to publish that entry
+-- depth in P.LOADPR_DEPTH (saved/restored, so nested loads work: a nested
+-- load sits inside its caller's chunk, one level deeper); the native pr
+-- (prims.lua) drops stdout writes at exactly that depth while the flag is on.
+-- P.CHUNK_DEPTH is maintained by prims.compile_and_load only when recording
+-- or when the flag is on — default-mode behavior and codepaths are unchanged.
+-- Installed BEFORE install_fasl so the fasl wrappers stay outermost: a fasl
+-- miss still records the echo "e" bytes (its pr wrapper runs before the
+-- native pr drops the write), so a cache written under --hush-load replays
+-- the full echo to a later non-hushed run; a fasl hit never reaches this
+-- wrapper and is gated at the "e" replay site instead.
+local function install_hush_load()
+  local orig_load = P.F["load"]
+  P.F["load"] = function(fname)
+    if not P.HUSH_LOAD_ECHO then return orig_load(fname) end
+    local saved = P.LOADPR_DEPTH
+    P.LOADPR_DEPTH = P.CHUNK_DEPTH
+    local ok, res = pcall(orig_load, fname)
+    P.LOADPR_DEPTH = saved
+    if not ok then error(res, 0) end
+    return res
   end
 end
 
@@ -1093,6 +1135,7 @@ end
 
 P.load_kernel = function(verbose)
   load_kernel(verbose)
+  install_hush_load()   -- before install_fasl: fasl wrappers stay outermost
   install_fasl()   -- after native overrides so the declare wrapper composes
   -- Lua<->Shen interop surface (lua_interop.lua). Installed LAST so the
   -- typed bridge (lua.function) sees the fully composed F["declare"]

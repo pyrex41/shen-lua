@@ -754,6 +754,17 @@ function P.install_native_stdlib()
   local orig_pr = F["pr"]
   local function pr(s, st)
     if GLOBALS["*hush*"] and st == GLOBALS["*stoutput*"] then return s end
+    -- hush-load (issue #46 item 3): while a (load ...) is in progress and
+    -- P.HUSH_LOAD_ECHO is on, boot.lua's load wrapper records the chunk
+    -- nesting depth at load entry in P.LOADPR_DEPTH. A pr to standard output
+    -- at exactly that depth is `load`'s own chatter — the per-form value/type
+    -- echo (shen.eval-and-print / shen.work-through) and the "run time"/
+    -- "typechecked in N inferences" banners, all emitted AFTER (outside) the
+    -- form's eval-kl chunk — whereas user (output ...) runs INSIDE a chunk
+    -- (depth+1) and is left alone. Same policy as *hush*: only standard
+    -- output is gated; file streams and *sterror* always write.
+    if P.LOADPR_DEPTH ~= nil and P.CHUNK_DEPTH == P.LOADPR_DEPTH
+       and st == GLOBALS["*stoutput*"] then return s end
     if GLOBALS["*hush*"] then
       -- non-stdout stream under *hush*: write unconditionally. Temporarily
       -- clear *hush* so the original kernel pr takes its write branch, then
@@ -930,6 +941,20 @@ local function load_chunk(code, chunkname)
 end
 P.load_chunk = load_chunk
 
+-- hush-load quiet mode (issue #46 item 3). P.HUSH_LOAD_ECHO gates it
+-- (bin/shen --hush-load, or SHEN_HUSH_LOAD=1); boot.lua wraps `load` to mark
+-- the echo depth (P.LOADPR_DEPTH) and the native pr drops load's own
+-- standard-output chatter at that depth. P.CHUNK_DEPTH counts the eval-kl
+-- chunk nesting maintained by compile_and_load below. Unlike -q/*hush*
+-- (which on the 41.2 kernel gates pr itself, i.e. ALL standard output),
+-- hush-load leaves user (output ...)/pr from inside loaded forms alive.
+P.CHUNK_DEPTH = 0
+P.LOADPR_DEPTH = nil
+do
+  local hl = os.getenv("SHEN_HUSH_LOAD")
+  P.HUSH_LOAD_ECHO = (hl == "1" or hl == "on" or hl == "true") or nil
+end
+
 -- P.FASL_REC: active fasl recording context (boot.lua's user-program cache).
 -- While a (load ...) is being recorded, every TOP-LEVEL compile (a form the
 -- kernel hands to eval-kl) is dumped into the record; compiles triggered
@@ -943,8 +968,22 @@ local function compile_and_load(luasrc, chunkname)
     rec.n = rec.n + 1
     rec[rec.n] = { k = "c", name = chunkname, dump = string.dump(fn) }
     rec.in_chunk = true
+    P.CHUNK_DEPTH = P.CHUNK_DEPTH + 1
     local ok, res = pcall(fn)
     rec.in_chunk = false
+    P.CHUNK_DEPTH = P.CHUNK_DEPTH - 1
+    if not ok then error(res, 0) end
+    return res
+  end
+  if P.HUSH_LOAD_ECHO then
+    -- hush-load needs the chunk depth tracked even when fasl isn't recording
+    -- (SHEN_FASL=off, or a nested eval-kl) so the pr gate above can tell
+    -- `load`'s own echo (at the depth of load entry) from user output emitted
+    -- inside a chunk. Only paid when the mode is on: the default path below
+    -- stays a bare tail call.
+    P.CHUNK_DEPTH = P.CHUNK_DEPTH + 1
+    local ok, res = pcall(fn)
+    P.CHUNK_DEPTH = P.CHUNK_DEPTH - 1
     if not ok then error(res, 0) end
     return res
   end
