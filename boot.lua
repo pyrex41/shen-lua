@@ -520,7 +520,8 @@ end
 -- Known: (destroy ...) at the REPL between loads is not in the key.
 -- SHEN_FASL=off disables; SHEN_FASL_DIR overrides ~/.cache/shen-lua-fasl;
 -- SHEN_FASL_DEBUG=1 logs hits/misses to stderr.
-local FASL_FORMAT = "SHENFASL4"  -- 4: added "e" (per-form value/type echo)
+local FASL_FORMAT = "SHENFASL5"  -- 5: "lt" (shen.*lambdatable* delta by name);
+                                 -- 4: "e" (per-form value/type echo)
                                  -- records; 3: "pc" (shen.compile-prolog)
 local FASL_STACK = {}
 local FASL_ROLL = 2166136261
@@ -569,6 +570,8 @@ end
 --   | M\n <ser name>                    shen.record-macro (fn rebuilt by name)
 --   | P\n <ser x><ser ptr><ser y>       (put ... *property-vector*)
 --   | E\n #bytes\n bytes                per-form value/type echo (stoutput)
+--   | A\n <ser names>                   shen.*lambdatable* delta (entries
+--                                       rebuilt by name via shen.lambda-entry)
 --   | G\n <ser name><ser val> }*        (set ...) outside any chunk
 --   narity\n {ar SP name\n}*  kbase\n nkdata\n entries  gensym\n
 local function fasl_write(path, rec, arity0)
@@ -588,6 +591,9 @@ local function fasl_write(path, rec, arity0)
     elseif r.k == "lf" then
       parts[#parts+1] = "L\n"
       kdata_ser(r.name, parts)
+    elseif r.k == "lt" then
+      parts[#parts+1] = "A\n"
+      kdata_ser(r.names, parts)
     elseif r.k == "dt" then
       parts[#parts+1] = "T\n"
       kdata_ser(r.name, parts)
@@ -670,6 +676,9 @@ local function fasl_read(path)
     elseif k == "L" then
       local v = de_n(1); if not v then return nil end
       recs[i] = { k = "lf", name = v[1] }
+    elseif k == "A" then
+      local v = de_n(1); if not v then return nil end
+      recs[i] = { k = "lt", names = v[1] }
     elseif k == "T" then
       local v = de_n(2); if not v then return nil end
       recs[i] = { k = "dt", name = v[1], rules = v[2] }
@@ -729,6 +738,23 @@ local function fasl_replay(cached)
       local val = R.is_cons(entry) and entry[2] or entry
       P.F["put"](r.name, R.intern("shen.lambda-form"), val,
                  P.GLOBALS["*property-vector*"])
+    elseif r.k == "lt" then
+      -- 41.2 kernel path: (set shen.*lambdatable* ...) carries live curried
+      -- lambdas, so the recording stored only the NAMES whose entries the set
+      -- added/replaced. Rebuild each entry from the live defun exactly the way
+      -- shen.update-lambdatable does (shen.lambda-entry reads the arity
+      -- property, replayed by the preceding "p" record in stream order).
+      local names = r.names
+      while R.is_cons(names) do
+        local name = names[1]
+        local entry = P.F["shen.lambda-entry"](name)
+        if R.is_cons(entry) then
+          P.F["set"](R.intern("shen.*lambdatable*"),
+                     P.F["shen.assoc->"](name, entry[2],
+                                         P.GLOBALS["shen.*lambdatable*"]))
+        end
+        names = names[2]
+      end
     elseif r.k == "dt" then
       P.F["shen.process-datatype"](r.name, r.rules)
     elseif r.k == "sy" then
@@ -848,6 +874,32 @@ local function install_fasl()
     -- the gensym counter churns on every expansion-time gensym; the replay
     -- fast-forward (max) covers it without hundreds of noise records
     if nm == "shen.*gensym*" then return nil end
+    if nm == "shen.*lambdatable*" then
+      -- 41.2 kernel: shen.update-lambdatable / update-lambda-table set the
+      -- whole assoc list, whose entries are (name . live-curried-lambda) —
+      -- unserializable, and the reason every stdlib/user load used to be
+      -- fasl-uncacheable. The recorder runs BEFORE the original set, so the
+      -- global still holds the old table: diff it against `val` and record
+      -- only the names whose entry was added/replaced (an "lt" record; the
+      -- fns are rebuilt on replay via shen.lambda-entry).
+      local old = {}
+      local t = P.GLOBALS["shen.*lambdatable*"]
+      while R.is_cons(t) do
+        local e = t[1]
+        if R.is_cons(e) and R.is_symbol(e[1]) then old[e[1].name] = e[2] end
+        t = t[2]
+      end
+      local names = R.NIL
+      t = val
+      while R.is_cons(t) do
+        local e = t[1]
+        if R.is_cons(e) and R.is_symbol(e[1]) and old[e[1].name] ~= e[2] then
+          names = R.cons(e[1], names)
+        end
+        t = t[2]
+      end
+      return { k = "lt", names = names }
+    end
     return { k = "g", name = name, val = val }
   end)
 
