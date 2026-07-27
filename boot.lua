@@ -56,6 +56,22 @@ do
       end
     end
   end
+  -- GC tuning. Compiled-KL workloads are cons-churn-heavy (jit.p on urdr's
+  -- software SHA-256 suite: ~27% of wall time in the GC at LuaJIT's default
+  -- pause=200), and most of that churn is short-lived list cells. Raising
+  -- the pause to 400 (heap may grow to 4x live before a full cycle) cuts
+  -- suite CPU ~15-20% for about 2x peak RSS (30MB -> 60MB on that suite).
+  -- SHEN_GC=off keeps the host's defaults (embedders that manage the GC
+  -- themselves should set it); SHEN_GC="pause[,stepmul]" sets explicit
+  -- values (e.g. SHEN_GC=800,100 buys another ~10% on batch runs at ~110MB;
+  -- SHEN_GC=200 is LuaJIT's default pause).
+  local gc = os.getenv("SHEN_GC")
+  if gc ~= "off" then
+    local pause, stepmul
+    if gc and gc ~= "" then pause, stepmul = gc:match("^(%d+),?(%d*)$") end
+    collectgarbage("setpause", tonumber(pause) or 400)
+    if stepmul and stepmul ~= "" then collectgarbage("setstepmul", tonumber(stepmul)) end
+  end
 end
 
 local function find_kldir()
