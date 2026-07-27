@@ -900,6 +900,61 @@ function P.install_native_stdlib()
   install("reverse", reverse, 1)
   install("shen.map-h", map_h, 3)
   install("map", map, 2)
+
+  -- shen.x host SHA-256 (OpenSSL libcrypto). See pyrex41/shen-extensions.
+  -- Disable with SHEN_X_SHA256=pure.
+  if os.getenv("SHEN_X_SHA256") ~= "pure" then
+    local ok_ffi, ffi = pcall(require, "ffi")
+    if ok_ffi then
+      local function load_crypto()
+        local candidates = {
+          "crypto", "libcrypto",
+          "/Users/reuben/.local/Homebrew/opt/openssl@3/lib/libcrypto.dylib",
+          "/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib",
+          "/usr/local/opt/openssl@3/lib/libcrypto.dylib",
+          "libcrypto.so.3", "libcrypto.so.1.1", "libcrypto.so",
+        }
+        for _, name in ipairs(candidates) do
+          local ok, lib = pcall(ffi.load, name)
+          if ok then return lib end
+        end
+        return nil
+      end
+      local crypto = load_crypto()
+      if crypto then
+        pcall(function()
+          ffi.cdef[[
+            unsigned char *SHA256(const unsigned char *d, size_t n, unsigned char *md);
+          ]]
+        end)
+        local function sha256_octets_host(lst)
+          local buf = {}
+          local cur = lst
+          while cur ~= NIL do
+            if not is_cons(cur) then
+              ERR("shen.x.sha256-octets-host: expected list of bytes 0..255")
+            end
+            local b = cur[1]
+            if type(b) ~= "number" or b < 0 or b > 255 or b ~= math.floor(b) then
+              ERR("shen.x.sha256-octets-host: expected list of bytes 0..255")
+            end
+            buf[#buf+1] = string.char(b)
+            cur = cur[2]
+          end
+          local data = table.concat(buf)
+          local md = ffi.new("unsigned char[32]")
+          crypto.SHA256(data, #data, md)
+          local acc = NIL
+          for i = 31, 0, -1 do
+            acc = cons(tonumber(md[i]), acc)
+          end
+          return acc
+        end
+        install("shen.x.sha256-octets-host", sha256_octets_host, 1)
+        GLOBALS["shen.x.*sha256-backend*"] = intern("host")
+      end
+    end
+  end
 end
 
 -- ---- loader / eval -------------------------------------------------------
