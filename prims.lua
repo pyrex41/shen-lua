@@ -816,7 +816,43 @@ function P.install_native_stdlib()
     return h
   end
 
+  -- fn (reader.kl): the 41.2 shen->kl translator compiles every call to a
+  -- function whose arity is unknown at translation time (forward references
+  -- within a file, mainly) as ((fn name) args...), and the kernel `fn` pays
+  -- an arity property get PLUS an assoc over the whole shen.*lambdatable*
+  -- on EVERY such call — measured at ~35% of urdr's software-SHA-256 suite
+  -- (jit.p F3: is_cons/equal < assoc < fn). Fast path: for a symbol naming
+  -- a live function with known positive arity, verify the lambdatable entry
+  -- ONCE per (name, lambdatable identity) through the original `fn` — so an
+  -- unregistered name still raises the kernel's "fn: X is undefined" — and
+  -- from then on return the RAW F[name] function instead of the table's
+  -- curried lambda. APP dispatches a raw function with recorded arity
+  -- identically to the curried chain (exact call, partial application,
+  -- over-application), but without one MKFUN closure allocation per applied
+  -- argument. Every (set shen.*lambdatable* ...) builds a fresh cons spine,
+  -- so table identity is the correct invalidation key; arity-0 and
+  -- unknown-arity names always take the original path (kernel `fn` CALLS an
+  -- arity-0 function rather than returning it).
+  local orig_fn = F["fn"]
+  local fn_seen, fn_seen_lt = {}, nil
+  local function fn_fast(v)
+    if is_symbol(v) then
+      local f = F[v.name]
+      local ar = f ~= nil and FA[f] or nil
+      if ar and ar > 0 then
+        local lt = GLOBALS["shen.*lambdatable*"]
+        if lt ~= fn_seen_lt then fn_seen = {}; fn_seen_lt = lt end
+        if fn_seen[v.name] then return f end
+        orig_fn(v)               -- errors exactly like the kernel on a miss
+        fn_seen[v.name] = true
+        return f
+      end
+    end
+    return orig_fn(v)
+  end
+
   local function install(name, fn, arity) F[name] = fn; FA[fn] = arity end
+  install("fn", fn_fast, 1)
   install("hash", hash, 2)
   install("pr", pr, 2)
   install("variable?", variable_q, 1)
