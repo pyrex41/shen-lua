@@ -903,6 +903,11 @@ local ENV = {
   GE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a>=b end return F[">="](a,b) end,
   LE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a<=b end return F["<="](a,b) end,
   EQ  = function(a,b) if type(a)=="number" then return a==b end return equal(a,b) end,
+  -- CMT: the runtime Cons metatable, for the compiler's inlined exact-arity
+  -- (cons A B) codegen — `setmetatable({A, B}, CMT)` (see ccall in
+  -- compiler.lua). Keeps the hottest allocation out of the tiny F["cons"]
+  -- wrapper proto, which LuaJIT otherwise blacklists under cons-heavy loads.
+  CMT = R.Cons,
   -- allow compiled code to reach a few Lua builtins safely
   pcall = pcall, select = select, error = error,
   setmetatable = setmetatable, getmetatable = getmetatable,
