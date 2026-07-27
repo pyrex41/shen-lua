@@ -701,6 +701,38 @@ function P.install_native_stdlib()
   end
   local function reverse(lst) return reverse_help(lst, NIL) end
 
+  -- append (sys.kl):
+  --   (cond ((= () A) B)
+  --         ((cons? A) (cons (hd A) (append (tl A) B)))
+  --         (true (simple-error "attempt to append a non-list")))
+  -- The KL is NON-tail-recursive: every element of A is a stack frame that
+  -- re-looks-up F["hd"]/F["tl"]/F["append"] and builds one cons on the way
+  -- back. On urdr's software-SHA-256 suite (word.rotr concatenates 32-bit
+  -- bit-lists via append) that is ~10% of leaf samples. Native: walk A once
+  -- building a fresh spine iteratively (exactly |A| new cons cells — same
+  -- allocation as the recursive form, no intermediate reverse list), then
+  -- splice B onto the last cell. Fresh cells are not shared until we return,
+  -- so in-place tail assignment is unobservable. Improper / non-list inputs
+  -- delegate to the original so the simple-error message stays byte-identical.
+  local orig_append = F["append"]
+  local function append(a, b)
+    if a == NIL then return b end
+    if not is_cons(a) then return orig_append(a, b) end
+    local orig = a
+    local head = cons(a[1], NIL)
+    local last = head
+    a = a[2]
+    while is_cons(a) do
+      local cell = cons(a[1], NIL)
+      last[2] = cell
+      last = cell
+      a = a[2]
+    end
+    if a ~= NIL then return orig_append(orig, b) end
+    last[2] = b
+    return head
+  end
+
   -- shen.map-h (and map) : map a function over a list, building the result
   -- reversed then reversing (exactly as the KL does). The mapper is applied via
   -- APP (it may be a closure, a partial, or a symbol).
@@ -863,6 +895,7 @@ function P.install_native_stdlib()
   install("shen.incinfs", incinfs, 0)
   install("element?", element_q, 2)
   install("assoc", assoc, 2)
+  install("append", append, 2)
   install("shen.reverse-help", reverse_help, 2)
   install("reverse", reverse, 1)
   install("shen.map-h", map_h, 3)
