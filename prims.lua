@@ -907,13 +907,26 @@ function P.install_native_stdlib()
     local ok_ffi, ffi = pcall(require, "ffi")
     if ok_ffi then
       local function load_crypto()
-        local candidates = {
-          "crypto", "libcrypto",
-          "/Users/reuben/.local/Homebrew/opt/openssl@3/lib/libcrypto.dylib",
-          "/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib",
-          "/usr/local/opt/openssl@3/lib/libcrypto.dylib",
-          "libcrypto.so.3", "libcrypto.so.1.1", "libcrypto.so",
-        }
+        local candidates = {}
+        local function add(name)
+          if name and name ~= "" then candidates[#candidates+1] = name end
+        end
+        add(os.getenv("SHEN_X_LIBCRYPTO"))
+        if ffi.os == "OSX" then
+          -- NEVER dlopen a bare "crypto"/"libcrypto" on macOS: depending on
+          -- the luajit's dyld search paths it can resolve to Apple's
+          -- /usr/lib/libcrypto.dylib STUB, which abort()s the whole process
+          -- on load ("loading libcrypto in an unsafe way") — pcall cannot
+          -- catch it. Absolute paths to a real OpenSSL only; a miss just
+          -- means the pure oracle is used.
+          local home = os.getenv("HOME") or ""
+          add("/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib")
+          add("/usr/local/opt/openssl@3/lib/libcrypto.dylib")
+          add(home .. "/.local/Homebrew/opt/openssl@3/lib/libcrypto.dylib")
+        else
+          add("crypto"); add("libcrypto")
+          add("libcrypto.so.3"); add("libcrypto.so.1.1"); add("libcrypto.so")
+        end
         for _, name in ipairs(candidates) do
           local ok, lib = pcall(ffi.load, name)
           if ok then return lib end
