@@ -509,6 +509,21 @@ local function ccall(form, env)
         if helper and ar == 2 then
           return helper .. "(" .. argstr .. ")"
         end
+        -- Inline exact-arity (cons A B) as a bare table+metatable construction
+        -- (ENV.CMT is the runtime Cons metatable). Rationale: cons is the
+        -- single hottest call in list-heavy workloads (urdr's software
+        -- SHA-256: bits are cons lists), and routing it through the F["cons"]
+        -- wrapper proto makes that tiny function a JIT trace hotspot in its
+        -- own right — on LuaJIT it ends up blacklisted (repeated aborts of
+        -- traces rooted in it), after which EVERY caller's trace that reaches
+        -- it aborts too ("blacklisted at prims.lua"), demoting whole suites to
+        -- the interpreter. Emitted inline there is no proto to blacklist, and
+        -- hot traces can sink the allocation. Same late-binding tradeoff as
+        -- the ARITH2 fast paths above: a runtime redefinition of `cons` is
+        -- not seen by already-compiled exact-arity call sites.
+        if name == "cons" and ar == 2 then
+          return "setmetatable({" .. argstr .. "}, CMT)"
+        end
         return ftab_ref(name) .. "(" .. argstr .. ")"
       else
         -- Arity mismatch at compile time: route through APP so dispatch uses

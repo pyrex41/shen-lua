@@ -701,6 +701,38 @@ function P.install_native_stdlib()
   end
   local function reverse(lst) return reverse_help(lst, NIL) end
 
+  -- append (sys.kl):
+  --   (cond ((= () A) B)
+  --         ((cons? A) (cons (hd A) (append (tl A) B)))
+  --         (true (simple-error "attempt to append a non-list")))
+  -- The KL is NON-tail-recursive: every element of A is a stack frame that
+  -- re-looks-up F["hd"]/F["tl"]/F["append"] and builds one cons on the way
+  -- back. On urdr's software-SHA-256 suite (word.rotr concatenates 32-bit
+  -- bit-lists via append) that is ~10% of leaf samples. Native: walk A once
+  -- building a fresh spine iteratively (exactly |A| new cons cells — same
+  -- allocation as the recursive form, no intermediate reverse list), then
+  -- splice B onto the last cell. Fresh cells are not shared until we return,
+  -- so in-place tail assignment is unobservable. Improper / non-list inputs
+  -- delegate to the original so the simple-error message stays byte-identical.
+  local orig_append = F["append"]
+  local function append(a, b)
+    if a == NIL then return b end
+    if not is_cons(a) then return orig_append(a, b) end
+    local orig = a
+    local head = cons(a[1], NIL)
+    local last = head
+    a = a[2]
+    while is_cons(a) do
+      local cell = cons(a[1], NIL)
+      last[2] = cell
+      last = cell
+      a = a[2]
+    end
+    if a ~= NIL then return orig_append(orig, b) end
+    last[2] = b
+    return head
+  end
+
   -- shen.map-h (and map) : map a function over a list, building the result
   -- reversed then reversing (exactly as the KL does). The mapper is applied via
   -- APP (it may be a closure, a partial, or a symbol).
@@ -754,6 +786,17 @@ function P.install_native_stdlib()
   local orig_pr = F["pr"]
   local function pr(s, st)
     if GLOBALS["*hush*"] and st == GLOBALS["*stoutput*"] then return s end
+    -- hush-load (issue #46 item 3): while a (load ...) is in progress and
+    -- P.HUSH_LOAD_ECHO is on, boot.lua's load wrapper records the chunk
+    -- nesting depth at load entry in P.LOADPR_DEPTH. A pr to standard output
+    -- at exactly that depth is `load`'s own chatter — the per-form value/type
+    -- echo (shen.eval-and-print / shen.work-through) and the "run time"/
+    -- "typechecked in N inferences" banners, all emitted AFTER (outside) the
+    -- form's eval-kl chunk — whereas user (output ...) runs INSIDE a chunk
+    -- (depth+1) and is left alone. Same policy as *hush*: only standard
+    -- output is gated; file streams and *sterror* always write.
+    if P.LOADPR_DEPTH ~= nil and P.CHUNK_DEPTH == P.LOADPR_DEPTH
+       and st == GLOBALS["*stoutput*"] then return s end
     if GLOBALS["*hush*"] then
       -- non-stdout stream under *hush*: write unconditionally. Temporarily
       -- clear *hush* so the original kernel pr takes its write branch, then
@@ -805,7 +848,43 @@ function P.install_native_stdlib()
     return h
   end
 
+  -- fn (reader.kl): the 41.2 shen->kl translator compiles every call to a
+  -- function whose arity is unknown at translation time (forward references
+  -- within a file, mainly) as ((fn name) args...), and the kernel `fn` pays
+  -- an arity property get PLUS an assoc over the whole shen.*lambdatable*
+  -- on EVERY such call — measured at ~35% of urdr's software-SHA-256 suite
+  -- (jit.p F3: is_cons/equal < assoc < fn). Fast path: for a symbol naming
+  -- a live function with known positive arity, verify the lambdatable entry
+  -- ONCE per (name, lambdatable identity) through the original `fn` — so an
+  -- unregistered name still raises the kernel's "fn: X is undefined" — and
+  -- from then on return the RAW F[name] function instead of the table's
+  -- curried lambda. APP dispatches a raw function with recorded arity
+  -- identically to the curried chain (exact call, partial application,
+  -- over-application), but without one MKFUN closure allocation per applied
+  -- argument. Every (set shen.*lambdatable* ...) builds a fresh cons spine,
+  -- so table identity is the correct invalidation key; arity-0 and
+  -- unknown-arity names always take the original path (kernel `fn` CALLS an
+  -- arity-0 function rather than returning it).
+  local orig_fn = F["fn"]
+  local fn_seen, fn_seen_lt = {}, nil
+  local function fn_fast(v)
+    if is_symbol(v) then
+      local f = F[v.name]
+      local ar = f ~= nil and FA[f] or nil
+      if ar and ar > 0 then
+        local lt = GLOBALS["shen.*lambdatable*"]
+        if lt ~= fn_seen_lt then fn_seen = {}; fn_seen_lt = lt end
+        if fn_seen[v.name] then return f end
+        orig_fn(v)               -- errors exactly like the kernel on a miss
+        fn_seen[v.name] = true
+        return f
+      end
+    end
+    return orig_fn(v)
+  end
+
   local function install(name, fn, arity) F[name] = fn; FA[fn] = arity end
+  install("fn", fn_fast, 1)
   install("hash", hash, 2)
   install("pr", pr, 2)
   install("variable?", variable_q, 1)
@@ -816,10 +895,79 @@ function P.install_native_stdlib()
   install("shen.incinfs", incinfs, 0)
   install("element?", element_q, 2)
   install("assoc", assoc, 2)
+  install("append", append, 2)
   install("shen.reverse-help", reverse_help, 2)
   install("reverse", reverse, 1)
   install("shen.map-h", map_h, 3)
   install("map", map, 2)
+
+  -- shen.x host SHA-256 (OpenSSL libcrypto). See pyrex41/shen-extensions.
+  -- Disable with SHEN_X_SHA256=pure.
+  if os.getenv("SHEN_X_SHA256") ~= "pure" then
+    local ok_ffi, ffi = pcall(require, "ffi")
+    if ok_ffi then
+      local function load_crypto()
+        local candidates = {}
+        local function add(name)
+          if name and name ~= "" then candidates[#candidates+1] = name end
+        end
+        add(os.getenv("SHEN_X_LIBCRYPTO"))
+        if ffi.os == "OSX" then
+          -- NEVER dlopen a bare "crypto"/"libcrypto" on macOS: depending on
+          -- the luajit's dyld search paths it can resolve to Apple's
+          -- /usr/lib/libcrypto.dylib STUB, which abort()s the whole process
+          -- on load ("loading libcrypto in an unsafe way") — pcall cannot
+          -- catch it. Absolute paths to a real OpenSSL only; a miss just
+          -- means the pure oracle is used.
+          local home = os.getenv("HOME") or ""
+          add("/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib")
+          add("/usr/local/opt/openssl@3/lib/libcrypto.dylib")
+          add(home .. "/.local/Homebrew/opt/openssl@3/lib/libcrypto.dylib")
+        else
+          add("crypto"); add("libcrypto")
+          add("libcrypto.so.3"); add("libcrypto.so.1.1"); add("libcrypto.so")
+        end
+        for _, name in ipairs(candidates) do
+          local ok, lib = pcall(ffi.load, name)
+          if ok then return lib end
+        end
+        return nil
+      end
+      local crypto = load_crypto()
+      if crypto then
+        pcall(function()
+          ffi.cdef[[
+            unsigned char *SHA256(const unsigned char *d, size_t n, unsigned char *md);
+          ]]
+        end)
+        local function sha256_octets_host(lst)
+          local buf = {}
+          local cur = lst
+          while cur ~= NIL do
+            if not is_cons(cur) then
+              ERR("shen.x.sha256-octets-host: expected list of bytes 0..255")
+            end
+            local b = cur[1]
+            if type(b) ~= "number" or b < 0 or b > 255 or b ~= math.floor(b) then
+              ERR("shen.x.sha256-octets-host: expected list of bytes 0..255")
+            end
+            buf[#buf+1] = string.char(b)
+            cur = cur[2]
+          end
+          local data = table.concat(buf)
+          local md = ffi.new("unsigned char[32]")
+          crypto.SHA256(data, #data, md)
+          local acc = NIL
+          for i = 31, 0, -1 do
+            acc = cons(tonumber(md[i]), acc)
+          end
+          return acc
+        end
+        install("shen.x.sha256-octets-host", sha256_octets_host, 1)
+        GLOBALS["shen.x.*sha256-backend*"] = intern("host")
+      end
+    end
+  end
 end
 
 -- ---- loader / eval -------------------------------------------------------
@@ -892,6 +1040,11 @@ local ENV = {
   GE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a>=b end return F[">="](a,b) end,
   LE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a<=b end return F["<="](a,b) end,
   EQ  = function(a,b) if type(a)=="number" then return a==b end return equal(a,b) end,
+  -- CMT: the runtime Cons metatable, for the compiler's inlined exact-arity
+  -- (cons A B) codegen — `setmetatable({A, B}, CMT)` (see ccall in
+  -- compiler.lua). Keeps the hottest allocation out of the tiny F["cons"]
+  -- wrapper proto, which LuaJIT otherwise blacklists under cons-heavy loads.
+  CMT = R.Cons,
   -- allow compiled code to reach a few Lua builtins safely
   pcall = pcall, select = select, error = error,
   setmetatable = setmetatable, getmetatable = getmetatable,
@@ -930,6 +1083,20 @@ local function load_chunk(code, chunkname)
 end
 P.load_chunk = load_chunk
 
+-- hush-load quiet mode (issue #46 item 3). P.HUSH_LOAD_ECHO gates it
+-- (bin/shen --hush-load, or SHEN_HUSH_LOAD=1); boot.lua wraps `load` to mark
+-- the echo depth (P.LOADPR_DEPTH) and the native pr drops load's own
+-- standard-output chatter at that depth. P.CHUNK_DEPTH counts the eval-kl
+-- chunk nesting maintained by compile_and_load below. Unlike -q/*hush*
+-- (which on the 41.2 kernel gates pr itself, i.e. ALL standard output),
+-- hush-load leaves user (output ...)/pr from inside loaded forms alive.
+P.CHUNK_DEPTH = 0
+P.LOADPR_DEPTH = nil
+do
+  local hl = os.getenv("SHEN_HUSH_LOAD")
+  P.HUSH_LOAD_ECHO = (hl == "1" or hl == "on" or hl == "true") or nil
+end
+
 -- P.FASL_REC: active fasl recording context (boot.lua's user-program cache).
 -- While a (load ...) is being recorded, every TOP-LEVEL compile (a form the
 -- kernel hands to eval-kl) is dumped into the record; compiles triggered
@@ -943,8 +1110,22 @@ local function compile_and_load(luasrc, chunkname)
     rec.n = rec.n + 1
     rec[rec.n] = { k = "c", name = chunkname, dump = string.dump(fn) }
     rec.in_chunk = true
+    P.CHUNK_DEPTH = P.CHUNK_DEPTH + 1
     local ok, res = pcall(fn)
     rec.in_chunk = false
+    P.CHUNK_DEPTH = P.CHUNK_DEPTH - 1
+    if not ok then error(res, 0) end
+    return res
+  end
+  if P.HUSH_LOAD_ECHO then
+    -- hush-load needs the chunk depth tracked even when fasl isn't recording
+    -- (SHEN_FASL=off, or a nested eval-kl) so the pr gate above can tell
+    -- `load`'s own echo (at the depth of load entry) from user output emitted
+    -- inside a chunk. Only paid when the mode is on: the default path below
+    -- stays a bare tail call.
+    P.CHUNK_DEPTH = P.CHUNK_DEPTH + 1
+    local ok, res = pcall(fn)
+    P.CHUNK_DEPTH = P.CHUNK_DEPTH - 1
     if not ok then error(res, 0) end
     return res
   end

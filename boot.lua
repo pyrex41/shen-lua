@@ -56,6 +56,22 @@ do
       end
     end
   end
+  -- GC tuning. Compiled-KL workloads are cons-churn-heavy (jit.p on urdr's
+  -- software SHA-256 suite: ~27% of wall time in the GC at LuaJIT's default
+  -- pause=200), and most of that churn is short-lived list cells. Raising
+  -- the pause to 400 (heap may grow to 4x live before a full cycle) cuts
+  -- suite CPU ~15-20% for about 2x peak RSS (30MB -> 60MB on that suite).
+  -- SHEN_GC=off keeps the host's defaults (embedders that manage the GC
+  -- themselves should set it); SHEN_GC="pause[,stepmul]" sets explicit
+  -- values (e.g. SHEN_GC=800,100 buys another ~10% on batch runs at ~110MB;
+  -- SHEN_GC=200 is LuaJIT's default pause).
+  local gc = os.getenv("SHEN_GC")
+  if gc ~= "off" then
+    local pause, stepmul
+    if gc and gc ~= "" then pause, stepmul = gc:match("^(%d+),?(%d*)$") end
+    collectgarbage("setpause", tonumber(pause) or 400)
+    if stepmul and stepmul ~= "" then collectgarbage("setstepmul", tonumber(stepmul)) end
+  end
 end
 
 local function find_kldir()
@@ -520,7 +536,8 @@ end
 -- Known: (destroy ...) at the REPL between loads is not in the key.
 -- SHEN_FASL=off disables; SHEN_FASL_DIR overrides ~/.cache/shen-lua-fasl;
 -- SHEN_FASL_DEBUG=1 logs hits/misses to stderr.
-local FASL_FORMAT = "SHENFASL4"  -- 4: added "e" (per-form value/type echo)
+local FASL_FORMAT = "SHENFASL5"  -- 5: "lt" (shen.*lambdatable* delta by name);
+                                 -- 4: "e" (per-form value/type echo)
                                  -- records; 3: "pc" (shen.compile-prolog)
 local FASL_STACK = {}
 local FASL_ROLL = 2166136261
@@ -569,6 +586,8 @@ end
 --   | M\n <ser name>                    shen.record-macro (fn rebuilt by name)
 --   | P\n <ser x><ser ptr><ser y>       (put ... *property-vector*)
 --   | E\n #bytes\n bytes                per-form value/type echo (stoutput)
+--   | A\n <ser names>                   shen.*lambdatable* delta (entries
+--                                       rebuilt by name via shen.lambda-entry)
 --   | G\n <ser name><ser val> }*        (set ...) outside any chunk
 --   narity\n {ar SP name\n}*  kbase\n nkdata\n entries  gensym\n
 local function fasl_write(path, rec, arity0)
@@ -588,6 +607,9 @@ local function fasl_write(path, rec, arity0)
     elseif r.k == "lf" then
       parts[#parts+1] = "L\n"
       kdata_ser(r.name, parts)
+    elseif r.k == "lt" then
+      parts[#parts+1] = "A\n"
+      kdata_ser(r.names, parts)
     elseif r.k == "dt" then
       parts[#parts+1] = "T\n"
       kdata_ser(r.name, parts)
@@ -670,6 +692,9 @@ local function fasl_read(path)
     elseif k == "L" then
       local v = de_n(1); if not v then return nil end
       recs[i] = { k = "lf", name = v[1] }
+    elseif k == "A" then
+      local v = de_n(1); if not v then return nil end
+      recs[i] = { k = "lt", names = v[1] }
     elseif k == "T" then
       local v = de_n(2); if not v then return nil end
       recs[i] = { k = "dt", name = v[1], rules = v[2] }
@@ -729,6 +754,23 @@ local function fasl_replay(cached)
       local val = R.is_cons(entry) and entry[2] or entry
       P.F["put"](r.name, R.intern("shen.lambda-form"), val,
                  P.GLOBALS["*property-vector*"])
+    elseif r.k == "lt" then
+      -- 41.2 kernel path: (set shen.*lambdatable* ...) carries live curried
+      -- lambdas, so the recording stored only the NAMES whose entries the set
+      -- added/replaced. Rebuild each entry from the live defun exactly the way
+      -- shen.update-lambdatable does (shen.lambda-entry reads the arity
+      -- property, replayed by the preceding "p" record in stream order).
+      local names = r.names
+      while R.is_cons(names) do
+        local name = names[1]
+        local entry = P.F["shen.lambda-entry"](name)
+        if R.is_cons(entry) then
+          P.F["set"](R.intern("shen.*lambdatable*"),
+                     P.F["shen.assoc->"](name, entry[2],
+                                         P.GLOBALS["shen.*lambdatable*"]))
+        end
+        names = names[2]
+      end
     elseif r.k == "dt" then
       P.F["shen.process-datatype"](r.name, r.rules)
     elseif r.k == "sy" then
@@ -746,7 +788,12 @@ local function fasl_replay(cached)
     elseif r.k == "e" then
       -- re-emit the per-form echo through the live `pr` so replay-time *hush*
       -- still gates it (a -q hit stays silent, exactly as a -q cold load).
-      P.F["pr"](r.bytes, P.GLOBALS["*stoutput*"])
+      -- hush-load likewise gates it here: on a replay `load`'s wrapper never
+      -- runs (orig_load is skipped entirely), so the depth-based pr gate
+      -- can't see these; check the flag directly for the same effect.
+      if not P.HUSH_LOAD_ECHO then
+        P.F["pr"](r.bytes, P.GLOBALS["*stoutput*"])
+      end
     else -- "g"
       P.F["set"](r.name, r.val)
     end
@@ -756,6 +803,43 @@ local function fasl_replay(cached)
   local g = P.GLOBALS["shen.*gensym*"]
   if type(g) == "number" and cached.gensym > g then
     P.GLOBALS["shen.*gensym*"] = cached.gensym
+  end
+end
+
+-- ---- hush-load quiet mode (issue #46 item 3) -------------------------------
+-- --hush-load / SHEN_HUSH_LOAD=1 silences ONLY what `load` itself prints to
+-- standard output — the per-form value/type echo (shen.eval-and-print on the
+-- raw path, shen.work-through on the tc path) and the "run time: N secs" /
+-- "typechecked in N inferences" banners — while user (output ...)/pr from the
+-- loaded forms still writes. That makes `bin/shen --hush-load FILE` output
+-- deterministic and cross-port comparable (only the program's own output),
+-- which -q cannot do: on the 41.2 kernel *hush* gates pr itself, so -q
+-- silences the tests' (output ...) lines too.
+--
+-- Mechanism: load's own chatter is pr'd to (stoutput) OUTSIDE any eval-kl
+-- chunk, i.e. at the same chunk-nesting depth `load` was entered at, whereas
+-- everything a loaded form prints runs INSIDE its chunk (depth+1) — the same
+-- distinction the fasl "e" capture uses. Wrap `load` to publish that entry
+-- depth in P.LOADPR_DEPTH (saved/restored, so nested loads work: a nested
+-- load sits inside its caller's chunk, one level deeper); the native pr
+-- (prims.lua) drops stdout writes at exactly that depth while the flag is on.
+-- P.CHUNK_DEPTH is maintained by prims.compile_and_load only when recording
+-- or when the flag is on — default-mode behavior and codepaths are unchanged.
+-- Installed BEFORE install_fasl so the fasl wrappers stay outermost: a fasl
+-- miss still records the echo "e" bytes (its pr wrapper runs before the
+-- native pr drops the write), so a cache written under --hush-load replays
+-- the full echo to a later non-hushed run; a fasl hit never reaches this
+-- wrapper and is gated at the "e" replay site instead.
+local function install_hush_load()
+  local orig_load = P.F["load"]
+  P.F["load"] = function(fname)
+    if not P.HUSH_LOAD_ECHO then return orig_load(fname) end
+    local saved = P.LOADPR_DEPTH
+    P.LOADPR_DEPTH = P.CHUNK_DEPTH
+    local ok, res = pcall(orig_load, fname)
+    P.LOADPR_DEPTH = saved
+    if not ok then error(res, 0) end
+    return res
   end
 end
 
@@ -848,6 +932,32 @@ local function install_fasl()
     -- the gensym counter churns on every expansion-time gensym; the replay
     -- fast-forward (max) covers it without hundreds of noise records
     if nm == "shen.*gensym*" then return nil end
+    if nm == "shen.*lambdatable*" then
+      -- 41.2 kernel: shen.update-lambdatable / update-lambda-table set the
+      -- whole assoc list, whose entries are (name . live-curried-lambda) —
+      -- unserializable, and the reason every stdlib/user load used to be
+      -- fasl-uncacheable. The recorder runs BEFORE the original set, so the
+      -- global still holds the old table: diff it against `val` and record
+      -- only the names whose entry was added/replaced (an "lt" record; the
+      -- fns are rebuilt on replay via shen.lambda-entry).
+      local old = {}
+      local t = P.GLOBALS["shen.*lambdatable*"]
+      while R.is_cons(t) do
+        local e = t[1]
+        if R.is_cons(e) and R.is_symbol(e[1]) then old[e[1].name] = e[2] end
+        t = t[2]
+      end
+      local names = R.NIL
+      t = val
+      while R.is_cons(t) do
+        local e = t[1]
+        if R.is_cons(e) and R.is_symbol(e[1]) and old[e[1].name] ~= e[2] then
+          names = R.cons(e[1], names)
+        end
+        t = t[2]
+      end
+      return { k = "lt", names = names }
+    end
     return { k = "g", name = name, val = val }
   end)
 
@@ -1041,6 +1151,7 @@ end
 
 P.load_kernel = function(verbose)
   load_kernel(verbose)
+  install_hush_load()   -- before install_fasl: fasl wrappers stay outermost
   install_fasl()   -- after native overrides so the declare wrapper composes
   -- Lua<->Shen interop surface (lua_interop.lua). Installed LAST so the
   -- typed bridge (lua.function) sees the fully composed F["declare"]

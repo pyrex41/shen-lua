@@ -21,21 +21,29 @@ end
 local shen = require("shen")
 
 local USAGE = [[
-usage: shen [-q] [-e EXPR | FILE] ...
+usage: shen [-q] [--hush-load] [-e EXPR | FILE] ...
   no arguments      start the interactive Shen REPL
   FILE              (load) the file (full Shen syntax), then exit
   -e, --eval EXPR   evaluate EXPR and print its value
   -q, --quiet       (set *hush* true) — silence load echo and hushable output
+                    (on the 41.2 kernel *hush* gates pr itself, so -q also
+                    silences the program's own (output ...) lines)
+  --hush-load       silence only load's chatter — the per-form value/type
+                    echo and "run time"/"typechecked" banners; (output ...)
+                    from the loaded program still prints. Env: SHEN_HUSH_LOAD=1
 ]]
 
 -- parse: a list of {kind="eval"|"load", arg=...} in command-line order
 local actions = {}
 local quiet = false
+local hush_load = false
 local i = 1
 while i <= #arg do
   local a = arg[i]
   if a == "-q" or a == "--quiet" then
     quiet = true
+  elseif a == "--hush-load" then
+    hush_load = true
   elseif a == "-e" or a == "--eval" then
     i = i + 1
     if arg[i] == nil then
@@ -60,6 +68,7 @@ if #actions == 0 then
   -- the kernel's own toplevel loop.
   shen.boot{quiet = quiet}
   if quiet then shen.prims.GLOBALS["*hush*"] = true end
+  if hush_load then shen.prims.HUSH_LOAD_ECHO = true end
   local ok, repl = pcall(require, "repl")
   if ok and type(repl) == "table" and type(repl.run) == "function" then
     repl.run{ P = shen.prims, quiet = quiet }
@@ -87,6 +96,7 @@ end
 
 shen.boot{quiet=true}
 if quiet then shen.prims.GLOBALS["*hush*"] = true end
+if hush_load then shen.prims.HUSH_LOAD_ECHO = true end
 for _, act in ipairs(actions) do
   local ok, err = pcall(function()
     if act.kind == "load" then
