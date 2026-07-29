@@ -144,9 +144,14 @@ local function prop(label, spec, build, str, pred, arity)
   local fn = IO.fn(pred)
   for i = 1, N do
     local sa, sb, sc = spec(), spec(), spec()
-    local r = (arity == 1 and fn(build(sa)))
-           or (arity == 2 and fn(build(sa), build(sb)))
-           or fn(build(sa), build(sb), build(sc))
+    -- NB: dispatch on arity explicitly. An `and`/`or` chain would fall through
+    -- to the next branch exactly when a law returns FALSE — i.e. on the very
+    -- counterexample this harness exists to report — and apply the predicate to
+    -- too many arguments.
+    local r
+    if     arity == 1 then r = fn(build(sa))
+    elseif arity == 2 then r = fn(build(sa), build(sb))
+    else                   r = fn(build(sa), build(sb), build(sc)) end
     if r ~= true then
       print(("  %-42s FAIL @ case %d"):format(label, i))
       print("      a = " .. str(sa)); if arity >= 2 then print("      b = " .. str(sb)) end
