@@ -73,6 +73,18 @@ local gA, gB, gcap = newarr(4096), newarr(4096), 4096  -- unify goal stacks
 
 local cell_top, var_top, trail_top, cap_top = 0, 0, 0, 0
 
+-- Kernel globals / error thrower, bound in install(). Declared up here
+-- because newvar's per-query capacity check needs them.
+local GLOBALS, ERRFN
+
+-- Per-query variable capacity (the kernel's shen.prolog-vector ceiling).
+-- shen.call-prolog allocates ONE absvector of (value shen.*prolog-memory*)
+-- slots per query (macros.shen:179); slot 0 holds the printer and slot 1 the
+-- next-index ticket, so indices 2..N-1 are available and shen.newpv raises
+-- once the ticket reaches N. var_base is this query's var_top at entry, so
+-- var_top - var_base is exactly the kernel's (ticket - 2).
+local var_base, var_limit = 0, math.huge
+
 -- continuation registry (handles are 1-based ints)
 local contFn, contBase, contSpill = {}, {}, {}
 local ch_top = 0
@@ -144,6 +156,13 @@ function M.atomval(v) return atomval[v] end
 -- ---------------------------------------------------------------------------
 local function newvar()
   local idx = var_top
+  if idx - var_base >= var_limit then
+    -- The kernel raises an out-of-range absvector index here. The message is
+    -- port-specific prose on every port; what has to agree is that the query
+    -- RAISES rather than answering.
+    ERRFN("prolog vector index out of range: a single query may allocate at "
+          .. "most " .. var_limit .. " variables (shen.*prolog-memory*)")
+  end
   if idx >= vcap then vbind, vcap = grown(vbind, vcap, idx + 1) end
   vbind[idx] = -1
   var_top = idx + 1
@@ -568,7 +587,6 @@ M.import_cached = import_cached
 
 -- maxinferences check, transcribed from shen.maxinfexceeded? (t-star.kl):
 -- THROWS "maximum inferences exceeded" past the limit, else returns false
-local GLOBALS, ERRFN
 function M.maxinf_exceeded()
   local mx = GLOBALS and GLOBALS["shen.*maxinferences*"]
   if type(mx) == "number" and infs > mx then
@@ -649,8 +667,15 @@ function M.query_begin()
   local q = {
     cell_top, var_top, trail_top, cap_top, ch_top,
     lock_open, lock_depth, opq_top,
+    var_base, var_limit,
   }
   lock_open, lock_depth = true, 0
+  -- Fresh bindings vector for this query, exactly as shen.call-prolog does:
+  -- the budget is re-read every time, so (prolog-memory N) takes effect on
+  -- the next query, and a nested query gets its own full budget.
+  var_base = var_top
+  local n = GLOBALS and GLOBALS["shen.*prolog-memory*"]
+  var_limit = (type(n) == "number" and n > 2) and (n - 2) or math.huge
   return q
 end
 
@@ -673,6 +698,7 @@ function M.query_end(q)
     opq_log[i] = nil
   end
   opq_top = q[8]
+  var_base, var_limit = q[9], q[10]
   -- the import memo references cells that are no longer valid
   if next(import_memo) ~= nil then
     for k in pairs(import_memo) do import_memo[k] = nil end
@@ -683,6 +709,7 @@ end
 function M.reset_all()
   cell_top, var_top, trail_top, cap_top, ch_top = 0, 0, 0, 0, 0
   lock_open, lock_depth = true, 0
+  var_base, var_limit = 0, math.huge
   infs = 0
   for h in pairs(contFn) do contFn[h] = nil end
   for h in pairs(contSpill) do contSpill[h] = nil end
