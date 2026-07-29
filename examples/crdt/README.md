@@ -42,13 +42,19 @@ datatypes make illegal states unrepresentable and every merge/value/law
 function is proved well-typed before anything runs. Zero extra work.
 
 **(b) Laws by execution — the default.** `gc-commutative?`,
-`gc-associative?`, `gc-idempotent?` (and the LWW equivalents) are ordinary Shen
-predicates that run the laws over sample states, identically on every port.
-This is *instance* checking — and it earns its keep: while building this
-example it caught a real bug where `gc-merge` duplicated one replica's keys and
-dropped the other's. Types were perfectly happy (both results are well-typed
-`gcounter`s); `gc-commutative? = false` is what flagged it. That is the exact
-bug class — silent replica divergence — these laws exist to kill.
+`gc-associative?`, `gc-idempotent?`, their LWW equivalents, and `doc-*` (the
+laws for the CRDT the demo actually uses) are ordinary Shen predicates that run
+the laws over states, identically on every port. `selftest.lua` runs them two
+ways: on a handful of hand-picked states (including adversarial malformed ones —
+duplicate keys, clock ties), and then **property-based** over 2000 random states
+each (a seeded PRNG, so a failure prints a reproducible counterexample). This
+earns its keep: while building the example it caught a real bug where `gc-merge`
+duplicated one replica's keys and dropped the other's. Types were perfectly
+happy (both results are well-typed `gcounter`s); `gc-commutative? = false` is
+what flagged it. That is the exact bug class — silent replica divergence — these
+laws exist to kill. Running over thousands of random states, including the
+shipped `doc-merge`, is the cheapest way to narrow the model↔code gap that
+tier (c) below is honest about not closing.
 
 **(c) Laws by proof — `crdt_laws.shen`.** Universally quantified, no inputs.
 The three semilattice laws are encoded as a `datatype` (an equational logic:
@@ -73,8 +79,10 @@ proposition (Curry–Howard). But be precise about what's proved:
   satisfy. Tier (c) proves universal *consequences* of them. Tier (b) is what
   certifies the *executable* `gc-merge` actually satisfies them.
 - Re-deriving the axioms from `gc-merge`'s definition (induction over the
-  tally-list representation) would close the model↔code gap, but that is real
-  proof engineering and is deliberately out of scope.
+  tally-list representation) would *close* the model↔code gap, but that is real
+  proof engineering and is deliberately out of scope. Tier (b)'s property run
+  *narrows* it — the executable merges are checked on thousands of random states
+  — without claiming a universal proof over the representation.
 - The trade versus Coq/Agda is **trust, automation, and totality**, not
   expressiveness: you author the logic's rules (and could make them unsound),
   there are no tactics, and Shen does not check termination. What you get is a
@@ -85,10 +93,10 @@ proposition (Curry–Howard). But be precise about what's proved:
 
 | file | what it is |
 |---|---|
-| `crdt.shen` | the typed kernel: G-Counter, LWW-Register, LWW-Map, merges, and the tier-(b) law checks. Pure portable Shen — the same source every port runs. |
+| `crdt.shen` | the typed kernel: G-Counter, LWW-Register, LWW-Map, merges, and the tier-(b) law checks (`gc-*`, `lww-*`, `doc-*`). Pure portable Shen — the same source every port runs. |
 | `crdt_laws.shen` | tier (c): the equational logic + machine-checked proofs of the merge laws. |
 | `app.lua` | OpenResty glue: marshals the JSON document ↔ the Shen `doc`, calls `doc-merge` as the authoritative convergence point, stores the canonical doc in a `lua_shared_dict`. |
 | `nginx.conf` | serves the API and the two-replica page; boots Shen once per worker. |
-| `selftest.lua` | runs convergence (sync in different orders → identical doc), the tier-(b) laws, and the tier-(c) proof load — no nginx, no network. |
+| `selftest.lua` | runs convergence (sync in different orders → identical doc), the tier-(b) laws (hand-picked + property-based over 2000 random states each), and the tier-(c) proof load — no nginx, no network. |
 | `public/index.html` | two replicas you edit offline and Sync; they converge. |
 | `json_shim.lua` | a tiny JSON codec for running off-nginx (OpenResty bundles cjson). |

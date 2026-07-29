@@ -228,3 +228,54 @@
   {(list field) --> (list field) --> (list field)}
   [] Acc -> Acc
   [F | Fs] Acc -> (doc-collect Fs (doc-absorb F Acc)))
+
+(define doc-fields
+  {doc --> (list field)}
+  [doc Fs] -> Fs)
+
+\\ effective register for a field name: lww-merge over EVERY entry that carries
+\\ it (so a malformed doc with a duplicated key collapses the same way gc-get
+\\ takes the max). [] = the field is absent, [R] = present with register R.
+(define doc-lookup
+  {string --> (list field) --> (list register)}
+  K Fs -> (doc-lookup-acc K Fs []))
+
+(define doc-lookup-acc
+  {string --> (list field) --> (list register) --> (list register)}
+  _ [] Acc -> Acc
+  K [[K R] | Fs] [] -> (doc-lookup-acc K Fs [R])
+  K [[K R] | Fs] [R0] -> (doc-lookup-acc K Fs [(lww-merge R R0)])
+  K [_ | Fs] Acc -> (doc-lookup-acc K Fs Acc))
+
+(define reg-opt-eq?
+  {(list register) --> (list register) --> boolean}
+  [] [] -> true
+  [R1] [R2] -> (lww-eq? R1 R2)
+  _ _ -> false)
+
+\\ every field named in Fs resolves to the same effective register in A and B
+(define doc-sub?
+  {(list field) --> doc --> doc --> boolean}
+  [] _ _ -> true
+  [[K _] | Fs] A B -> (and (reg-opt-eq? (doc-lookup K (doc-fields A)) (doc-lookup K (doc-fields B)))
+                           (doc-sub? Fs A B)))
+
+\\ order- and duplicate-independent equality: A and B agree on every field of
+\\ either. The right notion for the laws, exactly like gc-eq?.
+(define doc-eq?
+  {doc --> doc --> boolean}
+  A B -> (and (doc-sub? (doc-fields A) A B) (doc-sub? (doc-fields B) A B)))
+
+\\ -- the semilattice laws for the DEMOED crdt, as executable checks (tier b) --
+(define doc-idempotent?
+  {doc --> boolean}
+  A -> (doc-eq? (doc-merge A A) A))
+
+(define doc-commutative?
+  {doc --> doc --> boolean}
+  A B -> (doc-eq? (doc-merge A B) (doc-merge B A)))
+
+(define doc-associative?
+  {doc --> doc --> doc --> boolean}
+  A B C -> (doc-eq? (doc-merge A (doc-merge B C))
+                    (doc-merge (doc-merge A B) C)))
