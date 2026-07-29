@@ -210,10 +210,49 @@ local function shortest_float(n)
   end
   return string.format("%.17g", n)
 end
-local function to_str(x, seen)
-  local t = type(x)
-  if t == "number" then
-    if x == math.floor(x) and x == x and x ~= math.huge and x ~= -math.huge then
+
+-- TWO63: 2^63, exact as a double. The %d path is only sound for integral
+-- values inside int64; on LuaJIT/5.1 it SATURATES outside that range instead
+-- of erroring, so everything from 2^63 up printed as 9223372036854775807 and
+-- everything from -2^63 down as -9223372036854775808 (issue: rendering half of
+-- the int64-saturation class that c83c40e fixed for numeric literals).
+local TWO63 = 9223372036854775808.0
+
+-- Positional decimal for a finite integral double at or beyond int64 range.
+-- %.17g / tostring would give exponent form, which is not what any reference
+-- port prints; %d cannot represent the value at all. So: take the SHORTEST
+-- round-trippable scientific form (same rule shortest_float applies to
+-- non-integral values, issue #24) and expand its digits positionally.
+--
+--   1e19  -> "1e+19"                  -> 1  + 19 zeros
+--   2^63  -> "9.223372036854776e+18"  -> 9223372036854776 + 3 zeros
+--
+-- Shortest-round-trip rather than the double's exact value (%.0f) on purpose:
+-- it round-trips, it is what shen-rust prints for the same double (verified
+-- byte-for-byte), and it is the rule this printer already follows everywhere
+-- else. Sign-symmetric, so -2^63 renders as the negation of 2^63 rather than
+-- exposing the two's-complement asymmetry of %d.
+local function positional_integral(n)
+  local s
+  for p = 0, 17 do
+    s = string.format("%." .. p .. "e", n)
+    if tonumber(s) == n then break end
+  end
+  local sign, lead, frac, e = s:match("^(%-?)(%d)%.?(%d*)[eE]([-+]?%d+)$")
+  if not sign then return shortest_float(n) end   -- unrecognised: degrade, don't lie
+  local zeros = tonumber(e) - #frac
+  if zeros < 0 then return shortest_float(n) end  -- not actually integral
+  return sign .. lead .. frac .. string.rep("0", zeros)
+end
+
+-- The single number-rendering rule for the whole port. runtime.to_str (the
+-- printer) and the `str` primitive in prims.lua BOTH go through this: they are
+-- two surfaces on one rule and have diverged before, so there is exactly one
+-- implementation. Non-finite values (+-inf, NaN) fall through to
+-- shortest_float unchanged -- overflow policy is deliberately not decided here.
+local function num_to_str(x)
+  if x == math.floor(x) and x == x and x ~= math.huge and x ~= -math.huge then
+    if x > -TWO63 and x < TWO63 then
       if mtoint then
         local i = mtoint(x)
         if i then return string.format("%d", i) end
@@ -221,7 +260,15 @@ local function to_str(x, seen)
       end
       return string.format("%d", x)
     end
-    return shortest_float(x)
+    return positional_integral(x)
+  end
+  return shortest_float(x)
+end
+
+local function to_str(x, seen)
+  local t = type(x)
+  if t == "number" then
+    return num_to_str(x)
   elseif t == "boolean" then return x and "true" or "false"
   elseif t == "string" then return '"' .. x .. '"'
   elseif x == NIL then return "()"
@@ -243,5 +290,6 @@ local function to_str(x, seen)
 end
 M.to_str = to_str
 M.shortest_float = shortest_float
+M.num_to_str = num_to_str
 
 return M

@@ -256,23 +256,12 @@ defprim("intern", 1, function(s)
   return intern(s)
 end)
 
--- On 5.3+ string.format("%d", x) ERRORS for an integral float outside int64
--- range; go through math.tointeger and fall back to %.17g (where LuaJIT's
--- own %d output is junk anyway). math.tointeger is nil under LuaJIT/5.1, so
--- that path is byte-identical to before.
-local mtoint = math.tointeger
-local function numToStr(n)
-  if type(n)=="number" and n==math.floor(n) and n~=math.huge and n~=-math.huge then
-    if mtoint then
-      local i = mtoint(n)
-      if i then return string.format("%d", i) end
-      return string.format("%.17g", n)
-    end
-    return string.format("%d", n)
-  end
-  -- non-integer: shortest round-trippable form, not LuaJIT's lossy %.14g (#24)
-  return R.shortest_float(n)
-end
+-- `str` on a number and the printer are two surfaces on ONE rendering rule, so
+-- there is one implementation of it, in runtime.lua. Keeping a second copy here
+-- is how they diverged before; do not reintroduce one. See R.num_to_str for the
+-- rule (exact %d inside int64, shortest-round-trip expanded positionally
+-- outside it, shortest_float for non-integral and non-finite values).
+local numToStr = R.num_to_str
 
 defprim("str", 1, function(x)
   local t = type(x)

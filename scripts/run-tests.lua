@@ -38,6 +38,7 @@ local specs = {
   "test/jit_spec.lua",
   "test/library_spec.lua",
   "test/numeric_literal_spec.lua",
+  "test/numeric_render_spec.lua",
   "test/primitives_spec.lua",
   "test/prolog_semantics_spec.lua",
   "test/reader_spec.lua",
