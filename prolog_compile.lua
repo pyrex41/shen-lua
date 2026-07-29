@@ -215,6 +215,46 @@ local function lift_guard(ctx, e, env, out, d)
   return call .. ")"
 end
 
+-- A GOAL in term position — the argument of call/1, of findall/3, or any
+-- predicate argument that is later handed to one of them.
+--
+-- The kernel spells a goal as a PARTIAL APPLICATION: prolog.shen's
+-- shen.function-calls leaves an argument of the form (F A1..Ak) as a Shen
+-- application, so evaluating it yields a closure still wanting the four
+-- Bindings/Lock/Key/Continuation arguments, and (define call Call B L K C ->
+-- (Call B L K C)) simply supplies them. The native engine instead spells a
+-- goal as a STRUCTURE and dispatches on its head (E.g_call).
+--
+-- Guard-lifting (F A1..Ak) therefore produced a legacy CPS closure interned
+-- as an opaque atom, and E.g_call rejected it with "goal is not a structure".
+-- Build the structure the native engine expects instead.
+--
+-- Returns the Lua expression, or nil when `e` is not a goal (any other
+-- embedded Shen computation still guard-lifts).
+local function compile_goal_term(ctx, e, env, out, d)
+  local h = e[1]
+  if not is_sym(h) then return nil end
+  local r = M.registry[sname(h)]
+  if not r then return nil end
+  -- A prolog predicate's Shen arity is (term arity + 4). Only an application
+  -- that supplies exactly the term arguments — leaving B L K C outstanding —
+  -- denotes a goal; anything else is not what call/1 can complete.
+  local parts = lst2tbl(r.form)
+  local arrow
+  for i = 3, #parts do
+    if parts[i] == SYM["->"] then arrow = i; break end
+  end
+  if not arrow then return nil end
+  local nterms = (arrow - 3) - 4
+  local a, an = lst2tbl(e[2])
+  if an ~= nterms then return nil end
+  local acc = "0"   -- NIL
+  for i = an, 1, -1 do
+    acc = "CONS(" .. compile_term(ctx, a[i], env, out, d) .. ", " .. acc .. ")"
+  end
+  return "CONS(" .. atomconst(h) .. ", " .. acc .. ")"
+end
+
 -- compile a term-construction expression
 compile_term = function(ctx, e, env, out, d)
   if is_cons(e) then
@@ -235,6 +275,9 @@ compile_term = function(ctx, e, env, out, d)
       -- a full deref in term position: identity in the native engine
       return compile_term(ctx, e[2][1], env, out, d)
     else
+      -- a goal (a partially applied prolog predicate) -> native goal structure
+      local g = compile_goal_term(ctx, e, env, out, d)
+      if g then return g end
       -- embedded Shen computation producing a value -> guard-lift + import
       local call = lift_guard(ctx, e, env, out, d)
       local r = newlocal(ctx)
