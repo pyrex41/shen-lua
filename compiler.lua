@@ -425,8 +425,66 @@ local function try_flatten_call_chain(form, env)
     cur = car(c)
   end
   if #frames < 16 then return nil end   -- not deep enough to flatten
-  -- innermost value first
   local stmts = {}
+
+  -- EVALUATION ORDER. Shen evaluates operands left to right -- shen-go,
+  -- shen-cl and shen-rust all do -- but this lowering builds the chain from
+  -- the INSIDE OUT, so anything emitted at a call site runs after everything
+  -- emitted for the frames nested inside it. Left-to-right therefore means:
+  -- every non-last argument of every frame must be evaluated HERE, outermost
+  -- frame first, before the innermost value; the call sites below then only
+  -- reference the results.
+  --
+  -- Only arguments that can actually be observed need that treatment.
+  -- `arg_pure` args are atoms / unbound symbols / already-bound Lua locals:
+  -- no effects, and nothing in a straight-line chain can change them, so they
+  -- stay INLINE at the call site. That matters -- the chains this lowering
+  -- exists for (the Prolog compiler's shen.gc(A, shen.gc(A, ...)) CPS spines)
+  -- have nothing but variable refs in those positions, so they keep exactly
+  -- the code they had before.
+  --
+  -- The hoisted values go into one scratch TABLE rather than into `local`s.
+  -- Locals are the scarce resource here: Lua allows 200 per function and the
+  -- chain already spends one per frame, so hoisting into locals would halve
+  -- the depth this lowering can handle. The table is emitted only when some
+  -- argument actually needs it.
+  local nhoist = 0
+  for i=1,#frames do
+    local prevs = frames[i][2]
+    for j=1,#prevs do
+      if not arg_pure(prevs[j], env) then nhoist = nhoist + 1 end
+    end
+  end
+  local pre = {}   -- pre[i][j] = Lua expression string for frame i's arg j
+  if nhoist > 0 then
+    local tname = gen("t")
+    stmts[#stmts+1] = "local " .. tname .. " = {};"
+    local k = 0
+    for i=1,#frames do
+      local prevs = frames[i][2]
+      local strs = {}
+      for j=1,#prevs do
+        if arg_pure(prevs[j], env) then
+          strs[j] = cexpr(prevs[j], env)
+        else
+          k = k + 1
+          local slot = tname .. "[" .. k .. "]"
+          stmts[#stmts+1] = slot .. " = " .. cexpr(prevs[j], env) .. ";"
+          strs[j] = slot
+        end
+      end
+      pre[i] = strs
+    end
+  else
+    for i=1,#frames do
+      local prevs = frames[i][2]
+      local strs = {}
+      for j=1,#prevs do strs[j] = cexpr(prevs[j], env) end
+      pre[i] = strs
+    end
+  end
+
+  -- innermost value next
   -- If the innermost form is a (do A1 A2 ... AN), emit A1..A_{N-1} as
   -- statement-level side-effects (via tiny IIFEs that capture nothing
   -- expensive) and use AN as the value expression. This avoids wrapping the
@@ -447,8 +505,7 @@ local function try_flatten_call_chain(form, env)
   for i=#frames, 2, -1 do
     local frame = frames[i]
     local hname = frame[1].name
-    local prev_strs = {}
-    for j=1,#frame[2] do prev_strs[j] = cexpr(frame[2][j], env) end
+    local prev_strs = pre[i]
     local arg_list
     if #prev_strs == 0 then arg_list = inner_name
     else arg_list = table.concat(prev_strs, ", ") .. ", " .. inner_name end
@@ -472,8 +529,7 @@ local function try_flatten_call_chain(form, env)
   -- outermost: emit as return statement
   local frame = frames[1]
   local hname = frame[1].name
-  local prev_strs = {}
-  for j=1,#frame[2] do prev_strs[j] = cexpr(frame[2][j], env) end
+  local prev_strs = pre[1]
   local arg_list
   if #prev_strs == 0 then arg_list = inner_name
   else arg_list = table.concat(prev_strs, ", ") .. ", " .. inner_name end
