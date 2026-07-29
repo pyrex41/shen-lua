@@ -586,6 +586,17 @@ function P.install_native_prolog()
   local function newpv(vec)
     if prof then AP.newpv_total = AP.newpv_total + 1 end
     local n = vec[3]
+    -- Per-query capacity: shen.prolog-vector allocates ONE absvector of
+    -- (value shen.*prolog-memory*) slots per query, so the kernel's
+    -- shen.nextticket writes slot n and the query dies once n reaches the
+    -- vector size. Our absvector is a Lua table, and address-> is an
+    -- unchecked store, so without this the vector would silently grow and a
+    -- query that raises on every other port would answer here.
+    local size = vec[1]
+    if type(size) == "number" and n >= size then
+      ERR("prolog vector index out of range: a single query may allocate at "
+          .. "most " .. (size - 2) .. " variables (shen.*prolog-memory*)")
+    end
     local np = #pool
     local pv = pool[np]
     if pv ~= nil then pool[np] = nil; pv[3] = n

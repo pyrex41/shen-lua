@@ -200,5 +200,31 @@ do
   check("native prolog engine is the path under test", native, true)
 end
 
+-- The ceiling lives in TWO places, because shen-lua has two Prolog engines
+-- and both allocate their own variables: prolog_engine.lua's newvar for the
+-- native path and prims.lua's shen.newpv for the compiled-KL CPS path.
+-- SHEN_PROLOG_ENGINE=legacy selects the second, so probe it out of process.
+do
+  local root = arg[0]:gsub("test/[^/]*$", "")
+  if root == "" then root = "./" end
+  local prog = [[
+(defprolog ldown
+  0 done <-- !;
+  N R <-- (when (> N 0)) (is M (- N 1)) (ldown M R);)
+(output "SHALLOW=~A|DEEP=~A~%"
+        (trap-error (prolog? (ldown 900 R) (return R)) (/. E caught))
+        (trap-error (prolog? (ldown 1200 R) (return R)) (/. E caught)))]]
+  local f = os.tmpname() .. ".shen"
+  local fh = io.open(f, "w"); fh:write(prog); fh:close()
+  local h = io.popen("SHEN_PROLOG_ENGINE=legacy " .. root .. "bin/shen " ..
+                     f .. " 2>/dev/null", "r")
+  local out = h:read("*a") or ""
+  h:close()
+  os.remove(f)
+  os.remove("./.shen-kernel-cache.bin")
+  check("legacy engine honours the same ceiling",
+        out:match("SHALLOW=%a+|DEEP=%a+"), "SHALLOW=done|DEEP=caught")
+end
+
 print(string.format("prolog_semantics_spec: %d pass, %d fail", pass, fail))
 os.exit(fail == 0 and 0 or 1)
