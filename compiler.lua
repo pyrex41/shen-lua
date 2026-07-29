@@ -297,10 +297,21 @@ end
 
 -- numeric literal needs care: keep integers exact
 -- mtoint: PUC 5.3+ %d-format guard (string.format("%d", n) errors there for
--- an integral float outside int64 range). nil under LuaJIT/5.1: path unchanged.
+-- an integral float outside int64 range). nil under LuaJIT/5.1.
+--
+-- TWO63: the %d path is only sound for integral values that fit in an int64.
+-- LuaJIT/5.1 have no mtoint to fall back on, and there string.format("%d", n)
+-- SATURATES instead of erroring -- 1e300 renders as 9223372036854775807, so
+-- the literal was destroyed in the generated source, before evaluation:
+-- (> 1e300 1e100) compiled to APP(S(">"), 9223372036854775807, ...) => false.
+-- Range-check up front on every host; anything outside int64 falls through to
+-- the round-tripping %.17g form that catom already uses for the same job.
+-- Non-finite values (+-inf, NaN) fail the comparisons and take that same
+-- fall-through path they took before -- unchanged, deliberately out of scope.
 local mtoint = math.tointeger
+local TWO63 = 9223372036854775808.0   -- 2^63, exact as a double
 local function cnum(n)
-  if n == math.floor(n) and n ~= math.huge and n ~= -math.huge then
+  if n == math.floor(n) and n > -TWO63 and n < TWO63 then
     if mtoint then
       local i = mtoint(n)
       if i then return string.format("%d", i) end
