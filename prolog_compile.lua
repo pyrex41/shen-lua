@@ -529,9 +529,14 @@ compile_value = function(ctx, e, env, out, d)
         local op = (nm == "is") and "UNIFY" or (nm == "is!") and "UNIFYOC" or "BIND1"
         return op .. "(" .. x .. ", " .. y .. ", " .. k .. ")"
       elseif nm == "var?" then
+        -- (var? X B L K C): E.g_var takes the uniform goal ABI
+        -- (term, count, cont), so the Key must be passed through — emitting
+        -- GVAR(x, k) put the continuation in the count parameter and left
+        -- cont nil, crashing thawH on every SUCCEEDING varhood test.
         local x = compile_term(ctx, a[1], env, out, d)
+        local nk = compile_value(ctx, a[an - 1], env, out, d)
         local k = compile_cont(ctx, a[an], env, out, d)
-        return "GVAR(" .. x .. ", " .. k .. ")"
+        return "GVAR(" .. x .. ", " .. nk .. ", " .. k .. ")"
       elseif nm == "return" then
         local x = compile_term(ctx, a[1], env, out, d)
         return "MAT(" .. x .. ")"
