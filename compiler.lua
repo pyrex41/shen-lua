@@ -416,17 +416,159 @@ local function try_let_float(form, env)
   return cons(R.intern("let"), cons(x, cons(val, cons(new_call, NIL))))
 end
 
+-- ------------------------------------------------------------------
+-- hd/tl accessor-chain hoisting (pattern-match support).
+--
+-- The KL that Shen's pattern compiler emits for a rule over a nested literal
+-- structure re-derives the full accessor path at EVERY test and in every
+-- result position: (= 97 (hd (hd (hd (hd (tl X)))))), then the same spine one
+-- step deeper for the next test, and so on. Compiled naively that is O(n^2)
+-- generated code, and a single deep chain alone can exceed LuaJIT's parser
+-- nesting budget ("chunk has too many syntax levels"). So at STATEMENT points
+-- inside ctail (if/and/or tests, let values, `return <call>`) we bind each
+-- hd/tl step to a Lua local ONCE and let later chains extend from the cached
+-- prefix: `local p1 = F["tl"](a1); local p2 = F["hd"](p1); ...`.
+--
+-- Safety rules (all enforced below):
+--   * Only chains of non-shadowed `hd`/`tl` applications rooted (transitively)
+--     at an env-bound variable participate. Each step still calls through
+--     F["hd"]/F["tl"], exactly as the inline form did.
+--   * Hoisting happens only while HOIST.pure holds: everything the statement
+--     expression evaluates BEFORE the chain is effect-free (atoms, other
+--     hoisted chains, cons construction, cons?/=/not). The first subexpression
+--     that could observably error or side-effect clears the flag, and later
+--     chains stay inline -- so visible evaluation order never changes.
+--     Hoisted chains are emitted in compile order = left-to-right evaluation
+--     order, so order AMONG chains is preserved too.
+--   * HOIST is nil (and the cache reset) inside anything compiled as a
+--     separate or deferred Lua function -- lambda/freeze bodies, KC bodies,
+--     trap-error closures, do-IIFEs -- so a chain is never evaluated earlier
+--     (or less conditionally) than its source position.
+--   * CCACHE is block-scoped: a branch nested inside `if ... then ... end`
+--     caches into a child scope that is discarded on exit, so a cached local
+--     is only ever referenced from code it dominates.
+--   * Caching does change the NUMBER of F["hd"]/F["tl"] calls executed (each
+--     step runs once per match attempt instead of once per test). hd/tl are
+--     pure structural reads of immutable cons cells, so results -- including
+--     failure behavior -- are identical; this is the same class of tradeoff
+--     as the ARITH2/cons inline fast paths above.
+--   * Locals are the scarce resource (200/function). After CSE_MAX_LOCALS
+--     hoisted locals in one function we spill further steps into a scratch
+--     table PT (cf. try_flatten_call_chain), declared at function top only
+--     when actually used; contexts that cannot declare PT simply stop
+--     hoisting and keep today's inline chains.
+-- ------------------------------------------------------------------
+local CSE_MAX_LOCALS = 100
+local CCACHE = {}   -- chain key -> Lua local/slot name, block-scoped via __index
+local HOIST = nil   -- nil, or { out = {stmt strings}, pure = bool } at a flush site
+local FNL = { np = 0, npt = 0, pt = false, can_pt = false }  -- per-Lua-function
+
+local function new_fnl(can_pt)
+  return { np = 0, npt = 0, pt = false, can_pt = can_pt }
+end
+
+local function child_cache()
+  return setmetatable({}, { __index = CCACHE })
+end
+
+-- Canonical key for a pure accessor chain, or nil if `form` is not one.
+-- Returns key, depth. Depth 0 = bare bound variable.
+local function chain_key(form, env)
+  if is_symbol(form) then
+    local ln = env[form.name]
+    if ln then return ln, 0 end
+    return nil
+  end
+  if not is_cons(form) then return nil end
+  local h = form[1]
+  if not (is_symbol(h) and (h.name == "hd" or h.name == "tl") and not env[h.name]) then
+    return nil
+  end
+  local rest = form[2]
+  if not (is_cons(rest) and rest[2] == NIL) then return nil end
+  local k, d = chain_key(rest[1], env)
+  if not k then return nil end
+  return (h.name == "hd" and "h" or "t") .. k, d + 1
+end
+
+-- Bind one computed step to a fresh local (or PT slot past the local budget).
+-- Returns the reference string, or nil if no slot is available.
+local function chain_slot(expr)
+  if FNL.np < CSE_MAX_LOCALS then
+    FNL.np = FNL.np + 1
+    local ln = gen("p")
+    HOIST.out[#HOIST.out+1] = "local " .. ln .. " = " .. expr .. "; "
+    return ln
+  end
+  if not FNL.can_pt then return nil end
+  FNL.pt = true
+  FNL.npt = FNL.npt + 1
+  local slot = "PT[" .. FNL.npt .. "]"
+  HOIST.out[#HOIST.out+1] = slot .. " = " .. expr .. "; "
+  return slot
+end
+
+local function chain_materialize(form, env)
+  if is_symbol(form) then return env[form.name] end
+  local key = chain_key(form, env)
+  local hit = CCACHE[key]
+  if hit then return hit end
+  local inner = chain_materialize(form[2][1], env)
+  local expr = ftab_ref(form[1].name) .. "(" .. inner .. ")"
+  local name = chain_slot(expr)
+  if not name then return expr end   -- slot budget exhausted: stay inline
+  CCACHE[key] = name
+  return name
+end
+
+local function try_chain(form, env)
+  if not (HOIST and HOIST.pure) then return nil end
+  -- exact-arity F["hd"]/F["tl"] emission below must match what ccall would
+  -- have emitted; bail if someone redefined them with a different arity
+  if C.ARITY["hd"] ~= 1 or C.ARITY["tl"] ~= 1 then return nil end
+  local key, depth = chain_key(form, env)
+  if not key or depth == 0 then return nil end
+  local hit = CCACHE[key]
+  if hit then return hit end
+  if depth < 2 then return nil end   -- single step: not worth a local
+  return chain_materialize(form, env)
+end
+
+-- Heads whose exact-arity application can neither side-effect nor raise, so
+-- evaluating a later hoisted chain ahead of them is unobservable. Everything
+-- else (user calls, arithmetic that can type-error, control-form KC calls,
+-- APP dispatch, un-hoisted hd/tl) clears HOIST.pure.
+local PURE_HEADS = { ["cons?"]=true, ["="]=true, ["cons"]=true, ["not"]=true }
+
+-- Compile `form` as the value expression of a statement being emitted NOW,
+-- with chain hoisting enabled. Returns prefix statements and the expression.
+local function cstmt_expr(form, env)
+  local saved = HOIST
+  HOIST = { out = {}, pure = true }
+  local e = cexpr(form, env)
+  local pre = table.concat(HOIST.out)
+  HOIST = saved
+  return pre, e
+end
+
 -- Flatten a deep right-spine call chain (F1 ... (F2 ... (F3 ... INNER)))
 -- into a sequence of local assignments. Without this, the chained
 -- shen.gc(A, shen.gc(A, shen.gc(A, ...))) calls produced by the Shen Prolog
 -- compiler hit Lua's expression-complexity limit (~200 nested calls).
 -- Only valid in statement (tail) position because we emit `local` bindings.
 local function try_flatten_call_chain(form, env)
+  -- Chain-CSE handles pure hd/tl accessor spines (see block above): it
+  -- budgets locals and spills to PT, whereas a frame here costs one `local c`
+  -- unconditionally -- a ~300-step pattern path would blow the 200-local
+  -- limit. So never treat a pure chain as frames: stop the walk there and
+  -- let it compile as this chain's (or the enclosing call's) value.
+  local chain_ok = C.ARITY["hd"] == 1 and C.ARITY["tl"] == 1
   -- Walk into the last-arg chain, building a list of call frames.
   local frames = {}   -- each: { head_form, prev_args_array }
   local cur = form
   while is_cons(cur) and is_symbol(car(cur)) and not env[car(cur).name]
-        and not SPECIAL_HEADS[car(cur).name] do
+        and not SPECIAL_HEADS[car(cur).name]
+        and not (chain_ok and chain_key(cur, env)) do
     local args_node = cdr(cur)
     if args_node == NIL then break end
     local prev = {}
@@ -510,8 +652,19 @@ local function try_flatten_call_chain(form, env)
     end
     val_form = do_args[#do_args]
   end
+  -- The innermost value is compiled at a statement position of its own, so
+  -- give it a chain-hoist flush site: a pure hd/tl spine terminating the
+  -- frame chain (where the walk above stopped) then binds its steps to
+  -- budgeted locals instead of one giant nested expression. Runtime order is
+  -- unchanged: these prefix statements run after the hoisted frame args
+  -- above, exactly where the inner value was evaluated before.
   local inner_name = gen("c")
-  stmts[#stmts+1] = "local " .. inner_name .. " = " .. cexpr(val_form, env) .. ";"
+  local saved_h = HOIST
+  HOIST = { out = {}, pure = true }
+  local innerc = cexpr(val_form, env)
+  for i = 1, #HOIST.out do stmts[#stmts+1] = HOIST.out[i] end
+  HOIST = saved_h
+  stmts[#stmts+1] = "local " .. inner_name .. " = " .. innerc .. ";"
   -- build each call up to but not including the outermost
   for i=#frames, 2, -1 do
     local frame = frames[i]
@@ -555,6 +708,7 @@ local function try_flatten_call_chain(form, env)
   return table.concat(stmts, " ")
 end
 
+
 -- compile a call (F a1..an) in expression position
 local function ccall(form, env)
   local head = car(form)
@@ -562,6 +716,14 @@ local function ccall(form, env)
   local cargs = {}
   for i=1,#args do cargs[i] = cexpr(args[i], env) end
   local argstr = table.concat(cargs, ", ")
+  -- Chain-hoist purity: this application runs after its args; anything the
+  -- statement evaluates after it may no longer be hoisted ahead of it unless
+  -- the head is known effect-free and non-raising.
+  if HOIST and HOIST.pure then
+    if not (is_symbol(head) and not env[head.name] and PURE_HEADS[head.name]) then
+      HOIST.pure = false
+    end
+  end
 
   if is_symbol(head) and not env[head.name] then
     local name = head.name
@@ -827,6 +989,12 @@ function cexpr(form, env)
     return catom(form, env)
   end
   local head = car(form)
+  -- Pattern-match accessor chains: reuse / bind hd-tl steps as locals when a
+  -- statement-point hoist buffer is active (see the CSE block above ccall).
+  if HOIST then
+    local cn = try_chain(form, env)
+    if cn then return cn end
+  end
   if is_symbol(head) and head.name == "cons" and not env["cons"] then
     local k = try_const(form, env)
     if k then return k end
@@ -876,21 +1044,31 @@ function cexpr(form, env)
         -- so this stays a constant function with no per-call FNEW.
         -- Clear SELF: this body becomes a SEPARATE Lua function (KC[i]), so a
         -- self-call in here is not in impl's tail position and a `goto tco`
-        -- would illegally cross the function boundary.
+        -- would illegally cross the function boundary. Likewise reset the
+        -- chain-hoist state: KC[i] has its own local budget, and locals cached
+        -- in the enclosing function are not in scope here.
         local saved_self = SELF
-        SELF = nil
+        local saved_h, saved_cc, saved_fnl = HOIST, CCACHE, FNL
+        SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true)
         local body_stmts = ctail(form, env)
-        SELF = saved_self
+        if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
+        SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
         local idx = #CTX.cbodies + 1
         CTX.cbodies[idx] = "function(" .. params .. ") " .. body_stmts .. " end"
+        -- The KC call itself may raise or side-effect: later siblings in the
+        -- enclosing statement must not hoist chains ahead of it.
+        if HOIST then HOIST.pure = false end
         return "KC[" .. idx .. "](" .. params .. ")"
       end
       -- No per-defun context (top-level eval chunk): fall back to the IIFE.
       -- (Clear SELF here too: the IIFE is a separate function.)
       local saved_self = SELF
-      SELF = nil
+      local saved_h, saved_cc, saved_fnl = HOIST, CCACHE, FNL
+      SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true)
       local body_stmts = ctail(form, env)
-      SELF = saved_self
+      if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
+      SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
+      if HOIST then HOIST.pure = false end
       return "(function() " .. body_stmts .. " end)()"
     end
     -- For ordinary calls, opportunistically let-float a trailing let argument
@@ -902,7 +1080,11 @@ function cexpr(form, env)
       local body = car(cdr(cdr(form)))
       local ln = gen("v")
       local e2 = extend(env, v.name, ln)
-      return "MKFUN(1, function(" .. ln .. ") return " .. cexpr(body, e2) .. " end)"
+      -- Deferred body: nothing inside may be hoisted to the creation site.
+      local saved_h = HOIST; HOIST = nil
+      local bodyc = cexpr(body, e2)
+      HOIST = saved_h
+      return "MKFUN(1, function(" .. ln .. ") return " .. bodyc .. " end)"
     elseif op == "freeze" then
       local body = car(cdr(form))
       if CTX then
@@ -917,14 +1099,20 @@ function cexpr(form, env)
         local lnames = {}
         for kname in pairs(fv) do lnames[#lnames+1] = env[kname] end
         table.sort(lnames)  -- stable order for caller / body
+        -- Deferred body: nothing inside may be hoisted to the creation site.
+        local saved_h = HOIST; HOIST = nil
         local body_str = cexpr(body, env)
+        HOIST = saved_h
         local idx = #CTX.cbodies + 1
         CTX.cbodies[idx] = "function(" .. table.concat(lnames, ", ") .. ") return "
                            .. body_str .. " end"
         local call_args = (#lnames == 0) and "" or (", " .. table.concat(lnames, ", "))
         return "BIND(KC[" .. idx .. "]" .. call_args .. ")"
       end
-      return "MKFUN(0, function() return " .. cexpr(body, env) .. " end)"
+      local saved_h = HOIST; HOIST = nil
+      local bodyc = cexpr(body, env)
+      HOIST = saved_h
+      return "MKFUN(0, function() return " .. bodyc .. " end)"
     elseif op == "defun" then
       error("defun in expression position")
     elseif op == "type" then
@@ -936,6 +1124,57 @@ function cexpr(form, env)
   else
     return ccall(form, env)
   end
+end
+
+-- ------------------------------------------------------------------
+-- Statement-nesting depth ctail will emit for `form`, used to pick which
+-- branch of an `if` gets nested inside the guard block (the other is emitted
+-- FLAT after it -- see the if case in ctail below). Kernel pattern-match code
+-- chains one (if TEST ...) per pattern element down the then-spine (and one
+-- (and ...) per test inside the KC'd guard), so nesting the shallower branch
+-- keeps total statement depth roughly the pattern's TREE depth instead of its
+-- element COUNT -- which is what used to blow LuaJIT's ~200 "syntax levels".
+-- This is only a heuristic for choosing the flat branch; either choice is
+-- semantically identical.
+-- ------------------------------------------------------------------
+local function ctail_depth(form, env)
+  if not is_cons(form) then return 0 end
+  local h = form[1]
+  if not (is_symbol(h) and not env[h.name]) then return 0 end
+  local op = h.name
+  if op == "if" then
+    local th = car(cdr(cdr(form)))
+    local rest = cdr(cdr(cdr(form)))
+    local el = is_cons(rest) and car(rest) or nil
+    local dt = ctail_depth(th, env)
+    local de = el and ctail_depth(el, env) or 0
+    if de <= dt then
+      return math.max(dt, 1 + de)   -- else nested, then flat
+    end
+    return math.max(de, 1 + dt)     -- then nested, else flat
+  elseif op == "and" or op == "or" then
+    local b = cdr(cdr(form))
+    return is_cons(b) and ctail_depth(car(b), env) or 0
+  elseif op == "let" then
+    local b = cdr(cdr(cdr(form)))
+    return is_cons(b) and ctail_depth(car(b), env) or 0
+  elseif op == "do" then
+    local forms = to_array(cdr(form))
+    if #forms == 0 then return 0 end
+    return ctail_depth(forms[#forms], env)
+  elseif op == "cond" then
+    local m = 0
+    local cur = cdr(form)
+    while is_cons(cur) do
+      local d = ctail_depth(car(cdr(cur[1])), env)
+      if d > m then m = d end
+      cur = cur[2]
+    end
+    return 1 + m
+  elseif op == "type" then
+    return ctail_depth(car(cdr(form)), env)
+  end
+  return 0
 end
 
 -- ------------------------------------------------------------------
@@ -951,14 +1190,36 @@ function ctail(form, env)
     if op == "if" then
       local test = car(cdr(form))
       local th   = car(cdr(cdr(form)))
-      local el   = car(cdr(cdr(cdr(form)))) -- may be missing
-      local s = "if (" .. cexpr(test, env) .. ") then " .. ctail(th, env)
-      if is_cons(cdr(cdr(cdr(form)))) then
-        s = s .. " else " .. ctail(el, env) .. " end"
+      local rest = cdr(cdr(cdr(form)))
+      local el   = is_cons(rest) and car(rest) or nil -- may be missing
+      -- FLAT emission: nest only the shallower branch inside the guard block
+      -- and emit the deeper branch as a plain statement sequence AFTER it.
+      -- Every ctail-compiled branch ends in a control transfer (return / goto
+      -- tco), so control reaches the flat branch exactly when the nested one
+      -- was not taken -- semantics identical to the old fully-nested
+      -- `if ... then ... else ... end`, but a then-spine of N pattern tests
+      -- now costs O(1) nesting instead of N (LuaJIT parser rejects ~200).
+      local pre, testc = cstmt_expr(test, env)
+      local dt = ctail_depth(th, env)
+      local de = el and ctail_depth(el, env) or 0
+      if de <= dt then
+        -- nest else, flatten then (guard inverted; `not` exactly flips Lua
+        -- truthiness, which is what the old `if (test)` dispatched on)
+        local saved_cc = CCACHE
+        CCACHE = child_cache()
+        local els = el and ctail(el, env) or "return false"
+        CCACHE = saved_cc
+        return pre .. "if not (" .. testc .. ") then " .. els .. " end "
+               .. ctail(th, env)
       else
-        s = s .. " else return false end"
+        -- nest then, flatten else
+        local saved_cc = CCACHE
+        CCACHE = child_cache()
+        local ths = ctail(th, env)
+        CCACHE = saved_cc
+        return pre .. "if (" .. testc .. ") then " .. ths .. " end "
+               .. ctail(el, env)
       end
-      return s
     elseif op == "cond" then
       -- (cond (test res) ... )
       local clauses = to_array(cdr(form))
@@ -967,10 +1228,15 @@ function ctail(form, env)
         local cl = clauses[i]
         local test = car(cl)
         local res  = car(cdr(cl))
+        -- each result sits inside its own then-block: block-scope its chain cache
+        local saved_cc = CCACHE
+        CCACHE = child_cache()
+        local resc = ctail(res, env)
+        CCACHE = saved_cc
         if i == 1 then
-          parts[#parts+1] = "if (" .. cexpr(test, env) .. ") then " .. ctail(res, env)
+          parts[#parts+1] = "if (" .. cexpr(test, env) .. ") then " .. resc
         else
-          parts[#parts+1] = " elseif (" .. cexpr(test, env) .. ") then " .. ctail(res, env)
+          parts[#parts+1] = " elseif (" .. cexpr(test, env) .. ") then " .. resc
         end
       end
       parts[#parts+1] = " else return ERR(\"cond failure\") end"
@@ -980,9 +1246,9 @@ function ctail(form, env)
       local val = car(cdr(cdr(form)))
       local body= car(cdr(cdr(cdr(form))))
       local ln = gen("v")
-      local valc = cexpr(val, env)
+      local pre, valc = cstmt_expr(val, env)
       local e2 = extend(env, v.name, ln)
-      return "local " .. ln .. " = " .. valc .. "; " .. ctail(body, e2)
+      return pre .. "local " .. ln .. " = " .. valc .. "; " .. ctail(body, e2)
     elseif op == "do" then
       local forms = to_array(cdr(form))
       local s = {}
@@ -998,11 +1264,17 @@ function ctail(form, env)
       s[#s+1] = ctail(forms[#forms], env)
       return table.concat(s, " ")
     elseif op == "and" then
+      -- FLAT emission (see the `if` case): the kernel's pattern-match guards
+      -- are right-nested (and t1 (and t2 ...)) chains; nesting the second arg
+      -- inside `then` cost one syntax level per test. The early-exit form is
+      -- semantically identical and costs O(1) nesting per link.
       local a = car(cdr(form)); local b = car(cdr(cdr(form)))
-      return "if (" .. cexpr(a, env) .. ") then " .. ctail(b, env) .. " else return false end"
+      local pre, ac = cstmt_expr(a, env)
+      return pre .. "if not (" .. ac .. ") then return false end " .. ctail(b, env)
     elseif op == "or" then
       local a = car(cdr(form)); local b = car(cdr(cdr(form)))
-      return "if (" .. cexpr(a, env) .. ") then return true else " .. ctail(b, env) .. " end"
+      local pre, ac = cstmt_expr(a, env)
+      return pre .. "if (" .. ac .. ") then return true end " .. ctail(b, env)
     elseif op == "trap-error" then
       local expr = car(cdr(form))
       local handler = car(cdr(cdr(form)))
@@ -1020,18 +1292,43 @@ function ctail(form, env)
       -- try_flatten_call_chain BEFORE try_self_tail: a >=16-deep last-arg
       -- chain must still flatten (parser nesting limit); it then keeps an
       -- ordinary tail call for the outer frame, which is always correct.
-      local flat = try_flatten_call_chain(form, env)
-      if flat then return flat end
+      -- EXCEPT for pure hd/tl accessor chains: flatten spends one Lua local
+      -- per frame (a ~300-step pattern path would blow the 200-local limit),
+      -- while the chain-CSE flush site below both budgets its locals (PT
+      -- spill) and caches the steps for reuse by sibling branches.
+      if not (chain_key(form, env)
+              and C.ARITY["hd"] == 1 and C.ARITY["tl"] == 1) then
+        local flat = try_flatten_call_chain(form, env)
+        if flat then return flat end
+      end
+      -- Both the self-tail assignment's RHS list and an ordinary tail call's
+      -- arguments evaluate left-to-right at this statement point, so give
+      -- them a chain-hoist flush site too (deep accessor chains in recursive
+      -- rule bodies would otherwise still nest past the parser limit).
+      local saved_h = HOIST
+      HOIST = { out = {}, pure = true }
       local selfjump = try_self_tail(form, env)
-      if selfjump then return selfjump end
-      return "return " .. ccall(form, env)
+      if selfjump then
+        local pre = table.concat(HOIST.out)
+        HOIST = saved_h
+        return pre .. selfjump
+      end
+      local callc = ccall(form, env)
+      local pre = table.concat(HOIST.out)
+      HOIST = saved_h
+      return pre .. "return " .. callc
     end
   else
     local floated = try_let_float(form, env)
     if floated then return ctail(floated, env) end
     local flat = try_flatten_call_chain(form, env)
     if flat then return flat end
-    return "return " .. ccall(form, env)
+    local saved_h = HOIST
+    HOIST = { out = {}, pure = true }
+    local callc = ccall(form, env)
+    local pre = table.concat(HOIST.out)
+    HOIST = saved_h
+    return pre .. "return " .. callc
   end
 end
 
@@ -1053,6 +1350,10 @@ local function cdefun(form)
   C.ARITY[name] = #params
   local saved = CTX
   CTX = new_ctx()
+  -- fresh chain-hoist state for the impl function (see CSE block above ccall)
+  local saved_fnl, saved_cc = FNL, CCACHE
+  FNL = new_fnl(true)
+  CCACHE = {}
   -- Self-tail-call -> loop lowering. Eligible unless:
   --   * the function is not PURELY tail-recursive -- some self-reference is a
   --     non-tail call, a partial application, or sits in a tail self-call's
@@ -1084,8 +1385,21 @@ local function cdefun(form)
     -- params already reassigned; all other paths `return` out. let-locals are
     -- declared inside the block, so closures over them are closed at each
     -- iteration boundary (fresh per iteration).
-    body_src = "while true do " .. body_src .. " ::tco:: end"
+    -- The extra inner `do ... end` is required by Lua's grammar: the flat
+    -- statement sequences ctail now emits can legitimately end in a bare
+    -- `return`, and `return` must be the LAST statement of its block -- the
+    -- ::tco:: label may not follow it directly. Closing the inner block first
+    -- keeps every return legal; `goto tco` still reaches the label (jumping
+    -- to a label at the end of an enclosing block is the sanctioned
+    -- "continue" idiom).
+    body_src = "while true do do " .. body_src .. " end ::tco:: end"
   end
+  -- chain-hoist spill table (only when the local budget was exceeded);
+  -- declared outside the tco loop: every PT slot is written before it is read
+  -- on every path of every iteration, so one table per call suffices.
+  if FNL.pt then body_src = "local PT = {}; " .. body_src end
+  FNL = saved_fnl
+  CCACHE = saved_cc
   -- Hoisted (freeze ...) bodies AND value-position control-form bodies both go
   -- into a single chunk-scope KC table, built ONCE at load -- NOT inside impl.
   -- Each KC entry is a constant function abstracting its free vars as params
