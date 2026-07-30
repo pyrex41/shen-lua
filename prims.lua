@@ -883,7 +883,117 @@ function P.install_native_stdlib()
     return orig_fn(v)
   end
 
+  -- shen.<singleline> / shen.<multiline> (reader.kl): comment scanners.
+  --
+  -- The kernel KL recurses once per comment CHARACTER without a tail call
+  -- (<shortnatters>/<returns> inside <singleline>, <longnatter> inside
+  -- <multiline>), so a comment past ~7 KB overflows the Lua stack on LuaJIT
+  -- (~65500 fixed slots; ports with growable stacks read the same input
+  -- fine) -- and read-file's trap-error rebrands the overflow as
+  -- "reader error near here:". These native scanners are iterative, so the
+  -- readable comment size becomes memory-bound. Grammar, replicated exactly:
+  --
+  --   <singleline>  ::= \ \ <shortnatters> <returns>
+  --   <shortnatters>::= {c | not return?(c)}*     (greedy, may be empty)
+  --   <returns>     ::= {c | return?(c)}+         (greedy, at least one)
+  --   return? c     ::= c in {9, 10, 13}
+  --   <multiline>   ::= \ * <longnatter>
+  --   <longnatter>  ::= <comment> <longnatter> | * \ | any-char <longnatter>
+  --
+  -- Success returns (shen.comb Rest shen.skip) = (cons Rest (cons skip ()));
+  -- failure returns (fail), exactly as the KL. All input inspection is
+  -- cons? + head equality, so improper or non-numeric "byte" lists take the
+  -- same failure paths the KL takes.
+  --
+  -- SUBTLETY (backtracking): <longnatter>'s first alternative is
+  -- (<comment> then RECURSE); if the comment parses but the CONTINUATION
+  -- then fails, the KL falls through to the skip-one-char alternative at the
+  -- ORIGINAL position -- e.g. in "\* a \* b *\ x" the inner "\*" is demoted
+  -- to plain text and the outer comment closes at the single "*\". A linear
+  -- scan with a nesting counter gets that wrong, so <longnatter> is computed
+  -- as a right-to-left dynamic program over positions: L[i] = rest position
+  -- after the matching close when scanning from i (or fail). Each L[i]
+  -- depends only on L[j], j > i, so one backward pass reproduces the KL's
+  -- ordered choice exactly, in O(n) space and near-linear time, with no
+  -- recursion at all (comment NESTING costs zero stack here too).
+  local skip_sym = intern("shen.skip")
+  local function comb_skip(rest) return cons(rest, cons(skip_sym, NIL)) end
+  local function is_ret(c) return c == 9 or c == 10 or c == 13 end
+
+  -- consume `\ \ <shortnatters> <returns>` from v; the remaining list, or nil
+  local function scan_singleline(v)
+    if not (is_cons(v) and v[1] == 92) then return nil end
+    v = v[2]
+    if not (is_cons(v) and v[1] == 92) then return nil end
+    v = v[2]
+    while is_cons(v) and not is_ret(v[1]) do v = v[2] end   -- <shortnatters>
+    if not (is_cons(v) and is_ret(v[1])) then return nil end -- <returns>: >= 1
+    while is_cons(v) and is_ret(v[1]) do v = v[2] end
+    return v
+  end
+
+  -- <longnatter> from v; the remaining list after the closing `*\`, or nil
+  local function scan_longnatter(v)
+    local cells = {}
+    local n = 0
+    while is_cons(v) do n = n + 1; cells[n] = v; v = v[2] end
+    local term = v                    -- NIL, or an improper tail
+    local L = {}                      -- position 1..n+1, or false = fail
+    L[n + 1] = false                  -- out of input: every alternative fails
+    -- end position of a <singleline> starting at array index i, or nil
+    local function sl_end(i)
+      if not (cells[i + 1] and cells[i + 1][1] == 92) then return nil end
+      local j = i + 2
+      while j <= n and not is_ret(cells[j][1]) do j = j + 1 end
+      if j > n then return nil end
+      while j <= n and is_ret(cells[j][1]) do j = j + 1 end
+      return j
+    end
+    for i = n, 1, -1 do
+      local res = false
+      local b = cells[i][1]
+      if b == 92 then
+        local nx = cells[i + 1] and cells[i + 1][1]
+        if nx == 92 then
+          -- alt 1 as <comment>/<singleline>, then continue
+          local j = sl_end(i)
+          if j and L[j] then res = L[j] end
+        elseif nx == 42 then
+          -- alt 1 as <comment>/<multiline>: inner close, then continue
+          local m = L[i + 2]
+          if m and L[m] then res = L[m] end
+        end
+        if not res then res = L[i + 1] end  -- alt 3: plain character
+      elseif b == 42 and cells[i + 1] and cells[i + 1][1] == 92 then
+        res = i + 2                          -- alt 2: `* \` closes
+      else
+        res = L[i + 1]                       -- alt 3: plain character
+      end
+      L[i] = res
+    end
+    local r = L[1]
+    if not r then return nil end
+    if r == n + 1 then return term end
+    return cells[r]
+  end
+
+  local function singleline_p(v)
+    local rest = scan_singleline(v)
+    if rest == nil then return fail_sym end
+    return comb_skip(rest)
+  end
+  local function multiline_p(v)
+    if not (is_cons(v) and v[1] == 92) then return fail_sym end
+    local v2 = v[2]
+    if not (is_cons(v2) and v2[1] == 42) then return fail_sym end
+    local rest = scan_longnatter(v2[2])
+    if rest == nil then return fail_sym end
+    return comb_skip(rest)
+  end
+
   local function install(name, fn, arity) F[name] = fn; FA[fn] = arity end
+  install("shen.<singleline>", singleline_p, 1)
+  install("shen.<multiline>", multiline_p, 1)
   install("fn", fn_fast, 1)
   install("hash", hash, 2)
   install("pr", pr, 2)
