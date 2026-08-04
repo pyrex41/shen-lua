@@ -162,7 +162,7 @@ at boot and degrades gracefully:
 Expect roughly **2x slower** than LuaJIT on the suite (legacy engine, no
 caches) — correct, but LuaJIT remains the recommended runtime.
 
-### aarch64 boot crash on old LuaJIT (`SHEN_JIT=off`)
+### aarch64 boot crash on old LuaJIT
 
 On **aarch64**, an **old LuaJIT** (the 2.1.0-beta3 era, still shipped by some
 distros and older OpenResty images) intermittently SIGSEGVs while compiling the
@@ -179,12 +179,13 @@ to run a **current LuaJIT 2.1 rolling release**: the same 50/50-crashing kernel
 boots cleanly (0 crashes) under today's `LuaJIT 2.1.ROLLING`. If you can update
 LuaJIT, do that.
 
-If you are pinned to an old LuaJIT, set **`SHEN_JIT=off`** to boot with the JIT
-disabled (`jit.off()`, the in-library equivalent of `luajit -j off`), which
-makes boot reproducibly crash-free. Embedders can equivalently pass
-`shen.boot{jit=false}`. Note this is **distinct from `SHEN_JIT_OPT=off`**, which
-only restores LuaJIT's default `jit.opt` limits and leaves the JIT *on* — it
-does not prevent the crash.
+If you are pinned to an old LuaJIT, shen-lua automatically disables the JIT for
+the detected arm64/beta combination. Set **`SHEN_JIT=off`** to request this
+explicitly (the in-library equivalent of `luajit -j off`), or
+**`SHEN_JIT=on`** only after verifying a patched build. Embedders can
+equivalently pass `shen.boot{jit=false}`. Note this is **distinct from
+`SHEN_JIT_OPT=off`**, which only restores LuaJIT's default `jit.opt` limits and
+leaves the JIT *on* — it does not prevent the crash.
 
 ## Installation & embedding
 

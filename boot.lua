@@ -37,18 +37,17 @@ do
   else
     local jit_ok, jit = pcall(require, "jit")
     if jit_ok and jit then
-      -- One-time heads-up on the known-bad combo (issue #43): a beta-versioned
-      -- LuaJIT on arm64 mis-compiles the boot traces and can SIGSEGV. Only
-      -- fires when the JIT is left on (SHEN_JIT neither off nor an explicit on)
-      -- on that exact combo; a current rolling LuaJIT reports "2.1.ROLLING"
-      -- (no "beta") and never trips it. Set SHEN_JIT=on to acknowledge and
-      -- silence, or SHEN_JIT=off to mitigate.
+      -- The beta arm64 backend is known to mis-compile a boot trace and can
+      -- SIGSEGV (issue #43). Disable it by default on that exact combination;
+      -- this keeps old distro/OpenResty LuaJIT builds crash-free while leaving
+      -- current rolling builds unchanged. SHEN_JIT=on is an explicit opt-in
+      -- for embedders that have verified their LuaJIT build.
       if jit.arch == "arm64" and tostring(jit.version):find("beta", 1, true)
          and os.getenv("SHEN_JIT") ~= "on" then
-        io.stderr:write("shen-lua: warning: " .. tostring(jit.version)
-          .. " on arm64 has a JIT codegen bug that can SIGSEGV during boot"
-          .. " (issue #43). Upgrade to a current LuaJIT 2.1 rolling release,"
-          .. " or set SHEN_JIT=off.\n")
+        disable_jit()
+        io.stderr:write("shen-lua: disabling JIT for " .. tostring(jit.version)
+          .. " on arm64 (known boot SIGSEGV; issue #43). Upgrade LuaJIT or"
+          .. " set SHEN_JIT=on to override.\n")
       end
       if jit.opt and os.getenv("SHEN_JIT_OPT") ~= "off" then
         pcall(jit.opt.start,
