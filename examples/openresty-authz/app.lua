@@ -118,6 +118,19 @@ local M = { dispatch = dispatch, to_val = to_val, from_val = from_val,
 function M.handle()
   local method = ngx.req.get_method()
   local path   = ngx.var.uri
+  -- ext_authz gateway checks (see examples/envoy/): Envoy forwards the edge
+  -- request as "<original method> /authz<original path>" plus its authorization
+  -- header. No body is read — the check decides on method + path + token alone,
+  -- so Envoy never has to buffer request bodies for authorization.
+  if path:sub(1, 7) == "/authz/" then
+    local auth_hdr = ngx.req.get_headers()["authorization"] or ""
+    local token    = auth_hdr:match("^[Bb]earer%s+(.*)$") or auth_hdr
+    local status, body = dispatch("CHECK", path:sub(7), { token = token, method = method })
+    ngx.status = status
+    ngx.header.content_type = "application/json"
+    ngx.say(cjson.encode(body))
+    return
+  end
   local decoded
   if method == "POST" or method == "PUT" then
     ngx.req.read_body()

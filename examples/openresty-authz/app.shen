@@ -188,14 +188,45 @@
                 (freeze [200 [obj [["log" [arr (map (function logrow->val) (host-audit))]]]]]))
   _ -> (bad-body))
 
+\\ -- ext_authz gateway check (see examples/envoy/) -----------------------------
+\\ Envoy's ext_authz filter forwards each edge request — original method, path
+\\ (prefixed /authz), and authorization header — to this app BEFORE routing it
+\\ upstream. The glue (app.lua) turns that into
+\\   (route "CHECK" Path [obj [["token" ...] ["method" ...]]])
+\\ and the SAME authorize-* gate decides, so edge decisions run the same proof
+\\ chain and land in the same durable audit log as direct API calls. An
+\\ unmapped path gets resource "" -> owner tenant "" -> denied "unknown
+\\ resource": the gateway fails closed.
+
+\\ which protected resource does an upstream path correspond to?
+(define resource-for
+  "/api/messages" -> "guestbook"
+  _ -> "")
+
+(define read-method?
+  M -> (element? M ["GET" "HEAD" "OPTIONS"]))
+
+(define do-check
+  Path [obj Es] -> (respond-check
+                     (if (read-method? (sfield "method" Es))
+                         (authorize-read  (sfield "token" Es) (resource-for Path))
+                         (authorize-write (sfield "token" Es) (resource-for Path))))
+  _ _ -> (bad-body))
+
+\\ status and body both come from the typed core, each total over `decision`;
+\\ check-response structurally cannot include document content.
+(define respond-check
+  D -> [(decision-status D) (check-response D)])
+
 \\ -- the router ---------------------------------------------------------------
 \\ Each handler validates its own body shape (an [obj ...] or a 400), so a
 \\ bodyless POST to a real route is a 400, not a 404.
 (define route
-  "POST" "/api/read"          B -> (do-read B)
-  "POST" "/api/write"         B -> (do-write B)
-  "POST" "/api/admin/grant"   B -> (do-grant B)
-  "POST" "/api/admin/revoke"  B -> (do-revoke B)
-  "POST" "/api/admin/create"  B -> (do-create B)
-  "POST" "/api/admin/audit"   B -> (do-audit B)
+  "POST"  "/api/read"          B -> (do-read B)
+  "POST"  "/api/write"         B -> (do-write B)
+  "POST"  "/api/admin/grant"   B -> (do-grant B)
+  "POST"  "/api/admin/revoke"  B -> (do-revoke B)
+  "POST"  "/api/admin/create"  B -> (do-create B)
+  "POST"  "/api/admin/audit"   B -> (do-audit B)
+  "CHECK" Path                 B -> (do-check Path B)
   _ _ _ -> [404 [obj [["error" [s "not found"]]]]])

@@ -1,0 +1,103 @@
+# examples/envoy/envoy.yaml — Envoy at the edge, in front of two Shen services.
+#
+# Run FROM THE REPO ROOT (the Lua filter resolves shen-lua relative to itself,
+# but the filename below is cwd-relative):
+#
+#     envoy -c examples/envoy/envoy.yaml --concurrency 2
+#
+# with the two OpenResty upstreams running (see README.md):
+#   127.0.0.1:8080  the guestbook  (examples/openresty, unchanged)
+#   127.0.0.1:8081  the authz app  (examples/openresty-authz via authz.conf)
+#
+# The HTTP filter chain, in order:
+#   1. ext_authz  — every /api/* request is sent (method + path + authorization
+#                   header, no body) to the authz app's /authz/* endpoint. The
+#                   Shen Prolog proof chain decides; 200 allows, anything else
+#                   is returned to the client verbatim (the discharge report).
+#   2. lua        — filter.lua boots shen-lua ONCE PER WORKER THREAD and runs
+#                   the guestbook's typed rules.shen on POST bodies: malformed
+#                   requests get their 400 at the edge, with the same typed
+#                   error strings the browser and the origin produce.
+#   3. router     — what survives both gates reaches the guestbook.
+#
+# --concurrency 2 keeps the demo light: each Envoy worker thread has its own
+# Lua state, so each boots its own Shen kernel (~1 s the very first run, tens
+# of ms once shen-lua's bytecode cache exists in the cwd).
+
+static_resources:
+  listeners:
+  - name: edge
+    address:
+      socket_address: { address: 127.0.0.1, port_value: 10000 }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: shen_edge
+          route_config:
+            name: local_routes
+            virtual_hosts:
+            - name: app
+              domains: ["*"]
+              routes:
+              # The API: both gates on, then the guestbook.
+              - match: { prefix: "/api/" }
+                route: { cluster: guestbook }
+              # Everything else (the front-end HTML + the shaken browser
+              # validator) is static content: both gates off for this route.
+              - match: { prefix: "/" }
+                route: { cluster: guestbook }
+                typed_per_filter_config:
+                  envoy.filters.http.ext_authz:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                    disabled: true
+                  envoy.filters.http.lua:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
+                    disabled: true
+          http_filters:
+          - name: envoy.filters.http.ext_authz
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+              transport_api_version: V3
+              # Fail closed: if the authz app is down, deny (403), never allow.
+              failure_mode_allow: false
+              http_service:
+                server_uri:
+                  uri: http://127.0.0.1:8081
+                  cluster: authz
+                  timeout: 1s
+                # The check request is "<original method> /authz<original path>"
+                # + the authorization header (forwarded by default, along with
+                # Host/Method/Path/Content-Length). No request body is sent.
+                path_prefix: "/authz"
+          - name: envoy.filters.http.lua
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              default_source_code:
+                filename: examples/envoy/filter.lua
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+  - name: guestbook
+    type: STATIC
+    connect_timeout: 1s
+    load_assignment:
+      cluster_name: guestbook
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address: { address: 127.0.0.1, port_value: 8080 }
+  - name: authz
+    type: STATIC
+    connect_timeout: 1s
+    load_assignment:
+      cluster_name: authz
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address: { address: 127.0.0.1, port_value: 8081 }

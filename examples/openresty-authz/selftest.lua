@@ -131,6 +131,16 @@ local function run_scenario(title, open_store, make_auth)
   expect("bodyless POST -> 400",     400, "POST", "/api/read")
   expect("audit needs admin -> 403", 403, "POST", "/api/admin/audit", { token = "tok-alice" })
 
+  print("\n== ext_authz gateway checks (the Envoy edge — see examples/envoy) ==")
+  -- (route "CHECK" Path Body) is what app.lua's glue dispatches when Envoy's
+  -- ext_authz filter forwards an edge request as "<method> /authz<path>".
+  expect("create acme/guestbook",       200, "POST",  "/api/admin/create",
+         { token = "tok-admin", tenant = "acme", resource = "guestbook", content = "guestbook access marker" })
+  expect("edge GET by alice granted",   200, "CHECK", "/api/messages", { token = "tok-alice", method = "GET" })
+  expect("edge POST by bob needs editor",403,"CHECK", "/api/messages", { token = "tok-bob",   method = "POST" })
+  expect("edge unmapped path fails closed",403,"CHECK","/api/nope",    { token = "tok-alice", method = "GET" })
+  expect("bodyless CHECK -> 400",       400, "CHECK", "/api/messages")
+
   print("\n== durable execution: simulate a restart (reopen + replay the log) ==")
   local seq_before = s.seq()
   local s2 = open_store()             -- brand-new store object, same durable log
