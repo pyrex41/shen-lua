@@ -137,8 +137,9 @@ marshaling rules. (The browser does the same marshaling in JS — see
 - **Kernel state is per worker.** Globals don't cross workers — use
   `lua_shared_dict`, Redis, or a DB for shared state (storage here is a shared
   dict, so it's visible to every worker).
-- **The bytecode cache** (`.shen-kernel-cache.bin`) is written in the worker's
-  cwd (the nginx prefix) on first boot; it's gitignored.
+- **The bytecode cache** (`.shen-kernel-cache.<build>.bin`, one per exact
+  LuaJIT build) is written in the worker's cwd (the nginx prefix) on first
+  boot; it's gitignored.
 
 ## The front end: Shen in the browser, tree-shaken
 

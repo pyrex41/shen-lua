@@ -244,3 +244,15 @@ curl -s localhost:8080/api/admin/audit -d '{"token":"tok-admin"}'
 - **Never use Shen's blocking file I/O under nginx.** The file backend is for
   the off-nginx demo; under OpenResty use the lmdb backend (or reach a DB via
   the non-blocking cosocket libraries), exactly as the guestbook README warns.
+
+## This app as a fleet-wide gate: Envoy `ext_authz`
+
+The app also speaks Envoy's [`ext_authz`](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter)
+protocol: Envoy forwards each edge request as `<method> /authz<path>` plus its
+`authorization` header, the glue dispatches `(route "CHECK" Path ...)`, and the
+**same** `authorize-*` gate decides — so edge decisions run the same proof
+chain and land in the same durable audit log as direct API calls, and every
+service behind Envoy gets this authorization without embedding anything. The
+response body is `check-response` in `authz.shen`: total over `decision` and
+structurally unable to include document content, so the gateway cannot leak.
+See [`examples/envoy`](../envoy) for the full three-layer setup.

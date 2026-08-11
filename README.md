@@ -123,8 +123,11 @@ Two caches make warm starts near-instant (both content-keyed, both safe to
 delete at any time):
 
 * **Kernel bytecode cache** — the compiled kernel is `string.dump`ed after the
-  first boot (`.shen-kernel-cache.bin`); warm boots load it in **~30 ms**
-  instead of recompiling (~1 s).
+  first boot (`.shen-kernel-cache.<build>.bin`, one file per exact Lua build,
+  since bytecode is not portable across builds — so e.g. your `luajit` and an
+  embedded OpenResty/Envoy LuaJIT each keep their own warm cache instead of
+  invalidating each other's); warm boots load it in **~30 ms** instead of
+  recompiling (~1 s).
 * **User fasl cache** — `(load "prog.shen")` records its compiled chunks and
   replays them on later runs, skipping the reader, macroexpansion *and
   typechecking* (SBCL-fasl semantics: it typechecked when it compiled).
@@ -309,6 +312,7 @@ browser. One `rules.shen`, two runtimes, no client/server drift. See its
 | [`examples/pcr/`](examples/pcr/) | **proof-carrying requests over live facts**: the client carries a proof term, the OpenResty gate *checks* it — never searches — against a versioned fact store consulted at proof time, so revoking one fact makes the same proof bytes fail on the next request while delegation chains stay composable and every allow logs its justification ([README](examples/pcr/README.md)) |
 | [`examples/openresty/`](examples/openresty/) | a **complete web app in Shen on OpenResty** (nginx + LuaJIT): typed request validators + a Shen router behind a JSON API, with a front end that runs the **same** typed rules in the browser — Ratatoskr-shaken and ShenScript-compiled to a ~140 KB module. One `rules.shen`, validated client- and server-side. Runs standalone (`luajit examples/openresty/selftest.lua`) or under `openresty` ([README](examples/openresty/README.md)) |
 | [`examples/openresty-authz/`](examples/openresty-authz/) | durable multi-tenant **authorization**: the policy as a Prolog proof chain (`token → user → tenant → resource`), a typed `decision` witness that gates every response, and an event-sourced store (file + `lua-resty-lmdb`) whose append-only log makes decisions durable and auditable ([README](examples/openresty-authz/README.md)) |
+| [`examples/envoy/`](examples/envoy/) | **Shen at the edge**: Envoy fronting both apps above — `ext_authz` runs every request through the authz proof chain (edge decisions durably audited), and an Envoy **Lua filter** runs the same typed `rules.shen` inside the proxy, so malformed requests get their typed 400 before costing an upstream hop ([README](examples/envoy/README.md)) |
 
 ## Certification / Testing
 

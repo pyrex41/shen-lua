@@ -53,6 +53,35 @@ do
         pcall(jit.opt.start,
           "sizemcode=2048", "maxmcode=131072", "maxtrace=8000", "maxside=400")
       end
+      -- Some hosts leave the JIT nominally ON but deny the process executable
+      -- trace memory (issue #55): macOS hardened-runtime binaries embedding
+      -- LuaJIT (e.g. Envoy's Lua filter — no JIT entitlement) report
+      -- jit.status() == true, yet every trace attempt aborts with "failed to
+      -- allocate mcode memory" and is re-attempted on the next hot path.
+      -- Measured in Envoy 1.39 on an arm64 Mac: a hot loop ran ~550x slower
+      -- than plain interpretation and kernel boot took 40-66 s (vs ~3 s
+      -- interpreted). Detect it directly — compile one throwaway hot loop and
+      -- watch for a trace "stop" event — and fall back to the interpreter.
+      -- SHEN_JIT=on skips the probe (explicit opt-in for verified hosts).
+      if os.getenv("SHEN_JIT") ~= "on" and jit.status and jit.status()
+         and jit.attach then
+        local compiled = false
+        local watcher = function(what)
+          if what == "stop" then compiled = true end
+        end
+        if pcall(jit.attach, watcher, "trace") then
+          local mk = loadstring or load
+          local probe = mk("local s = 0 for i = 1, 400 do s = s + i end return s")
+          if probe then for _ = 1, 3 do probe() end end
+          pcall(jit.attach, watcher)   -- detach
+          if not compiled then
+            disable_jit()
+            io.stderr:write("shen-lua: the JIT reports enabled but compiled no"
+              .. " trace (executable memory denied? hardened host?); running"
+              .. " interpreted. Set SHEN_JIT=on to skip this probe.\n")
+          end
+        end
+      end
     end
   end
   -- GC tuning. Compiled-KL workloads are cons-churn-heavy (jit.p on urdr's
@@ -211,12 +240,21 @@ local function fnv1a(s, h)
   return h
 end
 
+-- Each Lua build gets its own default cache FILE, not just its own key:
+-- bytecode is only portable within the exact build, and two hosts sharing one
+-- path — your `luajit` and an embedded LuaJIT with a different jit.version
+-- (OpenResty's, Envoy's) — would see a key mismatch on every alternation and
+-- invalidate + rewrite each other's cache, recompiling the kernel every time.
+-- The filename suffix is a hash of the same version/arch fingerprint that
+-- cache_key() folds into the content key.
 local function cache_path()
   if not bit then return nil end   -- PUC Lua: no `bit` -> no cache keys
   local p = os.getenv("SHEN_KERNEL_CACHE")
   if p == "off" or p == "0" then return nil end
   if p and p ~= "" then return p end
-  return ".shen-kernel-cache.bin"
+  return ".shen-kernel-cache."
+      .. bit.tohex(fnv1a(jit and (jit.version .. jit.arch) or _VERSION))
+      .. ".bin"
 end
 
 local function read_file(path)
@@ -316,6 +354,13 @@ local function write_cache(path, key, chunks, arity)
   fh:write(table.concat(parts)); fh:close()
   os.remove(path)
   os.rename(tmp, path)
+  -- Writing a per-build default cache obsoletes the old shared-path file from
+  -- pre-per-build versions (it would sit stale forever otherwise). Only the
+  -- default path triggers this — an explicit SHEN_KERNEL_CACHE never does.
+  if path:match("^%.shen%-kernel%-cache%.%x+%.bin$") then
+    os.remove(".shen-kernel-cache.bin")
+    os.remove(".shen-kernel-cache.bin.tmp")
+  end
 end
 
 -- Parse a write_cache blob. key == nil skips the key check (used for the

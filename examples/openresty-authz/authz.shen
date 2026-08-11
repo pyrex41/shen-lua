@@ -76,3 +76,17 @@
   {decision --> number}
   [granted _ _ _] -> 200
   [denied _] -> 403)
+
+\\ -- check-response: the gateway projection -----------------------------------
+\\ The body of an ext_authz CHECK answer (see examples/envoy/): a gateway asks
+\\ "may this request proceed?" and must never receive the document itself. This
+\\ is render-doc's dual, with the same load-time guarantee: total over
+\\ `decision`, and NO shape of `decision` places content in a check response —
+\\ the authorization gateway structurally cannot become a data leak.
+(define check-response
+  {decision --> val}
+  [granted U T R] -> [obj [["ok" [b true]]
+                           ["user" [s U]]
+                           ["tenant" [s T]]
+                           ["resource" [s R]]]]
+  [denied Why] -> [obj [["ok" [b false]] ["error" [s Why]]]])
