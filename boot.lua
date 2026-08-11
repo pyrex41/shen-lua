@@ -218,7 +218,8 @@ P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes f
 -- select direct-call vs APP codegen), the file list, and the LuaJIT version/
 -- arch (bytecode is not portable across either). SHEN_KERNEL_CACHE=off
 -- disables; any other value overrides the cache path.
-local CACHE_FORMAT = "SHENKC2"
+local CACHE_FORMAT = "SHENKC3"  -- 3: per-chunk hoisted (declare ...) block +
+                                --    gensym/inference counters
 -- LuaJIT's `bit` library drives the FNV-1a hashing behind both the kernel
 -- bytecode cache and the user fasl cache. PUC Lua has no `bit` (5.3+ has
 -- native bitwise operators, but this file must stay parseable by 5.1/LuaJIT),
@@ -331,12 +332,22 @@ local function kdata_de(data, pos)
   error("bad KDATA tag: " .. tostring(tag))
 end
 
--- format: CACHE_FORMAT\n key\n nchunks\n { name\n #dump\n dump }*
+-- format: CACHE_FORMAT\n key\n nchunks\n
+--         { name\n #dump\n dump  ndecl\n { dname\n #ddump\n ddump }* }*
 --         narities\n { arity SP fname\n }*  nkdata\n { entry }*
-local function write_cache(path, key, chunks, arity)
+--         gensym\n infs\n
+-- The per-chunk decl list is that kernel file's hoisted (declare ...) block:
+-- one dumped prolog abstraction per signature, in file order. See
+-- hoist_declares / record_declares / replay_declares below.
+local function write_cache(path, key, chunks, arity, counters)
   local parts = { CACHE_FORMAT, "\n", key, "\n", tostring(#chunks), "\n" }
   for _, ch in ipairs(chunks) do
     parts[#parts+1] = ch.name .. "\n" .. #ch.dump .. "\n" .. ch.dump
+    local d = ch.decl or {}
+    parts[#parts+1] = #d .. "\n"
+    for _, e in ipairs(d) do
+      parts[#parts+1] = e.name .. "\n" .. #e.dump .. "\n" .. e.dump
+    end
   end
   local an = 0
   for _ in pairs(arity) do an = an + 1 end
@@ -348,6 +359,7 @@ local function write_cache(path, key, chunks, arity)
   for i = 1, #C.KDATA do
     kdata_ser(C.KDATA[i], parts)
   end
+  parts[#parts+1] = tostring(counters.gensym) .. "\n" .. tostring(counters.infs) .. "\n"
   local tmp = path .. ".tmp"
   local fh = io.open(tmp, "wb")
   if not fh then return end  -- read-only dir: silently skip caching
@@ -385,6 +397,16 @@ local function parse_cache(data, key)
     if not nm or not len or pos + len - 1 > #data then return nil end
     chunks[i] = { name = nm, dump = data:sub(pos, pos + len - 1) }
     pos = pos + len
+    local nd = tonumber(line() or ""); if not nd then return nil end
+    local decl = {}
+    for j = 1, nd do
+      local dn = line()
+      local dl = tonumber(line() or "")
+      if not dn or not dl or pos + dl - 1 > #data then return nil end
+      decl[j] = { name = dn, dump = data:sub(pos, pos + dl - 1) }
+      pos = pos + dl
+    end
+    chunks[i].decl = decl
   end
   local na = tonumber(line() or ""); if not na then return nil end
   local arity = {}
@@ -402,7 +424,10 @@ local function parse_cache(data, key)
     end
   end)
   if not kok then return nil end
-  return { chunks = chunks, arity = arity, kdata = kdata }
+  local gensym = tonumber(line() or ""); if not gensym then return nil end
+  local infs = tonumber(line() or ""); if not infs then return nil end
+  return { chunks = chunks, arity = arity, kdata = kdata,
+           gensym = gensym, infs = infs }
 end
 
 local function read_cache(path, key)
@@ -459,6 +484,103 @@ local function kernel_key()
   return k, sources
 end
 
+-- ---- hoisted kernel type signatures ---------------------------------------
+-- klambda/types.kl ends with 161 top-level `(declare Name Type)` forms, and
+-- they are not cheap annotations: `declare` (types.kl) runs the type theory for
+-- real on every one of them —
+--   (a) shen.variancy over the signature under the Prolog machine,
+--   (b) (eval-kl (shen.prolog-abstraction Type)) — a full KL->Lua compile plus
+--       loadstring per signature, producing the closure stored in shen.*sigf*,
+--   (c) (set shen.*sigf* (shen.assoc-> Name <closure> ...)).
+-- Measured on arm64 LuaJIT that block is ~43 ms: ~30% of a warm boot and its
+-- largest single item, recomputed on every start even though the kernel
+-- bytecode cache was hit and nothing changed.
+--
+-- (a) is a static check of the kernel's own signatures against the kernel's own
+-- sources, and the cache key already covers every input to it; (b) is
+-- deterministic given the signature. So a cached boot can skip both and keep
+-- only (c), replaying the abstraction from dumped bytecode:
+--
+--   hoist_declares   pulls the trailing (declare ...) block out of a kernel
+--                    file's forms so boot.lua — not the opaque concatenated
+--                    chunk — is what runs it. Only a CONTIGUOUS TRAILING run is
+--                    hoisted, so hoisting can never reorder a file's effects; a
+--                    file that interleaves declares with other top-level forms
+--                    keeps them inline and caches nothing for them.
+--   record_declares  the cold path: runs the real `declare`, capturing each
+--                    eval-kl chunk through the ordinary FASL_REC recorder
+--                    (C.NO_KDATA keeps the dumps relocatable, exactly as for
+--                    the user fasl cache).
+--   replay_declares  the warm path: load dump, run it, assoc-> into
+--                    shen.*sigf* — the same final state, no type theory.
+--
+-- The gensym and inference counters `declare` advances are recorded and
+-- restored (load_cached below), so a cached boot's shen.*gensym* and
+-- (inferences) match an uncached one exactly instead of lagging by the ~1000
+-- gensyms the skipped abstractions would have consumed.
+local function is_declare_form(f)
+  return R.is_cons(f) and R.is_symbol(f[1]) and f[1].name == "declare"
+    and R.is_cons(f[2]) and R.is_cons(f[2][2]) and f[2][2][2] == R.NIL
+end
+
+local function hoist_declares(forms)
+  local last = #forms
+  while last > 0 and is_declare_form(forms[last]) do last = last - 1 end
+  if last == #forms then return forms, nil end       -- no trailing block
+  for i = 1, last do
+    if is_declare_form(forms[i]) then return forms, nil end   -- interleaved
+  end
+  local kept, decls = {}, {}
+  for i = 1, last do kept[i] = forms[i] end
+  for i = last + 1, #forms do
+    decls[#decls + 1] = { name = forms[i][2][1], typ = forms[i][2][2][1] }
+  end
+  return kept, decls
+end
+
+local function record_declares(decls)
+  local rec = { n = 0, in_chunk = false }
+  local saved_rec, saved_nokdata = P.FASL_REC, C.NO_KDATA
+  P.FASL_REC = rec
+  C.NO_KDATA = true            -- recorded chunks must be relocatable
+  local out, done = {}, 0
+  local ok, err = pcall(function()
+    for _, d in ipairs(decls) do
+      local n0 = rec.n
+      P.F["declare"](d.name, d.typ)
+      done = done + 1
+      -- `declare` must have produced exactly one top-level eval-kl chunk (the
+      -- prolog abstraction). Anything else and we do not understand what was
+      -- just recorded: cache nothing rather than cache a half-truth.
+      if rec.n ~= n0 + 1 or rec[rec.n].k ~= "c" then
+        error("shen-lua: unexpected declare recording", 0)
+      end
+      out[#out + 1] = { name = d.name.name, dump = rec[rec.n].dump }
+    end
+  end)
+  P.FASL_REC = saved_rec
+  C.NO_KDATA = saved_nokdata
+  if not ok then
+    -- Not a fatal condition: the declares run either way, they just cannot be
+    -- cached. Finish the block uncached and record nothing for it.
+    if err == "shen-lua: unexpected declare recording" then
+      for i = done + 1, #decls do P.F["declare"](decls[i].name, decls[i].typ) end
+      return nil
+    end
+    error(err, 0)
+  end
+  return out
+end
+
+local function replay_declares(decl)
+  local sigf = R.intern("shen.*sigf*")
+  local assoc, set = P.F["shen.assoc->"], P.F["set"]
+  for _, e in ipairs(decl) do
+    local fn = P.load_chunk(e.dump, "declare:" .. e.name)
+    set(sigf, assoc(R.intern(e.name), fn(), P.GLOBALS["shen.*sigf*"]))
+  end
+end
+
 -- Load (don't run) every cached dump first, so a corrupt/foreign-arch cache
 -- falls back to the full compile before any chunk has executed. Returns true
 -- on success, false if any dump refused to load.
@@ -477,7 +599,21 @@ local function load_cached(cached, verbose, tag)
     if not rok then
       error("load error in "..cached.chunks[i].name..tag..": "..tostring(err))
     end
+    -- the file's hoisted signature block, in its original position
+    local decl = cached.chunks[i].decl
+    if decl and #decl > 0 then replay_declares(decl) end
     if verbose then io.stderr:write("  loaded "..cached.chunks[i].name..tag.."\n") end
+  end
+  -- Fast-forward the counters `declare` would have advanced had the type theory
+  -- actually run (see replay_declares), so a cached boot is indistinguishable
+  -- from an uncached one at the Shen level.
+  if cached.gensym and type(P.GLOBALS["shen.*gensym*"]) == "number"
+     and cached.gensym > P.GLOBALS["shen.*gensym*"] then
+    P.GLOBALS["shen.*gensym*"] = cached.gensym
+  end
+  if cached.infs and type(P.GLOBALS["shen.*infs*"]) == "number"
+     and cached.infs > P.GLOBALS["shen.*infs*"] then
+    P.GLOBALS["shen.*infs*"] = cached.infs
   end
   -- Restore defun arities harvested at compile time (prescan + cdefun);
   -- runtime compilation of user code needs them for direct-call codegen.
@@ -502,8 +638,11 @@ local function compile_kernel(extsources, path, key, verbose)
     -- order as per-form loading (every top-level form compiles to a single
     -- self-contained `do ... end` statement), but loadstring'd once and
     -- dumpable for the bytecode cache.
+    -- A trailing (declare ...) block is hoisted out and run by boot.lua right
+    -- after the chunk, so the cache can record its compiled signatures.
+    local forms, decls = hoist_declares(all[nm])
     local parts = {}
-    for i,f in ipairs(all[nm]) do
+    for i,f in ipairs(forms) do
       parts[i] = C.compile_top(f)
     end
     local src = table.concat(parts, "\n")
@@ -512,10 +651,17 @@ local function compile_kernel(extsources, path, key, verbose)
     if not ok then
       error("load error in "..nm..": "..tostring(err))
     end
-    chunks[#chunks+1] = { name = nm, dump = string.dump(fn) }
+    local ch = { name = nm, dump = string.dump(fn) }
+    if decls then ch.decl = record_declares(decls) end
+    chunks[#chunks+1] = ch
     if verbose then io.stderr:write("  loaded "..nm.."\n") end
   end
-  if path then write_cache(path, key, chunks, C.ARITY) end
+  if path then
+    write_cache(path, key, chunks, C.ARITY, {
+      gensym = type(P.GLOBALS["shen.*gensym*"]) == "number" and P.GLOBALS["shen.*gensym*"] or 0,
+      infs   = type(P.GLOBALS["shen.*infs*"]) == "number" and P.GLOBALS["shen.*infs*"] or 0,
+    })
+  end
 end
 
 local function load_kernel(verbose)
@@ -580,7 +726,9 @@ end
 -- Known: (destroy ...) at the REPL between loads is not in the key.
 -- SHEN_FASL=off disables; SHEN_FASL_DIR overrides ~/.cache/shen-lua-fasl;
 -- SHEN_FASL_DEBUG=1 logs hits/misses to stderr.
-local FASL_FORMAT = "SHENFASL5"  -- 5: "lt" (shen.*lambdatable* delta by name);
+local FASL_FORMAT = "SHENFASL6"  -- 6: "dv" (shen.*datatypes* by name) replaces
+                                 -- "dt" (re-run shen.process-datatype);
+                                 -- 5: "lt" (shen.*lambdatable* delta by name);
                                  -- 4: "e" (per-form value/type echo)
                                  -- records; 3: "pc" (shen.compile-prolog)
 local FASL_STACK = {}
@@ -654,10 +802,10 @@ local function fasl_write(path, rec, arity0)
     elseif r.k == "lt" then
       parts[#parts+1] = "A\n"
       kdata_ser(r.names, parts)
-    elseif r.k == "dt" then
+    elseif r.k == "dv" then
       parts[#parts+1] = "T\n"
-      kdata_ser(r.name, parts)
-      kdata_ser(r.rules, parts)
+      kdata_ser(r.global, parts)
+      kdata_ser(r.names, parts)
     elseif r.k == "pc" then
       parts[#parts+1] = "Q\n"
       kdata_ser(r.name, parts)
@@ -741,7 +889,7 @@ local function fasl_read(path)
       recs[i] = { k = "lt", names = v[1] }
     elseif k == "T" then
       local v = de_n(2); if not v then return nil end
-      recs[i] = { k = "dt", name = v[1], rules = v[2] }
+      recs[i] = { k = "dv", global = v[1], names = v[2] }
     elseif k == "Q" then
       local v = de_n(2); if not v then return nil end
       recs[i] = { k = "pc", name = v[1], rules = v[2] }
@@ -815,8 +963,14 @@ local function fasl_replay(cached)
         end
         names = names[2]
       end
-    elseif r.k == "dt" then
-      P.F["shen.process-datatype"](r.name, r.rules)
+    elseif r.k == "dv" then
+      -- shen.*datatypes* / shen.*alldatatypes*: rebuild (Name . (fn Name))
+      -- for each recorded name, in order (see the `set` recorder).
+      local fn, out, rev = P.F["fn"], R.NIL, {}
+      local t = r.names
+      while R.is_cons(t) do rev[#rev + 1] = t[1]; t = t[2] end
+      for i = #rev, 1, -1 do out = R.cons(R.cons(rev[i], fn(rev[i])), out) end
+      P.F["set"](r.global, out)
     elseif r.k == "sy" then
       P.F["shen.process-synonyms"](r.syns)
     elseif r.k == "pc" then
@@ -934,16 +1088,14 @@ local function install_fasl()
   wrap_recorded("shen.record-macro", function(rec, name, fn)
     return { k = "m", name = name }
   end)
-  -- (datatype ...) and (synonyms ...) do ALL their work at macroexpansion
-  -- time (shen.macros dispatches to these; the expansion result is just the
-  -- type name). Their state — *datatypes*/*alldatatypes* assoc entries with
-  -- compiled-closure leaves — can't serialize, but their ARGUMENTS are pure
-  -- reader output. Record the call; replay re-executes it (recompiling the
-  -- datatype is much cheaper than the typechecking the replay skips). The
-  -- in_chunk dance suppresses all their internal chunks/sets/puts.
-  wrap_recorded("shen.process-datatype", function(rec, name, rules)
-    return { k = "dt", name = name, rules = rules }
-  end)
+  -- (synonyms ...) does ALL its work at macroexpansion time (shen.macros
+  -- dispatches to it; the expansion result is just the type name). Its state —
+  -- *synonyms* assoc entries — can't serialize, but its ARGUMENTS are pure
+  -- reader output. Record the call; replay re-executes it. The in_chunk dance
+  -- suppresses all its internal chunks/sets/puts.
+  --
+  -- (datatype ...) is deliberately NOT handled this way: see the
+  -- shen.*datatypes* case in the `set` recorder below.
   wrap_recorded("shen.process-synonyms", function(rec, syns)
     return { k = "sy", syns = syns }
   end)
@@ -1001,6 +1153,37 @@ local function install_fasl()
         t = t[2]
       end
       return { k = "lt", names = names }
+    end
+    if nm == "shen.*datatypes*" or nm == "shen.*alldatatypes*" then
+      -- (datatype ...) is processed at MACROEXPANSION time and the only state
+      -- it leaves outside its own eval-kl chunks is these two assoc lists,
+      -- whose entries are all (TypeName . (fn TypeName)) — sequent.kl
+      -- shen.remember-datatype — with preclude/include shuffling whole entries
+      -- between the two lists. The fn leaf can't serialize, but it is exactly
+      -- reconstructible from the type name, so record the NAMES in order and
+      -- rebuild the list on replay. Recording the whole list rather than a
+      -- delta is what makes (preclude-all-but ...) — which SHRINKS
+      -- shen.*datatypes* — replay correctly.
+      --
+      -- This is what lets a datatype be replayed from its recorded chunks
+      -- instead of re-run: shen.process-datatype pushes the rules through the
+      -- shen.<datatype> yacc parser and the type theory, ~17 ms per datatype on
+      -- arm64 LuaJIT and the largest single item in a warm standard-library
+      -- load, and none of it is needed to reach the same state.
+      local rev = {}
+      local t = val
+      while R.is_cons(t) do
+        local e = t[1]
+        if not (R.is_cons(e) and R.is_symbol(e[1])) then
+          rec.uncacheable = "unrecognised " .. nm .. " entry"
+          return nil
+        end
+        rev[#rev + 1] = e[1]
+        t = t[2]
+      end
+      local names = R.NIL
+      for i = #rev, 1, -1 do names = R.cons(rev[i], names) end
+      return { k = "dv", global = name, names = names }
     end
     return { k = "g", name = name, val = val }
   end)

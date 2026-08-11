@@ -687,6 +687,89 @@ function P.install_native_stdlib()
     end
   end
 
+  -- shen.assoc-> (reader.kl) : functional assoc-list update —
+  --   (cond ((= () L) (cons (cons K V) ()))
+  --         ((and (cons? L) (and (cons? (hd L)) (= K (hd (hd L)))))
+  --                        (cons (cons (hd (hd L)) V) (tl L)))
+  --         ((cons? L) (cons (hd L) (shen.assoc-> K V (tl L))))
+  --         (true (simple-error "implementation error in shen.assoc->")))
+  -- i.e. replace the matching entry in place (keeping the STORED key object,
+  -- not the probe) or append a new one at the end, copying the prefix.
+  -- Like `append` the KL is non-tail-recursive: one stack frame and one
+  -- F-table lookup per entry scanned. It is the update primitive behind
+  -- shen.*lambdatable* (every `define`, and every entry a fasl replay
+  -- rebuilds), shen.*sigf* (every `declare`) and shen.*datatypes*, all of
+  -- which are assoc lists several hundred entries long by the time the
+  -- standard library is loaded — so a boot walks it O(n^2). Native: copy the
+  -- prefix iteratively, splice the tail. Fresh cells are unshared until we
+  -- return, so in-place tail assignment is unobservable; an improper list
+  -- delegates to the original for the identical simple-error.
+  local orig_assoc_to = F["shen.assoc->"]
+  local function assoc_to(k, v, l)
+    local orig = l
+    local head, last
+    while true do
+      if l == NIL then
+        local cell = cons(cons(k, v), NIL)
+        if last then last[2] = cell; return head end
+        return cell
+      end
+      if not is_cons(l) then return orig_assoc_to(k, v, orig) end
+      local pair = l[1]
+      if is_cons(pair) and equal(k, pair[1]) then
+        local cell = cons(cons(pair[1], v), l[2])
+        if last then last[2] = cell; return head end
+        return cell
+      end
+      local cell = cons(pair, NIL)
+      if last then last[2] = cell else head = cell end
+      last = cell
+      l = l[2]
+    end
+  end
+
+  -- shen.lambda-entry (declarations.kl) :
+  --   (let A (arity Name)
+  --     (if (or (= A -1) (= A 0)) ()
+  --         (cons Name (eval-kl (shen.lambda-function (cons Name ()) A)))))
+  -- shen.lambda-function (reader.kl) builds the KL term
+  --   (lambda Y1 (lambda Y2 ... (Name Y1 ... Yn)))
+  -- and eval-kl then runs the WHOLE KL->Lua compiler + loadstring on it — to
+  -- produce, verbatim,
+  --   MKFUN(1, function(a) return MKFUN(1, function(b) return F[Name](a,b) end) end)
+  -- i.e. a curried chain over a late-bound F lookup and nothing else. That is
+  -- one Lua chunk compiled per entry, and an entry is built for every `define`
+  -- (shen.update-lambdatable) and for every name a fasl replay rebuilds: 285
+  -- chunk compiles in a warm standard-library load alone, the single largest
+  -- item left in it. Build the chain directly instead.
+  --
+  -- The innermost call goes through APP on the name SYMBOL rather than calling
+  -- F[Name] directly, which is what the compiled form does for a name whose
+  -- arity is not known at codegen time: same late binding, and an arity that no
+  -- longer matches the property (a redefinition between entry build and call)
+  -- curries or over-applies exactly as APP always does instead of silently
+  -- passing the wrong argument count. Non-symbols and odd arities delegate.
+  local orig_lambda_entry = F["shen.lambda-entry"]
+  local function curried(sym, need, got)
+    return MKFUN(1, function(x)
+      local n = #got
+      local nxt = {}
+      for i = 1, n do nxt[i] = got[i] end
+      nxt[n + 1] = x
+      if need == 1 then return APP(sym, unpack(nxt, 1, n + 1)) end
+      return curried(sym, need - 1, nxt)
+    end)
+  end
+  local function lambda_entry(name)
+    if not is_symbol(name) then return orig_lambda_entry(name) end
+    local ar = F["arity"](name)
+    if ar == -1 or ar == 0 then return NIL end
+    if type(ar) ~= "number" or ar < 0 or ar ~= math.floor(ar) then
+      return orig_lambda_entry(name)
+    end
+    return cons(name, curried(name, ar, {}))
+  end
+
   -- shen.reverse-help (and reverse, its only caller) : accumulate-reverse.
   local orig_revh = F["shen.reverse-help"]
   local function reverse_help(lst, acc)
@@ -1005,6 +1088,8 @@ function P.install_native_stdlib()
   install("shen.incinfs", incinfs, 0)
   install("element?", element_q, 2)
   install("assoc", assoc, 2)
+  install("shen.assoc->", assoc_to, 3)
+  install("shen.lambda-entry", lambda_entry, 1)
   install("append", append, 2)
   install("shen.reverse-help", reverse_help, 2)
   install("reverse", reverse, 1)
