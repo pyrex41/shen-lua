@@ -21,12 +21,10 @@
 #   3. router     — what survives both gates reaches the guestbook.
 #
 # --concurrency 2 keeps the demo light: each Envoy worker thread has its own
-# Lua state, so each boots its own Shen kernel. Two environment variables are
-# worth setting when launching Envoy — SHEN_KERNEL_CACHE (a dedicated
-# bytecode-cache path, so Envoy's LuaJIT and your local luajit stop rewriting
-# each other's cache) and, on macOS, SHEN_JIT=off (the hardened runtime denies
-# LuaJIT trace memory; the interpreter boots in ~3 s and serves in single-digit
-# ms). See README.md, "The mechanics worth knowing".
+# Lua state, so each boots its own Shen kernel (~1-2 s from Envoy's own
+# per-build bytecode cache; boot.lua auto-detects hosts that deny LuaJIT
+# executable trace memory — like this one on macOS — and runs interpreted).
+# See README.md, "The mechanics worth knowing".
 
 static_resources:
   listeners:

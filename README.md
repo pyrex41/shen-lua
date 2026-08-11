@@ -123,8 +123,11 @@ Two caches make warm starts near-instant (both content-keyed, both safe to
 delete at any time):
 
 * **Kernel bytecode cache** — the compiled kernel is `string.dump`ed after the
-  first boot (`.shen-kernel-cache.bin`); warm boots load it in **~30 ms**
-  instead of recompiling (~1 s).
+  first boot (`.shen-kernel-cache.<build>.bin`, one file per exact Lua build,
+  since bytecode is not portable across builds — so e.g. your `luajit` and an
+  embedded OpenResty/Envoy LuaJIT each keep their own warm cache instead of
+  invalidating each other's); warm boots load it in **~30 ms** instead of
+  recompiling (~1 s).
 * **User fasl cache** — `(load "prog.shen")` records its compiled chunks and
   replays them on later runs, skipping the reader, macroexpansion *and
   typechecking* (SBCL-fasl semantics: it typechecked when it compiled).

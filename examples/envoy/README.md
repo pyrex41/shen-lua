@@ -77,11 +77,9 @@ openresty -p "$PWD/examples/openresty" -c nginx.conf
 mkdir -p examples/envoy/logs
 openresty -p "$PWD/examples/envoy" -c authz.conf
 
-# 3. Envoy at the edge, :10000  (run from the repo root — filter.lua resolves
-#    against the cwd; the two env vars are explained under "The mechanics
-#    worth knowing", and SHEN_JIT=off matters on macOS)
-SHEN_KERNEL_CACHE=examples/envoy/logs/kernel-cache.bin SHEN_JIT=off \
-  envoy -c examples/envoy/envoy.yaml --concurrency 2
+# 3. Envoy at the edge, :10000  (run from the repo root — filter.lua and the
+#    bytecode cache resolve against the cwd)
+envoy -c examples/envoy/envoy.yaml --concurrency 2
 ```
 
 Then drive the edge:
@@ -156,21 +154,29 @@ request path.
   of `init_worker_by_lua`: it runs once per worker thread at config load —
   never per request. `--concurrency 2` keeps the demo's boot cost and memory
   footprint small.
-- **Two environment variables worth setting** (both findings from running this
-  against Homebrew Envoy 1.39 on an arm64 Mac):
-  - `SHEN_KERNEL_CACHE=examples/envoy/logs/kernel-cache.bin` — the bytecode
-    cache is keyed to the exact LuaJIT build, and Envoy's LuaJIT is not your
-    local `luajit`: with the shared default path (`.shen-kernel-cache.bin` in
-    the cwd) the two hosts invalidate and rewrite each other's cache every
-    time you alternate. A dedicated path gives Envoy its own warm cache.
-  - `SHEN_JIT=off` — macOS's hardened runtime denies Envoy's binary executable
-    trace memory, so with the JIT nominally on, every hot loop attempts a
-    trace, hits `failed to allocate mcode memory`, and retries: measured, a
-    20M-iteration loop ran ~550× slower than local `luajit`, and the kernel
-    boot took 40–66 s. `jit.off()` makes it a clean interpreter: **~3 s to
-    serving** (warm cache) and edge requests at **3–6 ms**. Boot is the only
-    JIT-hungry phase — per-request validation is tiny either way. Linux Envoy
-    builds can generally allocate mcode; try without it there first.
+- **Two sharp edges this example surfaced — both now handled by `boot.lua`
+  automatically** (found by running against Homebrew Envoy 1.39 on an arm64
+  Mac):
+  - **Per-build bytecode caches.** Bytecode is only portable within the exact
+    LuaJIT build, and Envoy's LuaJIT is not your local `luajit` — with the old
+    single shared cache file the two hosts invalidated and rewrote each
+    other's cache on every alternation, recompiling the kernel every time.
+    The default cache path is now per build
+    (`.shen-kernel-cache.<build>.bin`), so Envoy and your shell each keep
+    their own warm cache in the cwd. `SHEN_KERNEL_CACHE` still relocates or
+    disables it.
+  - **JIT-denied hosts run interpreted.** macOS's hardened runtime denies
+    Envoy's binary executable trace memory: `jit.status()` reports true, but
+    every trace attempt aborts with `failed to allocate mcode memory` and is
+    endlessly re-attempted — measured, a hot loop ran ~550× slower than local
+    `luajit` and kernel boots took 40–66 s. `boot.lua` now probes for exactly
+    this (compile one throwaway trace, watch for its stop event) and falls
+    back to the interpreter with a note on stderr: **~2 s to serving cold,
+    ~1 s warm**, edge requests at **1.5–3 ms**. Boot is the only JIT-hungry
+    phase — per-request validation is tiny either way. On hosts where the JIT
+    works (OpenResty's nginx, your shell's `luajit`, typical Linux Envoy
+    builds) the probe compiles one trace and changes nothing. `SHEN_JIT=on`
+    skips the probe; `SHEN_JIT=off` skips straight to the interpreter.
 - **The check endpoint fails closed, twice.** An unmapped path maps to
   resource `""` → owner tenant `""` → `denied "unknown resource"` (the app);
   and `failure_mode_allow: false` means an unreachable authz app is a 403,
