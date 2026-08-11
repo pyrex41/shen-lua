@@ -338,7 +338,7 @@ end
 --         gensym\n infs\n
 -- The per-chunk decl list is that kernel file's hoisted (declare ...) block:
 -- one dumped prolog abstraction per signature, in file order. See
--- hoist_declares / record_declares / replay_declares below.
+-- hoist_tail / record_declares / replay_declares below.
 local function write_cache(path, key, chunks, arity, counters)
   local parts = { CACHE_FORMAT, "\n", key, "\n", tostring(#chunks), "\n" }
   for _, ch in ipairs(chunks) do
@@ -501,7 +501,7 @@ end
 -- deterministic given the signature. So a cached boot can skip both and keep
 -- only (c), replaying the abstraction from dumped bytecode:
 --
---   hoist_declares   pulls the trailing (declare ...) block out of a kernel
+--   hoist_tail       pulls the trailing (declare ...) block out of a kernel
 --                    file's forms so boot.lua — not the opaque concatenated
 --                    chunk — is what runs it. Only a CONTIGUOUS TRAILING run is
 --                    hoisted, so hoisting can never reorder a file's effects; a
@@ -523,19 +523,32 @@ local function is_declare_form(f)
     and R.is_cons(f[2]) and R.is_cons(f[2][2]) and f[2][2][2] == R.NIL
 end
 
-local function hoist_declares(forms)
+-- Split a kernel file's forms into (body, init forms, declares). Only a
+-- TRAILING run of non-defun top-level forms is ever moved, and it is run
+-- immediately after the body chunk, so hoisting cannot reorder anything. In
+-- the 41.2 kernel exactly two files have such a run: types.kl (161 declares)
+-- and declarations.kl (one form, (shen.build-lambda-table (external shen))).
+-- Anything less tidy than [defuns...][inits...][declares...] is left inline.
+local function hoist_tail(forms)
   local last = #forms
-  while last > 0 and is_declare_form(forms[last]) do last = last - 1 end
-  if last == #forms then return forms, nil end       -- no trailing block
-  for i = 1, last do
-    if is_declare_form(forms[i]) then return forms, nil end   -- interleaved
+  local function is_defun(f)
+    return R.is_cons(f) and R.is_symbol(f[1]) and f[1].name == "defun"
   end
-  local kept, decls = {}, {}
+  while last > 0 and not is_defun(forms[last]) do last = last - 1 end
+  if last == #forms then return forms, nil, nil end   -- no trailing run
+  -- the trailing run is [init forms][declare forms]; find the split
+  local d0 = #forms + 1
+  while d0 > last + 1 and is_declare_form(forms[d0 - 1]) do d0 = d0 - 1 end
+  for i = last + 1, d0 - 1 do
+    if is_declare_form(forms[i]) then return forms, nil, nil end  -- interleaved
+  end
+  local kept, inits, decls = {}, {}, {}
   for i = 1, last do kept[i] = forms[i] end
-  for i = last + 1, #forms do
+  for i = last + 1, d0 - 1 do inits[#inits + 1] = forms[i] end
+  for i = d0, #forms do
     decls[#decls + 1] = { name = forms[i][2][1], typ = forms[i][2][2][1] }
   end
-  return kept, decls
+  return kept, (#inits > 0 and inits or nil), (#decls > 0 and decls or nil)
 end
 
 local function record_declares(decls)
@@ -595,6 +608,15 @@ local function load_cached(cached, verbose, tag)
   -- reads KDATA[i]. Mutate C.KDATA in place — ENV.KDATA aliases it.
   for i, v in ipairs(cached.kdata) do C.KDATA[i] = v end
   for i, fn in ipairs(fns) do
+    -- A hoisted ":init" chunk is a kernel file's trailing top-level block. The
+    -- only reason it is a separate chunk is so the native shen.lambda-entry can
+    -- be in place before declarations.kl's (shen.build-lambda-table (external
+    -- shen)) runs — otherwise that one form runs the whole compiler ~280 times,
+    -- once per external symbol, and it is 2/3 of what is left of a cached
+    -- kernel load. See prims.install_native_lambda_entry.
+    if cached.chunks[i].name:find(":init", 1, true) then
+      P.install_native_lambda_entry()
+    end
     local rok, err = pcall(fn)
     if not rok then
       error("load error in "..cached.chunks[i].name..tag..": "..tostring(err))
@@ -638,22 +660,23 @@ local function compile_kernel(extsources, path, key, verbose)
     -- order as per-form loading (every top-level form compiles to a single
     -- self-contained `do ... end` statement), but loadstring'd once and
     -- dumpable for the bytecode cache.
-    -- A trailing (declare ...) block is hoisted out and run by boot.lua right
-    -- after the chunk, so the cache can record its compiled signatures.
-    local forms, decls = hoist_declares(all[nm])
-    local parts = {}
-    for i,f in ipairs(forms) do
-      parts[i] = C.compile_top(f)
+    -- The file's trailing top-level block is hoisted out (hoist_tail) into a
+    -- separate ":init" chunk and, for signatures, into a recorded declare
+    -- block; both run right after the body, in file order.
+    local forms, inits, decls = hoist_tail(all[nm])
+    local function emit(name, fs)
+      local parts = {}
+      for i,f in ipairs(fs) do parts[i] = C.compile_top(f) end
+      local fn = P.load_chunk(table.concat(parts, "\n"), name)
+      if name:find(":init", 1, true) then P.install_native_lambda_entry() end
+      local ok, err = pcall(fn)
+      if not ok then error("load error in "..name..": "..tostring(err)) end
+      chunks[#chunks+1] = { name = name, dump = string.dump(fn) }
+      return chunks[#chunks]
     end
-    local src = table.concat(parts, "\n")
-    local fn = P.load_chunk(src, nm)
-    local ok, err = pcall(fn)
-    if not ok then
-      error("load error in "..nm..": "..tostring(err))
-    end
-    local ch = { name = nm, dump = string.dump(fn) }
-    if decls then ch.decl = record_declares(decls) end
-    chunks[#chunks+1] = ch
+    emit(nm, forms)
+    if inits then emit(nm .. ":init", inits) end
+    if decls then chunks[#chunks].decl = record_declares(decls) end
     if verbose then io.stderr:write("  loaded "..nm.."\n") end
   end
   if path then

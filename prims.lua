@@ -637,6 +637,60 @@ end
 -- function, so the (multi-line) simple-error messages stay byte-identical without
 -- transcription. None of these touch shen.*infs* except shen.incinfs (which is
 -- kept arithmetically identical), so the typecheck inference count is unchanged.
+-- ---- native shen.lambda-entry (installed EARLY; see boot.lua) --------------
+-- shen.lambda-entry (declarations.kl) :
+--   (let A (arity Name)
+--     (if (or (= A -1) (= A 0)) ()
+--         (cons Name (eval-kl (shen.lambda-function (cons Name ()) A)))))
+-- shen.lambda-function (reader.kl) builds the KL term
+--   (lambda Y1 (lambda Y2 ... (Name Y1 ... Yn)))
+-- and eval-kl then runs the WHOLE KL->Lua compiler plus loadstring on it — to
+-- produce, verbatim,
+--   MKFUN(1, function(a) return MKFUN(1, function(b) return F[Name](a,b) end) end)
+-- i.e. a curried chain over a late-bound F lookup and nothing else. That is one
+-- Lua chunk compiled per lambda table entry, and an entry is built for every
+-- `define` (shen.update-lambdatable), for every name a fasl replay rebuilds
+-- (~285 in a warm standard-library load) and for every external kernel symbol
+-- at boot (~280, from declarations.kl's (shen.build-lambda-table (external
+-- shen))). Build the chain directly instead.
+--
+-- The innermost call goes through APP on the name SYMBOL rather than calling
+-- F[Name] directly, which is what the compiled form does for a name whose arity
+-- is not known at codegen time: same late binding, and an arity that no longer
+-- matches the property (a redefinition between entry build and call) curries or
+-- over-applies exactly as APP always does instead of silently passing the wrong
+-- argument count.
+--
+-- This one is deliberately NOT part of install_native_stdlib: that runs after
+-- the whole kernel is loaded, which is far too late for the boot-time
+-- build-lambda-table. It has no dependency on the compiled original — `arity`
+-- returns an integer or -1 for every input, so every branch is reachable
+-- natively — so boot.lua installs it the moment declarations.kl has defined
+-- `arity` and the lambda table is about to be built.
+local NATIVE_LAMBDA_ENTRY = false
+local function curried(sym, need, got)
+  return MKFUN(1, function(x)
+    local n = #got
+    local nxt = {}
+    for i = 1, n do nxt[i] = got[i] end
+    nxt[n + 1] = x
+    if need == 1 then return APP(sym, unpack(nxt, 1, n + 1)) end
+    return curried(sym, need - 1, nxt)
+  end)
+end
+function P.install_native_lambda_entry()
+  if NATIVE_LAMBDA_ENTRY then return end
+  if type(F["arity"]) ~= "function" then return end
+  local function lambda_entry(name)
+    local ar = F["arity"](name)
+    if type(ar) ~= "number" or ar <= 0 or ar ~= math.floor(ar) then return NIL end
+    return cons(name, curried(name, ar, {}))
+  end
+  F["shen.lambda-entry"] = lambda_entry
+  FA[lambda_entry] = 1
+  NATIVE_LAMBDA_ENTRY = true
+end
+
 function P.install_native_stdlib()
   local fail_sym = intern("shen.fail!")
 
@@ -726,48 +780,6 @@ function P.install_native_stdlib()
       last = cell
       l = l[2]
     end
-  end
-
-  -- shen.lambda-entry (declarations.kl) :
-  --   (let A (arity Name)
-  --     (if (or (= A -1) (= A 0)) ()
-  --         (cons Name (eval-kl (shen.lambda-function (cons Name ()) A)))))
-  -- shen.lambda-function (reader.kl) builds the KL term
-  --   (lambda Y1 (lambda Y2 ... (Name Y1 ... Yn)))
-  -- and eval-kl then runs the WHOLE KL->Lua compiler + loadstring on it — to
-  -- produce, verbatim,
-  --   MKFUN(1, function(a) return MKFUN(1, function(b) return F[Name](a,b) end) end)
-  -- i.e. a curried chain over a late-bound F lookup and nothing else. That is
-  -- one Lua chunk compiled per entry, and an entry is built for every `define`
-  -- (shen.update-lambdatable) and for every name a fasl replay rebuilds: 285
-  -- chunk compiles in a warm standard-library load alone, the single largest
-  -- item left in it. Build the chain directly instead.
-  --
-  -- The innermost call goes through APP on the name SYMBOL rather than calling
-  -- F[Name] directly, which is what the compiled form does for a name whose
-  -- arity is not known at codegen time: same late binding, and an arity that no
-  -- longer matches the property (a redefinition between entry build and call)
-  -- curries or over-applies exactly as APP always does instead of silently
-  -- passing the wrong argument count. Non-symbols and odd arities delegate.
-  local orig_lambda_entry = F["shen.lambda-entry"]
-  local function curried(sym, need, got)
-    return MKFUN(1, function(x)
-      local n = #got
-      local nxt = {}
-      for i = 1, n do nxt[i] = got[i] end
-      nxt[n + 1] = x
-      if need == 1 then return APP(sym, unpack(nxt, 1, n + 1)) end
-      return curried(sym, need - 1, nxt)
-    end)
-  end
-  local function lambda_entry(name)
-    if not is_symbol(name) then return orig_lambda_entry(name) end
-    local ar = F["arity"](name)
-    if ar == -1 or ar == 0 then return NIL end
-    if type(ar) ~= "number" or ar < 0 or ar ~= math.floor(ar) then
-      return orig_lambda_entry(name)
-    end
-    return cons(name, curried(name, ar, {}))
   end
 
   -- shen.reverse-help (and reverse, its only caller) : accumulate-reverse.
@@ -1089,12 +1101,12 @@ function P.install_native_stdlib()
   install("element?", element_q, 2)
   install("assoc", assoc, 2)
   install("shen.assoc->", assoc_to, 3)
-  install("shen.lambda-entry", lambda_entry, 1)
   install("append", append, 2)
   install("shen.reverse-help", reverse_help, 2)
   install("reverse", reverse, 1)
   install("shen.map-h", map_h, 3)
   install("map", map, 2)
+  P.install_native_lambda_entry()   -- no-op if boot.lua already did it
 
   -- shen.x host SHA-256 (OpenSSL libcrypto). See pyrex41/shen-extensions.
   -- Disable with SHEN_X_SHA256=pure.
