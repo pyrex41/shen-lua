@@ -637,6 +637,60 @@ end
 -- function, so the (multi-line) simple-error messages stay byte-identical without
 -- transcription. None of these touch shen.*infs* except shen.incinfs (which is
 -- kept arithmetically identical), so the typecheck inference count is unchanged.
+-- ---- native shen.lambda-entry (installed EARLY; see boot.lua) --------------
+-- shen.lambda-entry (declarations.kl) :
+--   (let A (arity Name)
+--     (if (or (= A -1) (= A 0)) ()
+--         (cons Name (eval-kl (shen.lambda-function (cons Name ()) A)))))
+-- shen.lambda-function (reader.kl) builds the KL term
+--   (lambda Y1 (lambda Y2 ... (Name Y1 ... Yn)))
+-- and eval-kl then runs the WHOLE KL->Lua compiler plus loadstring on it — to
+-- produce, verbatim,
+--   MKFUN(1, function(a) return MKFUN(1, function(b) return F[Name](a,b) end) end)
+-- i.e. a curried chain over a late-bound F lookup and nothing else. That is one
+-- Lua chunk compiled per lambda table entry, and an entry is built for every
+-- `define` (shen.update-lambdatable), for every name a fasl replay rebuilds
+-- (~285 in a warm standard-library load) and for every external kernel symbol
+-- at boot (~280, from declarations.kl's (shen.build-lambda-table (external
+-- shen))). Build the chain directly instead.
+--
+-- The innermost call goes through APP on the name SYMBOL rather than calling
+-- F[Name] directly, which is what the compiled form does for a name whose arity
+-- is not known at codegen time: same late binding, and an arity that no longer
+-- matches the property (a redefinition between entry build and call) curries or
+-- over-applies exactly as APP always does instead of silently passing the wrong
+-- argument count.
+--
+-- This one is deliberately NOT part of install_native_stdlib: that runs after
+-- the whole kernel is loaded, which is far too late for the boot-time
+-- build-lambda-table. It has no dependency on the compiled original — `arity`
+-- returns an integer or -1 for every input, so every branch is reachable
+-- natively — so boot.lua installs it the moment declarations.kl has defined
+-- `arity` and the lambda table is about to be built.
+local NATIVE_LAMBDA_ENTRY = false
+local function curried(sym, need, got)
+  return MKFUN(1, function(x)
+    local n = #got
+    local nxt = {}
+    for i = 1, n do nxt[i] = got[i] end
+    nxt[n + 1] = x
+    if need == 1 then return APP(sym, unpack(nxt, 1, n + 1)) end
+    return curried(sym, need - 1, nxt)
+  end)
+end
+function P.install_native_lambda_entry()
+  if NATIVE_LAMBDA_ENTRY then return end
+  if type(F["arity"]) ~= "function" then return end
+  local function lambda_entry(name)
+    local ar = F["arity"](name)
+    if type(ar) ~= "number" or ar <= 0 or ar ~= math.floor(ar) then return NIL end
+    return cons(name, curried(name, ar, {}))
+  end
+  F["shen.lambda-entry"] = lambda_entry
+  FA[lambda_entry] = 1
+  NATIVE_LAMBDA_ENTRY = true
+end
+
 function P.install_native_stdlib()
   local fail_sym = intern("shen.fail!")
 
@@ -684,6 +738,47 @@ function P.install_native_stdlib()
       else
         return orig_assoc(x, lst)
       end
+    end
+  end
+
+  -- shen.assoc-> (reader.kl) : functional assoc-list update —
+  --   (cond ((= () L) (cons (cons K V) ()))
+  --         ((and (cons? L) (and (cons? (hd L)) (= K (hd (hd L)))))
+  --                        (cons (cons (hd (hd L)) V) (tl L)))
+  --         ((cons? L) (cons (hd L) (shen.assoc-> K V (tl L))))
+  --         (true (simple-error "implementation error in shen.assoc->")))
+  -- i.e. replace the matching entry in place (keeping the STORED key object,
+  -- not the probe) or append a new one at the end, copying the prefix.
+  -- Like `append` the KL is non-tail-recursive: one stack frame and one
+  -- F-table lookup per entry scanned. It is the update primitive behind
+  -- shen.*lambdatable* (every `define`, and every entry a fasl replay
+  -- rebuilds), shen.*sigf* (every `declare`) and shen.*datatypes*, all of
+  -- which are assoc lists several hundred entries long by the time the
+  -- standard library is loaded — so a boot walks it O(n^2). Native: copy the
+  -- prefix iteratively, splice the tail. Fresh cells are unshared until we
+  -- return, so in-place tail assignment is unobservable; an improper list
+  -- delegates to the original for the identical simple-error.
+  local orig_assoc_to = F["shen.assoc->"]
+  local function assoc_to(k, v, l)
+    local orig = l
+    local head, last
+    while true do
+      if l == NIL then
+        local cell = cons(cons(k, v), NIL)
+        if last then last[2] = cell; return head end
+        return cell
+      end
+      if not is_cons(l) then return orig_assoc_to(k, v, orig) end
+      local pair = l[1]
+      if is_cons(pair) and equal(k, pair[1]) then
+        local cell = cons(cons(pair[1], v), l[2])
+        if last then last[2] = cell; return head end
+        return cell
+      end
+      local cell = cons(pair, NIL)
+      if last then last[2] = cell else head = cell end
+      last = cell
+      l = l[2]
     end
   end
 
@@ -1005,11 +1100,13 @@ function P.install_native_stdlib()
   install("shen.incinfs", incinfs, 0)
   install("element?", element_q, 2)
   install("assoc", assoc, 2)
+  install("shen.assoc->", assoc_to, 3)
   install("append", append, 2)
   install("shen.reverse-help", reverse_help, 2)
   install("reverse", reverse, 1)
   install("shen.map-h", map_h, 3)
   install("map", map, 2)
+  P.install_native_lambda_entry()   -- no-op if boot.lua already did it
 
   -- shen.x host SHA-256 (OpenSSL libcrypto). See pyrex41/shen-extensions.
   -- Disable with SHEN_X_SHA256=pure.
