@@ -122,6 +122,55 @@ assoc primitives, with no hot spot to cut. Closing the remaining ~16× to
 shen-cl means not rebuilding it at all (an image/snapshot of the booted
 state, shen-cl's `save-lisp-and-die` equivalent), not micro-optimisation.
 
+> **Superseded on the start-up side by #57** (2026-08-11) — that is exactly
+> what was built. See *Boot caches (#57)* below.
+
+## Boot caches (#57, 2026-08-11)
+
+The flat profile above is what a *sampling* profiler sees when the cost is
+spread over hundreds of small identical operations. Timing the boot by PHASE
+instead — `os.clock` around each kernel chunk and each fasl record kind —
+found the operations, and they were not list primitives at all. They were the
+**compiler**, invoked from inside a warm boot:
+
+| item | cost | what it is |
+|---|---:|---|
+| `types.kl`'s 161 `(declare …)` | 43 ms | `shen.variancy` under the Prolog machine + a full KL→Lua compile of `(shen.prolog-abstraction Type)` per signature |
+| `(shen.build-lambda-table (external shen))` | 12 ms | `shen.lambda-entry` runs the compiler once per external symbol (~280) |
+| `shen.process-datatype` ×2 | 34 ms | the fasl `"dt"` record re-ran the `shen.<datatype>` yacc parser + type theory |
+| lambda table rebuild ×285 | 19 ms | one `shen.lambda-entry` compile per entry, each `shen.assoc->`'d into a 568-entry list by non-tail KL recursion |
+| `install.shen` driver | 23 ms | the kernel reader on install.shen (12 ms) + the `(external stlib)`/`systemf` block — outside any file, so no per-file cache held it |
+
+The load-invariant statement of the fix: a warm boot ran
+`C.compile_expr_chunk` **964** times before, and **17** times after. The
+levers were the kernel bytecode cache carrying the compiled signatures
+(`SHENKC3`), a `"dv"` fasl record that rebuilds `shen.*datatypes*` by name,
+native `shen.lambda-entry` / `shen.assoc->`, and a **standard-library boot
+image** — the whole stdlib phase, driver and nested loads alike, recorded as
+one record stream and replayed in one go.
+
+Timings, interleaved main-vs-branch pairs, **global min of ~280 pairs**
+(`os.clock`, in process). This box was at load average 10–18 throughout, which
+inflates everything; the min reproduces the 0.154 s reference above to within
+10%, so treat the ratios as the result and the absolutes as an upper bound.
+
+| phase | main @ 67e2f43 | #57 |
+|---|---:|---:|
+| `require` | 0.002 | 0.003 |
+| `load_kernel` | 0.055 | **0.019** |
+| `initialise` (stdlib) | 0.113 | **0.042** |
+| total | 0.170 | **0.064** |
+
+Process level, `bin/shen -e '(output "hi~%")'`, min of 60 interleaved, same
+run: shen-cl 0.023 s CPU, main 0.294 s (12.7×), #57 **0.111 s (4.8×)**.
+Cold start (both caches removed first) is unchanged — the cold path does the
+same work plus writing the image.
+
+Two things did NOT move and are worth stating: cold start, and suite compute.
+The remaining warm cost is now replaying the image itself — 667 chunk loads,
+285 lambda table updates, 673 property puts — which is the state being
+installed, not work being redone.
+
 ### urdr suites (all **ALL PASS** on both ports)
 
 | Suite | shen-cl (min) | shen-lua (min) | ratio | at issue open |
