@@ -141,8 +141,12 @@ state, shen-cl's `save-lisp-and-die` equivalent), not micro-optimisation.
 
 `-q` is empty — the reported blocker — and is kernel-faithful (*hush* gates
 `pr` on 41.2), so it stays. `--hush-load` yields exactly the 71 lines the
-suite itself prints; shen-cl's 232 are the same 71 plus its own 161-line
-load echo. Regression-locked in `test/cli_spec.lua`.
+suite itself prints, and the relationship to shen-cl is exact: `diff` turns
+shen-cl's 232 lines into shen-lua's 71 by **deletion only** (161 deletions,
+0 insertions, 0 changes), i.e. shen-lua `--hush-load` stdout is byte-for-byte
+shen-cl's stdout minus shen-cl's own load echo — ordering included. That is
+the property a Bifrost-style exact-golden runner needs. Regression-locked in
+`test/cli_spec.lua`.
 
 ## Gates
 
