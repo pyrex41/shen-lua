@@ -734,6 +734,7 @@ local FASL_FORMAT = "SHENFASL6"  -- 6: "dv" (shen.*datatypes* by name) replaces
 local FASL_STACK = {}
 local FASL_ROLL = 2166136261
 local FASL_DEBUG = os.getenv("SHEN_FASL_DEBUG") == "1"
+local FASL_INSTALLED = false   -- install_fasl() ran: the recorder is live
 
 local function fasl_dir()
   if not bit then return nil end   -- PUC Lua: no `bit` -> no fasl keys
@@ -782,7 +783,7 @@ end
 --                                       rebuilt by name via shen.lambda-entry)
 --   | G\n <ser name><ser val> }*        (set ...) outside any chunk
 --   narity\n {ar SP name\n}*  kbase\n nkdata\n entries  gensym\n
-local function fasl_write(path, rec, arity0)
+local function fasl_serialize(rec, arity0)
   if rec.uncacheable then error(rec.uncacheable) end
   local parts = { FASL_FORMAT, "\n", tostring(rec.n), "\n" }
   for i = 1, rec.n do
@@ -837,18 +838,27 @@ local function fasl_write(path, rec, arity0)
   for _, d in ipairs(delta) do parts[#parts+1] = d .. "\n" end
   local g = P.GLOBALS["shen.*gensym*"]
   parts[#parts+1] = tostring(type(g) == "number" and g or 0) .. "\n"
+  return table.concat(parts)
+end
+
+local function atomic_write(path, blob)
   local tmp = path .. ".tmp"
   local fh = io.open(tmp, "wb")
-  if not fh then return end
-  fh:write(table.concat(parts)); fh:close()
+  if not fh then return end       -- read-only dir: silently skip caching
+  fh:write(blob); fh:close()
   os.remove(path)
   os.rename(tmp, path)
 end
 
-local function fasl_read(path)
-  local data = read_file(path)
-  if not data then return nil end
-  local pos = 1
+local function fasl_write(path, rec, arity0)
+  atomic_write(path, fasl_serialize(rec, arity0))
+end
+
+-- Parse a fasl record stream out of `data` starting at `pos`. Returns the
+-- record table and the position just past the stream, or nil on any
+-- malformation (a miss, never an error). The stdlib boot image (below) embeds
+-- one of these after its own header, which is why this takes a position.
+local function fasl_parse(data, pos)
   local function line()
     local e = data:find("\n", pos, true)
     if not e then return nil end
@@ -918,7 +928,13 @@ local function fasl_read(path)
     arity[name] = tonumber(ar)
   end
   local gensym = tonumber(line() or ""); if not gensym then return nil end
-  return { recs = recs, arity = arity, gensym = gensym }
+  return { recs = recs, arity = arity, gensym = gensym }, pos
+end
+
+local function fasl_read(path)
+  local data = read_file(path)
+  if not data then return nil end
+  return (fasl_parse(data, 1))
 end
 
 local function fasl_replay(cached)
@@ -1223,20 +1239,58 @@ local function install_fasl()
     end
   end
 
+  -- A nested load's records go to the INNER recording, so an enclosing one
+  -- (the standard-library boot image, below) would otherwise see a hole where
+  -- the nested load was. Copy the inner stream into the enclosing one when the
+  -- inner load finishes — from its fasl file on a hit, from the live recording
+  -- on a miss — so the outer stream stays a complete description of everything
+  -- the outer span did, in order. An inner recording that could not be
+  -- serialized poisons the outer one for the same reason.
+  local function splice_into_outer(recs, uncacheable, deps)
+    local outer = FASL_STACK[#FASL_STACK]
+    if not outer then return end
+    for _, r in ipairs(recs) do
+      outer.n = outer.n + 1
+      outer[outer.n] = r
+    end
+    if uncacheable then outer.uncacheable = outer.uncacheable or uncacheable end
+    if outer.deps and deps then
+      for _, d in ipairs(deps) do outer.deps[#outer.deps + 1] = d end
+    end
+  end
+
   local orig_load = F["load"]
   F["load"] = function(fname)
     if type(fname) ~= "string" then return orig_load(fname) end
     local fh = io.open(fname, "rb")
     if not fh then return orig_load(fname) end   -- let the kernel error
     local content = fh:read("*a"); fh:close()
+    -- Every file a recorded span loads is an input to that span's cache key;
+    -- the boot image stores them so it can verify them all on the next boot.
+    local outer = FASL_STACK[#FASL_STACK]
+    if outer and outer.deps then
+      outer.deps[#outer.deps + 1] = { path = fname, content = content }
+    end
     local key = fasl_key(content)
     local path = dir .. "/" .. key .. ".fasl"
     local cached = fasl_read(path)
     if cached then
+      -- A replay drives the very functions the recorder wraps (put,
+      -- record-macro, set, ...), so an ENCLOSING recording would capture them a
+      -- second time — and capture them wrong, since a replay reinstates chunks
+      -- through load_chunk rather than compile_and_load and so contributes no
+      -- "c" records. Mark the enclosing span as in-chunk for the duration: its
+      -- copy of this load is the spliced record stream below, not what the
+      -- replay happens to call.
+      local outer0 = FASL_STACK[#FASL_STACK]
+      local saved_in_chunk = outer0 and outer0.in_chunk
+      if outer0 then outer0.in_chunk = true end
       local ok, err = pcall(fasl_replay, cached)
+      if outer0 then outer0.in_chunk = saved_in_chunk end
       if ok then
         fasl_log("hit  " .. fname .. " " .. key)
         FASL_ROLL = fnv1a(content, FASL_ROLL)
+        splice_into_outer(cached.recs, nil, nil)
         return R.intern("loaded")
       end
       os.remove(path)   -- stale beyond what the key caught: recompile next run
@@ -1257,8 +1311,11 @@ local function install_fasl()
     local wok, werr = pcall(fasl_write, path, rec, arity0)
     if not wok then fasl_log("uncacheable " .. fname .. ": " .. tostring(werr)) end
     FASL_ROLL = fnv1a(content, FASL_ROLL)
+    splice_into_outer(rec, (not wok) and tostring(werr) or nil, rec.deps)
     return res
   end
+
+  FASL_INSTALLED = true
 end
 
 -- ---- initialise ----------------------------------------------------------
@@ -1287,6 +1344,10 @@ end
 -- SHEN_NO_STDLIB=1 skips the whole thing (a kernel-only embed); SHEN_STDLIB_DIR
 -- overrides the location.
 local STDLIB_LOADED = false
+-- set when the stdlib was materialised to a fresh temp directory (single-file
+-- bundle): its paths differ on every boot, so a path-keyed boot image would
+-- miss every time AND leave a new multi-megabyte file behind on each run.
+local STDLIB_EPHEMERAL = false
 local function find_stdlib_dir()
   local env = os.getenv("SHEN_STDLIB_DIR")
   if env and env ~= "" then return env end
@@ -1304,6 +1365,7 @@ local function find_stdlib_dir()
   -- whole tree as P.STDLIB_SOURCES (relpath -> content). Materialise it once to
   -- a temp dir and load from there (reuses the ordinary file-based load path).
   if P.STDLIB_SOURCES then
+    STDLIB_EPHEMERAL = true
     local base = os.tmpname(); os.remove(base)
     os.execute("mkdir -p '" .. base .. "'")
     for rel, content in pairs(P.STDLIB_SOURCES) do
@@ -1318,6 +1380,93 @@ local function find_stdlib_dir()
   return nil
 end
 
+-- ---- standard-library boot image ------------------------------------------
+-- Everything above caches a PIECE of the boot. This caches the whole standard
+-- library phase as one artifact — the closest a Lua host gets to shen-cl's
+-- save-lisp-and-die, which is why it starts so much faster: it does not rebuild
+-- anything.
+--
+-- A warm stdlib load was, before this, ~20 separate fasl hits plus the
+-- install.shen driver around them, and the driver is not free: reading
+-- install.shen through the kernel reader alone costs ~12 ms, and the trailing
+-- (external stlib) / systemf / preclude-all-but block another ~11 ms, none of
+-- which any per-file cache could ever capture because it does not happen inside
+-- a file. The image records the ENTIRE span — driver forms and nested loads
+-- alike, in stream order — as one fasl record stream (the nested loads splice
+-- their own streams into it; see splice_into_outer), and replays it in one go.
+--
+-- Invalidation is by construction rather than by convention: the file name is
+-- keyed on the kernel key + the record format + the Prolog engine + the
+-- rewritten install.shen text, and the image itself carries the path and
+-- content hash of EVERY file the recorded span loaded. A stale or edited
+-- standard-library file fails its hash and the image is a miss. The per-file
+-- fasl caches are still written on a miss, so if the image cannot be
+-- serialized for any reason the next boot is exactly as fast as it was before
+-- this existed. SHEN_STDLIB_IMAGE=off disables it.
+local IMAGE_FORMAT = "SHENIMG1"
+
+-- Keyed on the install.shen text as it is ON DISK, deliberately NOT on the
+-- rewritten script: the rewrite bakes in the absolute stdlib directory, and
+-- boot.lua resolves that differently depending on how it was itself located
+-- ("./lib/StLib" from a repo-root run, an absolute path from a package.path
+-- run), which would give the same checkout several images of a megabyte each.
+-- The directory is not dropped from the key so much as checked more strictly:
+-- the recorded dependency paths must all still hash to what they did, so an
+-- image recorded against one tree simply misses against another.
+local function image_path(raw_script)
+  local d = fasl_dir()
+  if not d or not FASL_INSTALLED then return nil end
+  local v = os.getenv("SHEN_STDLIB_IMAGE")
+  if v == "off" or v == "0" or STDLIB_EPHEMERAL then return nil end
+  local env = IMAGE_FORMAT .. "|" .. FASL_FORMAT
+    .. "|" .. (os.getenv("SHEN_PROLOG_ENGINE") or "native")
+  return d .. "/stdlib-"
+    .. bit.tohex(fnv1a(raw_script, fnv1a(env, fnv1a((kernel_key()))))) .. ".img"
+end
+
+-- header: IMAGE_FORMAT\n ndeps\n { #path\n path #content\n hash\n }*
+-- followed by a fasl record stream (fasl_serialize).
+local function image_write(path, rec, arity0)
+  local parts = { IMAGE_FORMAT, "\n", tostring(#rec.deps), "\n" }
+  for _, d in ipairs(rec.deps) do
+    parts[#parts+1] = #d.path .. "\n" .. d.path
+      .. #d.content .. "\n" .. bit.tohex(fnv1a(d.content)) .. "\n"
+  end
+  parts[#parts+1] = fasl_serialize(rec, arity0)
+  atomic_write(path, table.concat(parts))
+end
+
+-- Returns the parsed record stream, or nil if the image is absent, malformed,
+-- or any recorded dependency no longer hashes to what it did. Also returns the
+-- dependency contents, in load order, for the FASL_ROLL fold.
+local function image_read(path)
+  local data = read_file(path)
+  if not data then return nil end
+  local pos = 1
+  local function line()
+    local e = data:find("\n", pos, true)
+    if not e then return nil end
+    local s = data:sub(pos, e - 1); pos = e + 1
+    return s
+  end
+  if line() ~= IMAGE_FORMAT then return nil end
+  local nd = tonumber(line() or ""); if not nd then return nil end
+  local contents = {}
+  for i = 1, nd do
+    local plen = tonumber(line() or ""); if not plen then return nil end
+    if pos + plen - 1 > #data then return nil end
+    local dpath = data:sub(pos, pos + plen - 1); pos = pos + plen
+    local clen = tonumber(line() or ""); if not clen then return nil end
+    local hash = line(); if not hash then return nil end
+    local c = read_file(dpath)
+    if not c or #c ~= clen or bit.tohex(fnv1a(c)) ~= hash then return nil end
+    contents[i] = c
+  end
+  local cached = fasl_parse(data, pos)
+  if not cached then return nil end
+  return cached, contents
+end
+
 local function load_stdlib(verbose)
   if STDLIB_LOADED then return end
   if os.getenv("SHEN_NO_STDLIB") == "1" then return end
@@ -1326,8 +1475,9 @@ local function load_stdlib(verbose)
     if verbose then io.stderr:write("  stdlib: lib/StLib not found; skipping (kernel-only)\n") end
     return
   end
-  local script = read_file(dir .. "/install.shen")
-  if not script then return end
+  local raw_script = read_file(dir .. "/install.shen")
+  if not raw_script then return end
+  local script = raw_script
   -- Rewrite the relative (load "X") targets to absolute so no chdir is needed.
   -- All install.shen load paths are relative; the replacement text is escaped
   -- for gsub's % handling.
@@ -1336,12 +1486,60 @@ local function load_stdlib(verbose)
   script = script:gsub("%(tc %+%)", "(tc -)")   -- load without typechecking (see above)
   local hush0 = P.GLOBALS["*hush*"]
   P.GLOBALS["*hush*"] = true       -- suppress the ~20 "loaded" echoes
-  local ok, err = pcall(function()
+
+  -- The driver: read install.shen and run its forms. A top-level (load "X") is
+  -- dispatched straight to `load` rather than through `eval`, which is what it
+  -- would compile to anyway — it saves a chunk compile per file, and it keeps
+  -- the recorded image free of chunks that would re-run the load it is meant to
+  -- have replaced.
+  local function run_driver()
     local forms = P.F["read-from-string"](script)
     while R.is_cons(forms) do
-      P.F["eval"](forms[1])
+      local f = forms[1]
+      if R.is_cons(f) and R.is_symbol(f[1]) and f[1].name == "load"
+         and R.is_cons(f[2]) and type(f[2][1]) == "string" and f[2][2] == R.NIL then
+        P.F["load"](f[2][1])
+      else
+        P.F["eval"](f)
+      end
       forms = forms[2]
     end
+  end
+
+  local path = image_path(raw_script)
+  local ok, err = pcall(function()
+    if path then
+      local cached, contents = image_read(path)
+      if cached then
+        local rok, rerr = pcall(fasl_replay, cached)
+        if not rok then
+          os.remove(path)   -- stale beyond what the hashes caught
+          error(rerr, 0)
+        end
+        fasl_log("image hit  " .. path)
+        -- Fold the same content into the rolling key the per-file path would
+        -- have, in the same order, so a user program's fasl key is unchanged
+        -- whether the stdlib came from the image or from its 20 fasl files.
+        for _, c in ipairs(contents) do FASL_ROLL = fnv1a(c, FASL_ROLL) end
+        return
+      end
+      fasl_log("image miss " .. path)
+      local rec = { n = 0, in_chunk = false, deps = {} }
+      local arity0 = {}
+      for k, v in pairs(C.ARITY) do arity0[k] = v end
+      FASL_STACK[#FASL_STACK + 1] = rec
+      P.FASL_REC = rec
+      C.NO_KDATA = true          -- recorded chunks must be relocatable
+      local dok, derr = pcall(run_driver)
+      FASL_STACK[#FASL_STACK] = nil
+      P.FASL_REC = FASL_STACK[#FASL_STACK]
+      C.NO_KDATA = P.FASL_REC ~= nil
+      if not dok then error(derr, 0) end
+      local wok, werr = pcall(image_write, path, rec, arity0)
+      if not wok then fasl_log("image uncacheable: " .. tostring(werr)) end
+      return
+    end
+    run_driver()
   end)
   P.GLOBALS["*hush*"] = hush0
   if not ok then
