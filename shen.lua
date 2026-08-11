@@ -29,6 +29,14 @@ shen.runtime = R
 --                      silent session do shen.eval("(hush +)") — in 41.2 the
 --                      *hush* global gates `pr` itself, i.e. ALL output.
 --   verbose = true  -> log each kernel file to stderr as it loads
+--   hush_load = true -> silence ONLY what (load ...) itself prints (the
+--                      per-form value/type echo and the run time/typechecked
+--                      banners); output the loaded program writes itself still
+--                      prints. The mode a batch or golden-suite runner wants —
+--                      unlike quiet/*hush*, which gates `pr` and so silences
+--                      the program too (issue #46). Same switch as bin/shen
+--                      --hush-load and SHEN_HUSH_LOAD=1; stays on for the
+--                      session (clear it with shen.prims.HUSH_LOAD_ECHO=nil).
 --   jit     = false -> disable the LuaJIT compiler before loading the kernel
 --                      (jit.off()). Mitigates the aarch64 boot-time trace
 --                      compiler SIGSEGV (issue #43); equivalent to setting
@@ -36,8 +44,12 @@ shen.runtime = R
 --                      the JIT is already off. Leave unset to keep the JIT on.
 local booted = false
 function shen.boot(opts)
-  if booted then return shen end
   opts = opts or {}
+  -- A pure output-mode flag with no boot work behind it: honour it even on a
+  -- repeat call, so an embedder that inherited an already-booted kernel can
+  -- still ask for the quiet-load mode.
+  if opts.hush_load then P.HUSH_LOAD_ECHO = true end
+  if booted then return shen end
   if opts.jit == false then P.disable_jit() end
   local hush0
   if opts.quiet then

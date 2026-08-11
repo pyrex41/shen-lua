@@ -91,6 +91,59 @@ cons churn (bits as cons lists).
 - **Issue #46**: cold-start and hush-load items addressed; suite compute gap
   largely structural.
 
+## Re-measured at `12fab4b` (2026-08-11)
+
+An independent re-run of issue #46's own repro on main, after the whole
+series landed. Same host; shen-cl `8df94be` at
+`/Users/reuben/projects/shen-cl/bin/sbcl/shen`; urdr `ba85b09`. Interleaved
+CL/Lua pairs, **min of N** (see the thermal-noise note above), shen-lua warm
+(kernel bytecode cache + fasl), `--hush-load`.
+
+### Startup — `(output "hi~%")`
+
+| Configuration | wall |
+|---|---:|
+| shen-lua, warm (both caches) | **0.16 s** (median 0.18) |
+| shen-lua, first ever run (empty caches) | 0.86 s |
+| shen-lua, `SHEN_KERNEL_CACHE=off SHEN_FASL=off` | 0.71 s |
+| shen-cl `script` | 0.01 s |
+
+Warm boot CPU breaks down (min of 8) as `require` 0.003 s + `load_kernel`
+**0.051 s** + `load_stdlib` **0.100 s** = 0.154 s. The issue's reported
+`initialise` **1.77 s → 0.10 s**; the 1.5 s trivial-script cold start no
+longer reproduces.
+
+`load_stdlib` is now the whole remaining boot cost, and it is 21 warm fasl
+**hits** (verified with `SHEN_FASL_DEBUG=1`: 21/21 hit), not compilation.
+`jit.p` over it is flat — kernel `EQ` 8%, `append` 6%, `kdata_de` 5%,
+`is_cons`/`shen.assoc->` 5% each, `fasl_read` 3% — i.e. the cost is the
+replay *rebuilding the environment*, spread across the kernel's own list and
+assoc primitives, with no hot spot to cut. Closing the remaining ~16× to
+shen-cl means not rebuilding it at all (an image/snapshot of the booted
+state, shen-cl's `save-lisp-and-die` equivalent), not micro-optimisation.
+
+### urdr suites (all **ALL PASS** on both ports)
+
+| Suite | shen-cl (min) | shen-lua (min) | ratio | at issue open |
+|---|---:|---:|---:|---|
+| `shen/tests/prng` | 0.25 s | 0.41 s | **1.6×** | ~12× |
+| `shen/tests/search` | 0.80 s | 2.52 s | **3.1×** | ~12× |
+| `shen/tests/world` | 0.45 s | 1.56 s | **3.5×** | — |
+
+### Output modes (issue #46 item 3), urdr prng
+
+| Invocation | lines on stdout |
+|---|---:|
+| `shen-cl script run-tests.shen` | 232 |
+| `bin/shen run-tests.shen` (default) | 239 |
+| `bin/shen --hush-load run-tests.shen` | **71** |
+| `bin/shen -q run-tests.shen` | 0 |
+
+`-q` is empty — the reported blocker — and is kernel-faithful (*hush* gates
+`pr` on 41.2), so it stays. `--hush-load` yields exactly the 71 lines the
+suite itself prints; shen-cl's 232 are the same 71 plus its own 161-line
+load echo. Regression-locked in `test/cli_spec.lua`.
+
 ## Gates
 
 - `make test`: **500 pass / 0 fail**
