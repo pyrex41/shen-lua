@@ -54,15 +54,15 @@ do
           "sizemcode=2048", "maxmcode=131072", "maxtrace=8000", "maxside=400")
       end
       -- Some hosts leave the JIT nominally ON but deny the process executable
-      -- trace memory: macOS hardened-runtime binaries embedding LuaJIT (e.g.
-      -- Envoy's Lua filter — no JIT entitlement) report jit.status() == true,
-      -- yet every trace attempt aborts with "failed to allocate mcode memory"
-      -- and is re-attempted on the next hot path. Measured in Envoy 1.39 on
-      -- an arm64 Mac: a hot loop ran ~550x slower than plain interpretation
-      -- and kernel boot took 40-66 s (vs ~3 s interpreted). Detect it
-      -- directly — compile one throwaway hot loop and watch for a trace
-      -- "stop" event — and fall back to the interpreter. SHEN_JIT=on skips
-      -- the probe (explicit opt-in for hosts you have verified).
+      -- trace memory (issue #55): macOS hardened-runtime binaries embedding
+      -- LuaJIT (e.g. Envoy's Lua filter — no JIT entitlement) report
+      -- jit.status() == true, yet every trace attempt aborts with "failed to
+      -- allocate mcode memory" and is re-attempted on the next hot path.
+      -- Measured in Envoy 1.39 on an arm64 Mac: a hot loop ran ~550x slower
+      -- than plain interpretation and kernel boot took 40-66 s (vs ~3 s
+      -- interpreted). Detect it directly — compile one throwaway hot loop and
+      -- watch for a trace "stop" event — and fall back to the interpreter.
+      -- SHEN_JIT=on skips the probe (explicit opt-in for verified hosts).
       if os.getenv("SHEN_JIT") ~= "on" and jit.status and jit.status()
          and jit.attach then
         local compiled = false
