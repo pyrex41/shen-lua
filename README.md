@@ -227,8 +227,39 @@ inference budget (an over-budget check returns `false`, fail-closed).
 bin/shen                       # interactive REPL
 bin/shen prog.shen ...         # (load) each file, then exit
 bin/shen -e "(+ 1 2)"          # evaluate and print (mixes with files, in order)
+bin/shen --hush-load prog.shen # silence load's echo only; (output ...) still prints
 bin/shen -q prog.shen          # -q sets *hush*: silences load echo AND (output ...)
 ```
+
+#### Batch and golden-suite runners: `--hush-load`, not `-q`
+
+On the 41.2 kernel the `*hush*` global gates **`pr` itself**, so `-q` silences
+*all* standard output — including the program's own `(output ...)`. That makes
+`-q` useless for a runner that diffs a suite's printed results against a golden
+file (issue #46): the file comes back empty.
+
+Use **`--hush-load`** (or **`SHEN_HUSH_LOAD=1`** where the argv is fixed)
+instead. It silences only what `load` itself writes — the per-form
+`(fn name)` / value / type echo and the `run time:` / `typechecked in N
+inferences` banners — and leaves everything the loaded program prints alive:
+
+```sh
+$ bin/shen suite.shen              # default: user output buried in load echo
+(fn double)
+...
+run time: 0.0013 secs
+loaded
+RESULT: 42
+"RESULT: 42
+"
+$ bin/shen --hush-load suite.shen  # just the program's own output
+RESULT: 42
+```
+
+The mode composes with the fasl cache in both directions: a cache written
+under `--hush-load` replays correctly in the default (echoing) mode and vice
+versa, so warm and cold runs produce identical bytes. Embedders get the same
+switch as `shen.boot{hush_load = true}`.
 
 The REPL reads multiline forms (it tracks paren balance through strings and
 comments), keeps history (`~/.shen_history` with linenoise/readline installed,

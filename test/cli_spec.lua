@@ -15,6 +15,12 @@
 --     suppresses writes to STANDARD OUTPUT. A `pr` to a FILE stream writes the
 --     payload regardless of *hush*, matching shen-cl/shen-go/ShenScript. (This
 --     used to diverge: -q produced a zero-byte file; fixed in #22.)
+--   * the three output modes a batch/golden runner picks between (issue #46):
+--     default (echo + program output), -q (nothing at all — *hush* gates pr
+--     itself on 41.2), --hush-load / SHEN_HUSH_LOAD=1 (load's echo dropped,
+--     the program's own (output ...) kept), including that --hush-load output
+--     is byte-identical cold and on a warm fasl hit;
+--   * shen.boot{hush_load = true}, the embedder spelling of that mode.
 --
 -- Every subprocess is wrapped in `timeout` when available, so an EOF-loop
 -- regression FAILS (nonzero/empty output) rather than HANGS the whole suite.
@@ -284,6 +290,114 @@ do
         "#40: warm fasl hit keeps the cosmetic run-time banner dropped")
 
   os.remove(fpath); os.execute("rm -rf " .. sh_quote(fdir))
+end
+
+-- ---------------------------------------------------------------------------
+-- --hush-load / SHEN_HUSH_LOAD=1 (pyrex41/shen-lua#46 item 3).
+--
+-- A batch or golden-suite runner wants the loaded program's own output and
+-- nothing else. `-q` cannot give it that: on the 41.2 kernel *hush* gates `pr`
+-- itself, so -q silences the program too (the run comes back EMPTY — that is
+-- the "-q unusable for golden runners" report). --hush-load silences only what
+-- `load` itself writes: the per-form value/type echo, `loaded`, and the
+-- run-time banner. Lock in all three modes at once, plus the env-var spelling
+-- and the fasl-cache interaction (warm hit must not re-emit the echo the mode
+-- suppressed, so a runner's golden file is cache-state independent).
+-- ---------------------------------------------------------------------------
+do
+  local fpath = os.tmpname() .. ".shen"
+  local h = io.open(fpath, "w")
+  -- A define (so `load` echoes "(fn hush-load-fn)") plus a program write that
+  -- must SURVIVE the mode. The output marker is distinct from anything the
+  -- echo prints, so the two are never confused.
+  h:write('(define hush-load-fn -> ok)\n(output "USER_46_MARKER~%")\n')
+  h:close()
+  local file = sh_quote(fpath)
+
+  -- Each mode gets a private, fresh fasl dir so its first run is a guaranteed
+  -- MISS (the real compile path) regardless of the developer's ~/.cache state.
+  local function fresh_dir()
+    local d = os.tmpname(); os.remove(d)
+    return d
+  end
+  local dq, dh, dd, de = fresh_dir(), fresh_dir(), fresh_dir(), fresh_dir()
+  local function envp(d) return "env SHEN_FASL_DIR=" .. sh_quote(d) .. " " end
+
+  -- 1. default: BOTH the load echo and the user output appear (the gate exists)
+  local outd, coded = run(envp(dd) .. SHEN .. " " .. file)
+  check(coded == 0, "#46: default load exits 0")
+  check(outd:find("USER_46_MARKER", 1, true) ~= nil,
+        "#46: default load prints the program's own (output ...)")
+  check(outd:find("(fn hush-load-fn)", 1, true) ~= nil,
+        "#46: default load prints load's per-form echo")
+
+  -- 2. -q: silences EVERYTHING, program output included. This is the reported
+  --    defect and it is kernel-faithful behaviour, so it is asserted, not fixed.
+  local outq, codeq = run(envp(dq) .. SHEN .. " -q " .. file)
+  check(codeq == 0, "#46: -q load exits 0")
+  check(outq:find("(fn hush-load-fn)", 1, true) == nil,
+        "#46: -q silences load's echo")
+  check(outq:find("USER_46_MARKER", 1, true) == nil,
+        "#46: -q also silences the program's own (output ...) — why golden runners need --hush-load")
+
+  -- 3. --hush-load: echo gone, program output kept. The mode the issue asked for.
+  local outh, codeh = run(envp(dh) .. SHEN .. " --hush-load " .. file)
+  check(codeh == 0, "#46: --hush-load exits 0")
+  check(outh:find("USER_46_MARKER", 1, true) ~= nil,
+        "#46: --hush-load KEEPS the program's own (output ...)")
+  check(outh:find("(fn hush-load-fn)", 1, true) == nil,
+        "#46: --hush-load drops load's per-form value echo")
+  check(outh:find("loaded", 1, true) == nil,
+        "#46: --hush-load drops load's `loaded` return echo")
+  check(outh:find("run time:", 1, true) == nil,
+        "#46: --hush-load drops the run-time banner")
+
+  -- 4. SHEN_HUSH_LOAD=1 is the same mode, for runners whose argv is fixed.
+  local oute, codee = run(envp(de) .. "SHEN_HUSH_LOAD=1 " .. SHEN .. " " .. file)
+  check(codee == 0, "#46: SHEN_HUSH_LOAD=1 exits 0")
+  check(oute == outh,
+        "#46: SHEN_HUSH_LOAD=1 produces byte-identical output to --hush-load")
+
+  -- 5. Cache-state independence: the second (warm fasl HIT) run under
+  --    --hush-load must produce the SAME bytes as the cold run, so a golden
+  --    file captured on one does not break on the other.
+  local warm, wcode = run(envp(dh) .. SHEN .. " --hush-load " .. file)
+  check(wcode == 0, "#46: warm --hush-load run exits 0")
+  check(warm == outh,
+        "#46: --hush-load output is identical cold and on a warm fasl hit")
+
+  os.remove(fpath)
+  for _, d in ipairs{dq, dh, dd, de} do os.execute("rm -rf " .. sh_quote(d)) end
+end
+
+-- ---------------------------------------------------------------------------
+-- shen.boot{hush_load = true} — the embedder spelling of the same switch.
+-- Drives a fresh LuaJIT process that boots in-library and (load)s a file, so
+-- the assertion is on the public API, not on bin/shen's argv handling.
+-- ---------------------------------------------------------------------------
+do
+  local fpath = os.tmpname() .. ".shen"
+  local h = io.open(fpath, "w")
+  h:write('(define boot-hush-fn -> ok)\n(output "BOOT_46_MARKER~%")\n')
+  h:close()
+  local lpath = os.tmpname() .. ".lua"
+  local lh = io.open(lpath, "w")
+  lh:write(([[
+package.path = %q .. "?.lua;" .. package.path
+local shen = require("shen")
+shen.boot{quiet = true, hush_load = true}
+shen.call("load", %q)
+]]):format(here, fpath))
+  lh:close()
+
+  local out, code = run("luajit " .. sh_quote(lpath))
+  check(code == 0, "#46: shen.boot{hush_load=true} run exits 0")
+  check(out:find("BOOT_46_MARKER", 1, true) ~= nil,
+        "#46: shen.boot{hush_load=true} keeps the program's own (output ...)")
+  check(out:find("(fn boot-hush-fn)", 1, true) == nil,
+        "#46: shen.boot{hush_load=true} drops load's per-form echo")
+
+  os.remove(fpath); os.remove(lpath)
 end
 
 io.write(string.format("cli_spec: %d pass, %d fail\n", npass, nfail))
