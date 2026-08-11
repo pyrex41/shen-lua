@@ -29,6 +29,7 @@ end
 
 -- Discover specs deterministically (sorted) so the run order is stable.
 local specs = {
+  "test/boot_cache_spec.lua",
   "test/cli_spec.lua",
   "test/engine_spec.lua",
   "test/error_robustness_spec.lua",

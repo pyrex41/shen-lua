@@ -119,21 +119,38 @@ and `SHEN_PROLOG_NATIVE=off` disable the typechecker/query routing
 individually. Correctness never depends on native coverage: anything the
 translator refuses simply keeps its legacy definition.
 
-Two caches make warm starts near-instant (both content-keyed, both safe to
+Three caches make warm starts near-instant (all content-keyed, all safe to
 delete at any time):
 
 * **Kernel bytecode cache** — the compiled kernel is `string.dump`ed after the
   first boot (`.shen-kernel-cache.<build>.bin`, one file per exact Lua build,
   since bytecode is not portable across builds — so e.g. your `luajit` and an
   embedded OpenResty/Envoy LuaJIT each keep their own warm cache instead of
-  invalidating each other's); warm boots load it in **~30 ms** instead of
-  recompiling (~1 s).
+  invalidating each other's). It also carries the kernel's 161 **type
+  signatures** as compiled prolog abstractions: `declare` runs the type theory
+  for real on each one, and re-running it on every boot was the single largest
+  item in a warm start. `SHEN_KERNEL_CACHE=off` disables; any other value is
+  used as the cache path.
+* **Standard-library boot image** — the whole `lib/StLib` load (its
+  `install.shen` driver *and* the ~20 files it loads) is recorded as one
+  artifact, `<fasl dir>/stdlib-<key>.img`, and replayed in one go. This is the
+  nearest a Lua host gets to shen-cl's `save-lisp-and-die`. It is keyed on the
+  kernel key plus `install.shen`, and it stores the content hash of every file
+  the recorded load touched, so editing any standard-library file invalidates
+  it. `SHEN_STDLIB_IMAGE=off` disables it (the per-file fasl entries below are
+  written either way, so turning it off only costs speed).
 * **User fasl cache** — `(load "prog.shen")` records its compiled chunks and
   replays them on later runs, skipping the reader, macroexpansion *and
   typechecking* (SBCL-fasl semantics: it typechecked when it compiled).
   Invalidation is make-style: edit a file and everything loaded after it
   recompiles. `SHEN_FASL=off` disables; `SHEN_FASL_DIR` relocates
   (default `~/.cache/shen-lua-fasl`).
+
+A cached boot is required to be **indistinguishable from an uncached one** at
+the Shen level — same `shen.*sigf*` contents *and* order, same lambda table,
+same datatypes, same `shen.*gensym*` and `(inferences)` counters, same
+typechecking behaviour. `test/boot_cache_spec.lua` pins that across every cache
+configuration.
 
 ## Requirements
 
@@ -154,9 +171,9 @@ at boot and degrades gracefully:
 * **Prolog/typecheck engine** — the native soa32 engine needs the LuaJIT FFI;
   without it the port automatically falls back to the compiled-KL CPS engine
   (the same path as `SHEN_PROLOG_ENGINE=legacy`).
-* **Kernel bytecode cache + user fasl cache** — keyed by FNV-1a hashes that use
-  LuaJIT's `bit` library; without it both caches self-disable (pure perf
-  features — the kernel just recompiles on every boot, ~0.4s).
+* **All three boot caches** — keyed by FNV-1a hashes that use LuaJIT's `bit`
+  library; without it they self-disable (pure perf features — the kernel just
+  recompiles on every boot, ~0.4s).
 * **Lua 5.3+ integer subtype** — Lua 5.3+ int64 arithmetic *wraps* on overflow,
   while the kernel assumes the IEEE-double model (LuaJIT/5.1); on 5.3+ the
   arithmetic primitives compute in the float domain, reproducing LuaJIT's
