@@ -10,7 +10,7 @@ host, so the backend can literally be Shen with a thin Lua glue layer. The front
 end runs Shen too: the browser validates with a build of the **same**
 `rules.shen`, compiled to JavaScript by
 [ShenScript](https://github.com/pyrex41/ShenScript) and tree-shaken by
-[Ratatoskr](https://github.com/pyrex41/ratatoskr), so the field rules are
+[Yggdrasil](https://github.com/pyrex41/yggdrasil), so the field rules are
 checked client-side AND server-side from one source of truth.
 
 ```
@@ -152,7 +152,7 @@ network); only a client-valid entry is POSTed, where the server re-runs
 That client module is not the whole ShenScript kernel — it is a **tree-shaken
 build of `rules.shen`**:
 
-1. [Ratatoskr](https://github.com/pyrex41/ratatoskr), a Shen tree-shaker, walks
+1. [Yggdrasil](https://github.com/pyrex41/yggdrasil), a Shen tree-shaker, walks
    the kernel call graph and emits only the ~100 kernel functions these rules
    can reach. Because the rules never touch `eval`/`read`/`tc`, the reader, the
    macro expander, the typechecker and `eval` itself all fall away
@@ -183,10 +183,10 @@ The committed `shen-rules.client.js` is generated; rerun the build whenever
 examples/openresty/scripts/build-client.sh
 ```
 
-It needs sibling checkouts of [Ratatoskr](https://github.com/pyrex41/ratatoskr)
-(the `ratatoskr` binary) and [ShenScript](https://github.com/pyrex41/ShenScript),
+It needs sibling checkouts of [Yggdrasil](https://github.com/pyrex41/yggdrasil)
+(the `yggdrasil` binary) and [ShenScript](https://github.com/pyrex41/ShenScript),
 plus `luajit` (the shake host) and Node 20+. Override locations with
-`$RATATOSKR` and `$SHENSCRIPT_DIR`. The script concatenates `rules.shen` +
+`$YGGDRASIL` and `$SHENSCRIPT_DIR`. The script concatenates `rules.shen` +
 `scripts/client.glue.shen`, shakes the slice, and compiles it to the module.
 
 The running page is self-documenting too: a "What this demonstrates" panel with

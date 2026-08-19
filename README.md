@@ -344,7 +344,7 @@ exhaustively at the top of [`lua_interop.lua`](lua_interop.lua).
 The flagship is **[`examples/openresty/`](examples/openresty/)** — a complete
 guestbook web app whose validation rules are written once in Shen and run on
 *both* ends: as a typechecked core on the server (shen-lua inside OpenResty) and
-as a [Ratatoskr](https://github.com/pyrex41/ratatoskr)-shaken,
+as a [Yggdrasil](https://github.com/pyrex41/yggdrasil)-shaken,
 [ShenScript](https://github.com/pyrex41/ShenScript)-compiled module in the
 browser. One `rules.shen`, two runtimes, no client/server drift. See its
 [README](examples/openresty/README.md) for the walkthrough.
@@ -358,7 +358,7 @@ browser. One `rules.shen`, two runtimes, no client/server drift. See its
 | [`examples/policy/`](examples/policy/) | a typed **authorization** gateway: one rule set enforced at the OpenResty edge and previewed in the browser, plus authz-as-type-inhabitation — a permission *is* a proof ([README](examples/policy/README.md)) |
 | [`examples/crdt/`](examples/crdt/) | a **CRDT** sync hub: replicas converge via a typed join-semilattice merge whose laws are checked by execution *and* by machine-checked sequent-calculus proof ([README](examples/crdt/README.md)) |
 | [`examples/pcr/`](examples/pcr/) | **proof-carrying requests over live facts**: the client carries a proof term, the OpenResty gate *checks* it — never searches — against a versioned fact store consulted at proof time, so revoking one fact makes the same proof bytes fail on the next request while delegation chains stay composable and every allow logs its justification ([README](examples/pcr/README.md)) |
-| [`examples/openresty/`](examples/openresty/) | a **complete web app in Shen on OpenResty** (nginx + LuaJIT): typed request validators + a Shen router behind a JSON API, with a front end that runs the **same** typed rules in the browser — Ratatoskr-shaken and ShenScript-compiled to a ~140 KB module. One `rules.shen`, validated client- and server-side. Runs standalone (`luajit examples/openresty/selftest.lua`) or under `openresty` ([README](examples/openresty/README.md)) |
+| [`examples/openresty/`](examples/openresty/) | a **complete web app in Shen on OpenResty** (nginx + LuaJIT): typed request validators + a Shen router behind a JSON API, with a front end that runs the **same** typed rules in the browser — Yggdrasil-shaken and ShenScript-compiled to a ~140 KB module. One `rules.shen`, validated client- and server-side. Runs standalone (`luajit examples/openresty/selftest.lua`) or under `openresty` ([README](examples/openresty/README.md)) |
 | [`examples/openresty-authz/`](examples/openresty-authz/) | durable multi-tenant **authorization**: the policy as a Prolog proof chain (`token → user → tenant → resource`), a typed `decision` witness that gates every response, and an event-sourced store (file + `lua-resty-lmdb`) whose append-only log makes decisions durable and auditable ([README](examples/openresty-authz/README.md)) |
 | [`examples/envoy/`](examples/envoy/) | **Shen at the edge**: Envoy fronting both apps above — `ext_authz` runs every request through the authz proof chain (edge decisions durably audited), and an Envoy **Lua filter** runs the same typed `rules.shen` inside the proxy, so malformed requests get their typed 400 before costing an upstream hop ([README](examples/envoy/README.md)) |
 

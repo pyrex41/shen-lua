@@ -1,8 +1,8 @@
-// build-client.mjs — Ratatoskr stage-2 builder for the BROWSER.
+// build-client.mjs — Yggdrasil stage-2 builder for the BROWSER.
 //
 //   node build-client.mjs <shaken-dir> <out.js>
 //
-// Like ShenScript's own bin/ratatoskr-build.js, but instead of emitting a
+// Like ShenScript's own bin/yggdrasil-build.js, but instead of emitting a
 // Node "run once and exit" program, it emits a browser ES module that
 // compiles the shaken kernel+user slice ahead of time and EXPORTS an async
 // `createValidator()` returning a plain (name, message) -> string[] function
@@ -10,7 +10,7 @@
 // so the output is self-contained and runs in any modern browser with no
 // ShenScript checkout and no npm install.
 //
-// Normally invoked via build-client.sh, which runs the Ratatoskr shake first.
+// Normally invoked via build-client.sh, which runs the Yggdrasil shake first.
 // Needs a ShenScript checkout (env SHENSCRIPT_DIR, default ../ShenScript next
 // to this repo) for the ahead-of-time compile step only.
 
@@ -39,7 +39,7 @@ const { Arrow, Block, Call, Const, Id, Let, Program, Return, Statement, generate
 
 // ---- manifest -------------------------------------------------------------
 const manifest = { user: [] };
-for (const line of fs.readFileSync(path.join(shakenDir, 'ratatoskr.manifest.txt'), 'utf-8').split('\n')) {
+for (const line of fs.readFileSync(path.join(shakenDir, 'yggdrasil.manifest.txt'), 'utf-8').split('\n')) {
   const t = line.trim(); if (!t) continue;
   const eq = t.indexOf('='); if (eq < 0) continue;
   const k = t.slice(0, eq), v = t.slice(eq + 1);
@@ -50,7 +50,7 @@ if (manifest['needs-eval'] === 'true') {
   process.exit(1);
 }
 
-// ---- compile the slice ahead of time (same pipeline as bin/ratatoskr-build.js)
+// ---- compile the slice ahead of time (same pipeline as bin/yggdrasil-build.js)
 const $ = backend();
 const { assemble, construct, isArray, s } = $;
 const parseKl = file => parseFile(fs.readFileSync(path.join(shakenDir, file), 'utf-8'));
@@ -79,7 +79,7 @@ const embed = (file, rename) =>
     .replace(/^export (class|const)/gm, '$1');
 
 const artifact = `// GENERATED — do not edit. Built by examples/openresty/scripts/build-client.{sh,mjs}
-// from rules.shen (+ client.glue.shen) via Ratatoskr (Shen tree-shaker) and
+// from rules.shen (+ client.glue.shen) via Yggdrasil (Shen tree-shaker) and
 // ShenScript's compiler. Regenerate with: examples/openresty/scripts/build-client.sh
 // kernel defuns: ${kernelForms.length}; user: ${manifest.user.join(', ')}; needs-eval: ${manifest['needs-eval']}
 // Self-contained: runtime.js + overrides.js are embedded; no imports, no checkout needed at runtime.

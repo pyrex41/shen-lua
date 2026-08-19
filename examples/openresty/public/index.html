@@ -3,11 +3,11 @@
   examples/openresty/public/index.html — the guestbook front end.
 
   This page runs Shen IN THE BROWSER. It imports vendor/shen-rules.client.js — a
-  Ratatoskr-shaken, ShenScript-compiled build of the SAME rules.shen the server
+  Yggdrasil-shaken, ShenScript-compiled build of the SAME rules.shen the server
   loads — and runs validate-message client-side for instant feedback. The server
   then re-runs the identical rules as the authoritative check.
 
-  "Shaken" = tree-shaken: Ratatoskr (https://github.com/pyrex41/ratatoskr) walks
+  "Shaken" = tree-shaken: Yggdrasil (https://github.com/pyrex41/yggdrasil) walks
   the Shen kernel call graph and emits only the ~100 functions rules.shen can
   reach, so the client module is ~140 KB and inits in ~20 ms — versus the full
   ~660 KB ShenScript kernel bundle booting in ~2.3 s. The artifact is generated
@@ -53,7 +53,7 @@
   <h1>Guestbook <small>— validated by Shen, on both ends</small></h1>
   <p>The field rules live in one file,
      <a href="/rules.shen" target="_blank"><code>rules.shen</code></a>, and run
-     <b>twice</b>: in your browser (a <a href="https://github.com/pyrex41/ratatoskr">Ratatoskr</a>-shaken,
+     <b>twice</b>: in your browser (a <a href="https://github.com/pyrex41/yggdrasil">Yggdrasil</a>-shaken,
      <a href="https://github.com/pyrex41/ShenScript">ShenScript</a>-compiled build of those rules) for
      instant feedback, and on the server (shen-lua under OpenResty) as the
      authoritative check. Sign the guestbook below — then see
@@ -85,7 +85,7 @@
           sequent-calculus typechecker proves every rule sound <i>before the
           first request</i> — a type error aborts boot.</li>
       <li><b>Tree-shaken for fast loading.</b>
-          <a href="https://github.com/pyrex41/ratatoskr">Ratatoskr</a> walks the
+          <a href="https://github.com/pyrex41/yggdrasil">Yggdrasil</a> walks the
           Shen kernel call graph and emits only the ~100 functions these rules
           can reach (eval, the reader and the typechecker fall away). The client
           module is ~140 KB and inits in tens of ms, versus the full ~660 KB
@@ -101,7 +101,7 @@
           Lua interop.</li>
     </ul>
     <pre>
-BROWSER  — ShenScript (Shen → JS), tree-shaken by Ratatoskr
+BROWSER  — ShenScript (Shen → JS), tree-shaken by Yggdrasil
    you fill the form
         │
         ▼
@@ -161,7 +161,7 @@ SERVER   — shen-lua (Shen on LuaJIT) inside OpenResty
         const t0 = performance.now();
         checkFields = await createValidator();
         const ms = Math.round(performance.now() - t0);
-        setStatus(`<b>Shen ready in the browser</b> (${ms} ms) — a Ratatoskr-shaken `
+        setStatus(`<b>Shen ready in the browser</b> (${ms} ms) — a Yggdrasil-shaken `
                   + `build of <code>rules.shen</code>, the same rules the server runs.`);
         $$("submit").disabled = false;
       } catch (e) {
