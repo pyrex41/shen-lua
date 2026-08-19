@@ -3,7 +3,7 @@
 #
 # Pipeline:
 #   1. concatenate rules.shen + client.glue.shen into one program
-#   2. Ratatoskr (Shen tree-shaker) shakes it to a minimal KLambda slice
+#   2. Yggdrasil (Shen tree-shaker) shakes it to a minimal KLambda slice
 #      (~100 kernel defuns instead of the full ~2500), eval-stripped
 #   3. build-client.mjs compiles that slice with ShenScript's compiler and
 #      emits public/vendor/shen-rules.client.js — a self-contained ES module
@@ -13,7 +13,7 @@
 # whenever rules.shen changes so the client and server can't drift.
 #
 # Requires (siblings of this repo, override via env):
-#   RATATOSKR      the ratatoskr binary   (default ../../ratatoskr/ratatoskr)
+#   YGGDRASIL      the yggdrasil binary   (default ../../yggdrasil/yggdrasil)
 #   SHENSCRIPT_DIR a ShenScript checkout  (default ../../ShenScript)
 #   plus luajit (for the shen-lua shake host) and node 20+.
 set -euo pipefail
@@ -22,11 +22,11 @@ here="$(cd "$(dirname "$0")" && pwd)"
 example="$(cd "$here/.." && pwd)"
 repo="$(cd "$example/../.." && pwd)"
 
-RATATOSKR="${RATATOSKR:-$repo/../ratatoskr/ratatoskr}"
+YGGDRASIL="${YGGDRASIL:-$repo/../yggdrasil/yggdrasil}"
 SHENSCRIPT_DIR="${SHENSCRIPT_DIR:-$repo/../ShenScript}"
 out="$example/public/vendor/shen-rules.client.js"
 
-[ -x "$RATATOSKR" ]  || { echo "ratatoskr not found/executable at $RATATOSKR (set RATATOSKR)"; exit 1; }
+[ -x "$YGGDRASIL" ]  || { echo "yggdrasil not found/executable at $YGGDRASIL (set YGGDRASIL)"; exit 1; }
 [ -d "$SHENSCRIPT_DIR" ] || { echo "ShenScript not found at $SHENSCRIPT_DIR (set SHENSCRIPT_DIR)"; exit 1; }
 
 tmp="$(mktemp -d)"
@@ -36,7 +36,7 @@ trap 'rm -rf "$tmp"' EXIT
 cat "$example/rules.shen" "$here/client.glue.shen" > "$tmp/client-prog.shen"
 
 # 2. shake (host = shen-lua's launcher; shake output is host-independent)
-"$RATATOSKR" shake "$tmp/client-prog.shen" "$tmp/slice" \
+"$YGGDRASIL" shake "$tmp/client-prog.shen" "$tmp/slice" \
   --host "$repo/bin/shen" --eval-style positional
 
 # 3. compile the slice to a self-contained browser ES module

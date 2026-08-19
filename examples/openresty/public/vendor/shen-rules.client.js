@@ -1,11 +1,11 @@
 // GENERATED — do not edit. Built by examples/openresty/scripts/build-client.{sh,mjs}
-// from rules.shen (+ client.glue.shen) via Ratatoskr (Shen tree-shaker) and
+// from rules.shen (+ client.glue.shen) via Yggdrasil (Shen tree-shaker) and
 // ShenScript's compiler. Regenerate with: examples/openresty/scripts/build-client.sh
 // kernel defuns: 99; user: client-prog.kl; needs-eval: false
 // Self-contained: runtime.js + overrides.js are embedded; no imports, no checkout needed at runtime.
 // The KLambda runtime: everything compiled kernel/user code references on $,
 // with no compiler. This module deliberately has ZERO imports and a single
-// default export so build tools (bin/ratatoskr-build.js) can embed its source
+// default export so build tools (bin/yggdrasil-build.js) can embed its source
 // verbatim by replacing "export default" with a const declaration.
 // eval-kl raises unless a compiler layer (lib/backend.js) is attached.
 

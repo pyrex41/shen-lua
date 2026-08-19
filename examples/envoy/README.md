@@ -19,7 +19,7 @@ integration seams for exactly what it is good at:
    costs an upstream hop.
 
 Which makes it one `rules.shen`, enforced on **four hosts** from one typed
-source: the browser (ShenScript, Ratatoskr-shaken), the Envoy edge (shen-lua on
+source: the browser (ShenScript, Yggdrasil-shaken), the Envoy edge (shen-lua on
 Envoy's LuaJIT), the origin (shen-lua on OpenResty), and plain `luajit` in the
 selftests. Proved sound by the sequent-calculus typechecker wherever shen-lua
 loads it.
