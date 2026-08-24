@@ -1586,6 +1586,30 @@ local function initialise()
   local r
   local fn = P.F["shen.initialise"]
   if fn then r = fn() end
+  -- Initialise the Shen Batteries feature registry from capabilities detected
+  -- by native extension installers.  The Batteries module loader asks the
+  -- port for `(shen.x.features.current)` before loading a module; leaving the
+  -- registry unbound makes that query fail even though the extension API is
+  -- otherwise available.  Keep this derived from backend globals so
+  -- SHEN_X_SHA256=pure (and ports without native backends) advertise no host
+  -- capability while retaining the portable implementation.
+  if P.F["shen.x.features.current"] then
+    local detected = {}
+    local function add_backend(global, feature)
+      local backend = P.GLOBALS[global]
+      if backend == R.intern("host") then
+        detected[#detected + 1] = R.intern(feature)
+      end
+    end
+    add_backend("shen.x.*sha256-backend*", "shen.x/sha256-host")
+    add_backend("shen.x.*zmq-backend*", "shen.x/zmq-host")
+    -- The community extension's `features.initialise` additionally hooks the
+    -- legacy macro registration API (`shen.set-lambda-form-entry`), which is
+    -- not present in the refreshed 41.2 kernel.  Seed its backing global
+    -- directly; `features.current` is the stable API consumed by Batteries
+    -- and `features.add` can still extend this list later.
+    P.GLOBALS["shen.x.features.*features*"] = R.from_table(detected)
+  end
   -- Register the lua.* interop entries in Shen's own arity/lambda-form
   -- tables (needs the *property-vector* the kernel just created).
   require("lua_interop").post_initialise()
