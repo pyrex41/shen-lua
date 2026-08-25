@@ -218,8 +218,10 @@ P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes f
 -- select direct-call vs APP codegen), the file list, and the LuaJIT version/
 -- arch (bytecode is not portable across either). SHEN_KERNEL_CACHE=off
 -- disables; any other value overrides the cache path.
-local CACHE_FORMAT = "SHENKC3"  -- 3: per-chunk hoisted (declare ...) block +
-                                --    gensym/inference counters
+local CACHE_FORMAT = "SHENKC4"  -- 4: hoisted declare typeforms evaluated before
+                                --    `declare` (issue #62); 3: per-chunk hoisted
+                                --    (declare ...) block + gensym/inference
+                                --    counters
 -- LuaJIT's `bit` library drives the FNV-1a hashing behind both the kernel
 -- bytecode cache and the user fasl cache. PUC Lua has no `bit` (5.3+ has
 -- native bitwise operators, but this file must stay parseable by 5.1/LuaJIT),
@@ -523,6 +525,34 @@ local function is_declare_form(f)
     and R.is_cons(f[2]) and R.is_cons(f[2][2]) and f[2][2][2] == R.NIL
 end
 
+-- A declare's type argument is a KL EXPRESSION — in the 41.2 kernel always a
+-- pure rcons constructor tree, e.g. (cons number (cons --> (cons number ()))).
+-- Running the form inline evaluates it before `declare` sees it; a hoisted
+-- declare must do the same, or the signature registered in shen.*sigf* is over
+-- the unevaluated AST and never unifies with a real type (issue #62: System S
+-- rejected every kernel signature — arithmetic being the visible case).
+-- Only literal trees are evaluated here; anything else refuses the hoist so
+-- the form runs inline with full KL semantics. Returns the value, or nil to
+-- refuse (KL has no nil, so nil is unambiguous).
+local function eval_typeform(e)
+  if R.is_cons(e) then
+    local h = e[1]
+    if R.is_symbol(h) and h.name == "cons"
+       and R.is_cons(e[2]) and R.is_cons(e[2][2]) and e[2][2][2] == R.NIL then
+      local a = eval_typeform(e[2][1])
+      if a == nil then return nil end
+      local d = eval_typeform(e[2][2][1])
+      if d == nil then return nil end
+      return R.cons(a, d)
+    elseif R.is_symbol(h) and h.name == "intern"
+       and R.is_cons(e[2]) and type(e[2][1]) == "string" and e[2][2] == R.NIL then
+      return R.intern(e[2][1])
+    end
+    return nil
+  end
+  return e   -- symbol, number, string, boolean, (): self-evaluating
+end
+
 -- Split a kernel file's forms into (body, init forms, declares). Only a
 -- TRAILING run of non-defun top-level forms is ever moved, and it is run
 -- immediately after the body chunk, so hoisting cannot reorder anything. In
@@ -546,7 +576,9 @@ local function hoist_tail(forms)
   for i = 1, last do kept[i] = forms[i] end
   for i = last + 1, d0 - 1 do inits[#inits + 1] = forms[i] end
   for i = d0, #forms do
-    decls[#decls + 1] = { name = forms[i][2][1], typ = forms[i][2][2][1] }
+    local tv = eval_typeform(forms[i][2][2][1])
+    if tv == nil then return forms, nil, nil end   -- non-literal typeform
+    decls[#decls + 1] = { name = forms[i][2][1], typ = tv }
   end
   return kept, (#inits > 0 and inits or nil), (#decls > 0 and decls or nil)
 end
