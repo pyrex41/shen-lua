@@ -34,6 +34,7 @@ local specs = {
   "test/engine_spec.lua",
   "test/error_robustness_spec.lua",
   "test/eval_order_spec.lua",
+  "test/features_spec.lua",
   "test/interop_spec.lua",
   "test/io_spec.lua",
   "test/jit_spec.lua",
