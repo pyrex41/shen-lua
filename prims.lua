@@ -557,7 +557,7 @@ function P.install_native_prolog()
   -- vectors are used sequentially (never nested in one inference), so a global
   -- ticket-indexed stack is safe.
   --
-  -- RESIDUAL RISK (validated empirically: 41.1 and 41.2 suites 134/134 + the typecheck
+  -- RESIDUAL RISK (validated empirically: 42 and 42 suites 134/134 + the typecheck
   -- inference count is byte-identical with and without pooling, so no exercised
   -- unification path is perturbed): recycling reuses the table OBJECT, not just
   -- the ticket. This is unsafe only if a reclaimed-ticket pvar object is still
@@ -625,7 +625,7 @@ end
 -- Native overrides of the hottest GENERAL-purpose kernel functions (the
 -- officially-recommended "overwrite" peephole track; see Shen PortDeveloperNotes
 -- and shen-cl's overwrite.lsp). Installed after the kernel loads, overriding the
--- compiled-KL defuns in F. A 41.1-suite call-frequency profile (bench/callfreq.lua)
+-- compiled-KL defuns in F. A 42-suite call-frequency profile (bench/callfreq.lua)
 -- showed these are called millions of times each, and -- crucially -- their
 -- compiled-KL bodies re-dispatch through F["="]/F["cons?"]/F["hd"]/F["tl"] on
 -- every iteration. The native bodies call the Lua `equal`/`is_cons`/`cons`
@@ -943,7 +943,7 @@ function P.install_native_stdlib()
     return h
   end
 
-  -- fn (reader.kl): the 41.2 shen->kl translator compiles every call to a
+  -- fn (reader.kl): the 42 shen->kl translator compiles every call to a
   -- function whose arity is unknown at translation time (forward references
   -- within a file, mainly) as ((fn name) args...), and the kernel `fn` pays
   -- an arity property get PLUS an assoc over the whole shen.*lambdatable*
@@ -1295,7 +1295,7 @@ P.load_chunk = load_chunk
 -- the echo depth (P.LOADPR_DEPTH) and the native pr drops load's own
 -- standard-output chatter at that depth. P.CHUNK_DEPTH counts the eval-kl
 -- chunk nesting maintained by compile_and_load below. Unlike -q/*hush*
--- (which on the 41.2 kernel gates pr itself, i.e. ALL standard output),
+-- (which on the 42 kernel gates pr itself, i.e. ALL standard output),
 -- hush-load leaves user (output ...)/pr from inside loaded forms alive.
 P.CHUNK_DEPTH = 0
 P.LOADPR_DEPTH = nil

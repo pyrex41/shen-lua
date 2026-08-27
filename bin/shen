@@ -26,7 +26,7 @@ usage: shen [-q] [--hush-load] [-e EXPR | FILE] ...
   FILE              (load) the file (full Shen syntax), then exit
   -e, --eval EXPR   evaluate EXPR and print its value
   -q, --quiet       (set *hush* true) — silence load echo and hushable output
-                    (on the 41.2 kernel *hush* gates pr itself, so -q also
+                    (on the 42 kernel *hush* gates pr itself, so -q also
                     silences the program's own (output ...) lines)
   --hush-load       silence only load's chatter — the per-form value/type
                     echo and "run time"/"typechecked" banners; (output ...)

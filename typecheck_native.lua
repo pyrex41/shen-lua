@@ -180,7 +180,7 @@ local function harvest_init_sigs(src)
   return total > 0 and total == got
 end
 
--- Refreshed-kernel (S41.2 2026-07-11) signature harvest, from types.kl.
+-- Refreshed-kernel (S42 2026-07-11) signature harvest, from types.kl.
 -- The refresh dropped init.kl/shen.initialise-signedfuncs; the 161 kernel
 -- signatures now live as top-level (declare NAME TYPEFORM) forms in types.kl,
 -- where TYPEFORM is the same rcons tree — e.g. (cons (cons list (cons A ()))
@@ -334,7 +334,7 @@ function M.install(Pmod, Emod)
     local dirs = {
       P.KLDIR,                                        -- boot's resolved dir
       (os.getenv("SHEN_KL_DIR") or "klambda") .. "/",
-      "../cl-source/ShenOSKernel-41.2/klambda/",      -- boot's other candidate
+      "../cl-source/ShenOSKernel-42/klambda/",      -- boot's other candidate
     }
     for _, d in ipairs(dirs) do
       local fh = d and io.open(d .. name .. ".kl", "r")

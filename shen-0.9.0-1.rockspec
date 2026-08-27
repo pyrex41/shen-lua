@@ -7,18 +7,18 @@ source = {
    tag = "v0.9.0",
 }
 
--- NOTE: this rockspec pins tag v0.9.0, which bundles the Shen 41.1 kernel.
--- For kernel 41.2 use shen-0.10.0-1.rockspec (tag v0.10.0) or later.
+-- NOTE: this rockspec pins tag v0.9.0, which bundles the Shen 42 kernel.
+-- For kernel 42 use shen-0.10.0-1.rockspec (tag v0.10.0) or later.
 description = {
-   summary = "A speed-focused LuaJIT port of the Shen language (kernel 41.1)",
+   summary = "A speed-focused LuaJIT port of the Shen language (kernel 42)",
    detailed = [[
 shen-lua runs the Shen language on LuaJIT 2.1 by compiling KLambda to Lua
 source. Embed with `local shen = require("shen")` (boot/eval/call/fn plus
 list/symbol marshaling), or use the `shen` launcher for a REPL, running
 .shen files, and -e one-liners. Requires LuaJIT (Lua 5.1 semantics + FFI);
-the Shen 41.1 KLambda sources are bundled and compiled on first boot, then
-served from a bytecode cache. NOTE: this version bundles kernel 41.1; for
-kernel 41.2 install shen 0.10.0 or later.
+the Shen 42 KLambda sources are bundled and compiled on first boot, then
+served from a bytecode cache. NOTE: this version bundles kernel 42; for
+kernel 42 install shen 0.10.0 or later.
 ]],
    homepage = "https://github.com/pyrex41/shen-lua",
    license = "BSD-3-Clause (Shen kernel: BSD)",
@@ -48,7 +48,7 @@ build = {
    install = {
       bin = { shen = "bin/shen" },
    },
-   -- The vendored Shen 41.2 KLambda kernel sources, compiled on boot.
+   -- The vendored Shen 42 KLambda kernel sources, compiled on boot.
    -- They land in the rock directory
    -- (<tree>/lib/luarocks/rocks-5.1/shen/<version>/klambda); boot.lua's
    -- find_kldir() derives that path from its own install location.

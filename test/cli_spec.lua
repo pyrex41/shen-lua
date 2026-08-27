@@ -17,7 +17,7 @@
 --     used to diverge: -q produced a zero-byte file; fixed in #22.)
 --   * the three output modes a batch/golden runner picks between (issue #46):
 --     default (echo + program output), -q (nothing at all — *hush* gates pr
---     itself on 41.2), --hush-load / SHEN_HUSH_LOAD=1 (load's echo dropped,
+--     itself on 42), --hush-load / SHEN_HUSH_LOAD=1 (load's echo dropped,
 --     the program's own (output ...) kept), including that --hush-load output
 --     is byte-identical cold and on a warm fasl hit;
 --   * shen.boot{hush_load = true}, the embedder spelling of that mode.
@@ -296,7 +296,7 @@ end
 -- --hush-load / SHEN_HUSH_LOAD=1 (pyrex41/shen-lua#46 item 3).
 --
 -- A batch or golden-suite runner wants the loaded program's own output and
--- nothing else. `-q` cannot give it that: on the 41.2 kernel *hush* gates `pr`
+-- nothing else. `-q` cannot give it that: on the 42 kernel *hush* gates `pr`
 -- itself, so -q silences the program too (the run comes back EMPTY — that is
 -- the "-q unusable for golden runners" report). --hush-load silences only what
 -- `load` itself writes: the per-form value/type echo, `loaded`, and the

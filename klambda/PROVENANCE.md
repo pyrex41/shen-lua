@@ -3,18 +3,18 @@
 The vendored `klambda/` tree has **two lineages**. Read both sections — they
 come from different upstreams and are updated independently.
 
-## 1. Kernel proper — S41.2 (2026-07-11 refresh)
+## 1. Kernel proper — S42 (2026-08-25 refresh)
 
-- **Canonical source**: `pyrex41/shen-s41.1` — the designated mirror of Mark
+- **Canonical source**: `pyrex41/shen-upstream` — the designated mirror of Mark
   Tarver's shenlanguage.org uploads (private repo).
-  - Tag: `s41.2-pristine-20260711`
-  - Commit: `11fc51bdf53a4dcb505adeec6ec8352754cbe50f`
-    ("Pristine import of the 2026-07-11 S41.2 refresh from shenlanguage.org")
-- **Upstream origin** (what the mirror imported): Mark Tarver's `S41.2.zip`,
+  - Tag: `s42-pristine-20260825`
+  - Commit: `pending mirror import`
+    ("Pristine import of the 2026-08-25 S42 refresh from shenlanguage.org")
+- **Upstream origin** (what the mirror imported): Mark Tarver's `S42.zip`,
   the reference SBCL/Windows distribution.
-  - URL: https://www.shenlanguage.org/Download/S41.2.zip
-  - Last-Modified: 2026-07-11
-  - Zip SHA-256: `51becbfd60fa8c93c3f8ae5b20b948eaa84c4b1d14ad2f5d2a056002a53ee836`
+  - URL: https://www.shenlanguage.org/Download/S42.zip
+  - Last-Modified: 2026-08-25
+  - Zip SHA-256: `30abdc7e5a1e27b7a20109c1ed141e4712885e31f24d9710d16415fbbd4dfb23`
 
 These 15 files are vendored **byte-identical** to `KLambda/` in the mirror at
 that tag — equivalently, to the zip's `KLambda/` directory (both verified with
@@ -23,16 +23,11 @@ that tag — equivalently, to the zip's `KLambda/` directory (both verified with
     yacc core load prolog reader sequent sys t-star toplevel
     track types writer backend declarations macros
 
-> **Caveat — the "41.2" version number was reused.** Upstream re-uploaded a
-> *restructured* kernel under the same `41.2` version. This is a **different
-> lineage** from the community `ShenOSKernel-41.2`
-> (github.com/Shen-Language/shen-sources, tag `shen-41.2`,
-> zip SHA-256 `49f1b85d02348d9b3ebc461570c5c56cc066270ab81e35d5257625fb9d17fe82`)
-> that this file previously described. We call the current one
-> **"S41.2 (2026-07-11 refresh)"** to disambiguate. `(version)` still reports
-> `"41.2"` (it is set in `declarations.kl`).
+> **Caveat — S42 is the upstream 2026-08-25 distribution.** Community
+> extensions retained below are not part of the pristine archive.
+> `(version)` reports `"42"` (it is set in `declarations.kl`).
 
-### What changed vs the community ShenOSKernel-41.2 we used to vendor
+### What changed vs the community ShenOSKernel-42 we used to vendor
 
 - **New: `backend.kl`** — a `cl.*` KLambda→Common-Lisp backend. Irrelevant to
   the Lua runtime, but on the upstream boot list, so vendored and booted (it is
@@ -60,10 +55,10 @@ that tag — equivalently, to the zip's `KLambda/` directory (both verified with
 - Other renames observed: `hush` → `shen.hush`, `input+` → `shen.input-h+` /
   `shen.process-input+`, plus new `shen.rdecons`, `shen.shen`, pointer helpers.
 
-## 2. Extensions — community ShenOSKernel-41.2 (retained); stdlib moved out
+## 2. Extensions — community ShenOSKernel-42 (retained); stdlib moved out
 
 **Extensions.** Tarver's refresh does not ship these; they are **retained
-byte-identical from the community `ShenOSKernel-41.2`** release (zip SHA-256
+byte-identical from the community `ShenOSKernel-42`** release (zip SHA-256
 `49f1b85d02348d9b3ebc461570c5c56cc066270ab81e35d5257625fb9d17fe82`) so the CLI
 launcher etc. stay available:
 

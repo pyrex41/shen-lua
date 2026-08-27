@@ -257,7 +257,7 @@ end
 -- Shen-LEVEL registration of name/arity: the `arity` property plus the
 -- shen.*lambdatable* entry that (fn name) and Shen's evaluator consult.
 --
--- The S41.2 (2026-07-11 refresh) kernel dropped shen.set-lambda-form-entry
+-- The S42 (2026-07-11 refresh) kernel dropped shen.set-lambda-form-entry
 -- (and the whole lambda-FORM property the pre-refresh kernel keyed on). Its
 -- lambda table is now the assoc list shen.*lambdatable*, whose entries are
 -- (name . curried-fn) exactly as returned by shen.lambda-entry, and (fn name)
