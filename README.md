@@ -412,3 +412,22 @@ See [doc/PERF-HANDOFF.md](doc/PERF-HANDOFF.md) and [doc/BENCHMARKS.md](doc/BENCH
 The historical Shen 22.4 head-to-head versus the `shen-c` 0.2.3 interpreter (same
 machine) is preserved in [doc/BENCHMARKS.md](doc/BENCHMARKS.md): fib 66–79× faster, n-queens ~2.5× faster,
 Einstein's riddle ~1.5× slower.
+## Optional Nix environment
+
+Nix is optional; the normal shen-lua build and launcher commands continue to work
+with tools installed by any method. For a pinned development toolchain:
+
+```sh
+nix develop
+```
+
+The flake also exports `packages.toolchain` for composition by
+[Bifrost](https://github.com/pyrex41/bifrost):
+
+```sh
+nix shell .#toolchain
+```
+
+If direnv is installed, `direnv allow` opts this checkout into the same dev
+shell automatically. Nothing activates until that explicit authorization, and
+Nix is never required at runtime.
