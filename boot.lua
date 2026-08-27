@@ -1,6 +1,6 @@
 -- boot.lua : load the full Shen KLambda kernel into the Lua runtime and
 -- initialise it. Returns the prims module P with everything live. (On the
--- S41.2 2026-07-11 kernel the kernel self-initialises at load time; see FILES
+-- S42 (2026-08-25) kernel self-initialises at load time; see FILES
 -- and initialise() below.)
 local R = require("runtime")
 local C = require("compiler")
@@ -114,8 +114,8 @@ local function find_kldir()
   -- 2. Common external locations (useful when developing against a full
   --    ShenOSKernel checkout or the legacy shen-c reference implementation)
   local candidates = {
-    "../cl-source/ShenOSKernel-41.2/klambda",
-    "../ShenOSKernel-41.2/klambda",
+    "../cl-source/ShenOSKernel-42/klambda",
+    "../ShenOSKernel-42/klambda",
     -- legacy shen-c (22.4) clone for comparison / older certification
     "../shen-c/shen/src/kl",
     "../shen-c/klambda",
@@ -153,7 +153,7 @@ local function find_kldir()
 end
 local KLDIR = find_kldir() .. "/"
 P.KLDIR = KLDIR   -- resolved .kl directory (trailing /), for typecheck_native
--- Boot order for the S41.2 (2026-07-11 refresh) kernel. The first 15 entries
+-- Boot order for the S42 (2026-08-25) kernel. The first 15 entries
 -- are the refreshed KLambda modules. The refreshed kernel initialises itself
 -- at LOAD time: declarations.kl runs top-level forms — (set *property-vector*
 -- (vector 20000)), the environment `set`s, (shen.initialise-arity-table ...),
@@ -201,13 +201,13 @@ P.GLOBALS["*sterror*"]  = err_stream
 P.GLOBALS["*stinput*"]  = in_stream
 P.GLOBALS["*home-directory*"] = ""
 
--- ---- platform metadata (required by 41.2+ kernel) -------------------------
+-- ---- platform metadata (required by 42+ kernel) ---------------------------
 P.GLOBALS["*language*"]       = "Lua"
 P.GLOBALS["*implementation*"] = rawget(_G, "jit") and "LuaJIT" or _VERSION
 P.GLOBALS["*port*"]           = "shen-lua"
 P.GLOBALS["*porters*"]        = "shen-lua contributors"
 P.GLOBALS["*os*"]             = (package.config and package.config:sub(1,1) == "\\") and "Windows" or "Unix"
-P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes from declarations.kl ("41.2")
+P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes from declarations.kl ("42")
 
 -- ---- kernel bytecode cache -------------------------------------------------
 -- Loading the kernel from .kl sources costs ~0.8s (read + parse + KL->Lua
@@ -439,7 +439,7 @@ local function read_cache(path, key)
 end
 
 -- ---- load the kernel -----------------------------------------------------
--- Loads the 19 .kl modules in FILES (see above): the 15 refreshed S41.2
+-- Loads the 19 .kl modules in FILES (see above): the 15 refreshed S42
 -- (2026-07-11) KLambda modules plus the vendored community stlib + 3 booted
 -- extensions. The opt-in extension-programmable-pattern-matching.kl is
 -- vendored but not booted.
@@ -525,7 +525,7 @@ local function is_declare_form(f)
     and R.is_cons(f[2]) and R.is_cons(f[2][2]) and f[2][2][2] == R.NIL
 end
 
--- A declare's type argument is a KL EXPRESSION — in the 41.2 kernel always a
+-- A declare's type argument is a KL EXPRESSION — in the 42 kernel always a
 -- pure rcons constructor tree, e.g. (cons number (cons --> (cons number ()))).
 -- Running the form inline evaluates it before `declare` sees it; a hoisted
 -- declare must do the same, or the signature registered in shen.*sigf* is over
@@ -556,7 +556,7 @@ end
 -- Split a kernel file's forms into (body, init forms, declares). Only a
 -- TRAILING run of non-defun top-level forms is ever moved, and it is run
 -- immediately after the body chunk, so hoisting cannot reorder anything. In
--- the 41.2 kernel exactly two files have such a run: types.kl (161 declares)
+-- the 42 kernel exactly two files have such a run: types.kl (161 declares)
 -- and declarations.kl (one form, (shen.build-lambda-table (external shen))).
 -- Anything less tidy than [defuns...][inits...][declares...] is left inline.
 local function hoist_tail(forms)
@@ -1018,7 +1018,7 @@ local function fasl_replay(cached)
       P.F["put"](r.name, R.intern("shen.lambda-form"), val,
                  P.GLOBALS["*property-vector*"])
     elseif r.k == "lt" then
-      -- 41.2 kernel path: (set shen.*lambdatable* ...) carries live curried
+      -- 42 kernel path: (set shen.*lambdatable* ...) carries live curried
       -- lambdas, so the recording stored only the NAMES whose entries the set
       -- added/replaced. Rebuild each entry from the live defun exactly the way
       -- shen.update-lambdatable does (shen.lambda-entry reads the arity
@@ -1082,7 +1082,7 @@ end
 -- "typechecked in N inferences" banners — while user (output ...)/pr from the
 -- loaded forms still writes. That makes `bin/shen --hush-load FILE` output
 -- deterministic and cross-port comparable (only the program's own output),
--- which -q cannot do: on the 41.2 kernel *hush* gates pr itself, so -q
+-- which -q cannot do: on the 42 kernel *hush* gates pr itself, so -q
 -- silences the tests' (output ...) lines too.
 --
 -- Mechanism: load's own chatter is pr'd to (stoutput) OUTSIDE any eval-kl
@@ -1200,7 +1200,7 @@ local function install_fasl()
     -- fast-forward (max) covers it without hundreds of noise records
     if nm == "shen.*gensym*" then return nil end
     if nm == "shen.*lambdatable*" then
-      -- 41.2 kernel: shen.update-lambdatable / update-lambda-table set the
+      -- 42 kernel: shen.update-lambdatable / update-lambda-table set the
       -- whole assoc list, whose entries are (name . live-curried-lambda) —
       -- unserializable, and the reason every stdlib/user load used to be
       -- fasl-uncacheable. The recorder runs BEFORE the original set, so the
@@ -1375,7 +1375,7 @@ end
 
 -- ---- initialise ----------------------------------------------------------
 -- ---- standard library (S-lineage lib/StLib sources) ----------------------
--- Tarver's S41.2 refresh ships the standard library as Shen SOURCES under
+-- Tarver's S42 release ships the standard library as Shen SOURCES under
 -- Lib/StLib (loaded into the SBCL image at install time), not as a precompiled
 -- stlib.kl. shen-lua vendors those sources under lib/StLib/ and loads them the
 -- same way: through the kernel's own (load ...) / define pipeline. Unlike raw
@@ -1608,7 +1608,7 @@ P.load_stdlib = load_stdlib
 local function initialise()
   -- Kernel environment setup (env globals, *property-vector*, arity table).
   --
-  -- On the S41.2 (2026-07-11 refresh) kernel this all happens at LOAD time via
+  -- On the S42 kernel this all happens at LOAD time via
   -- top-level forms in declarations.kl — there is no `shen.initialise` function
   -- to call, so load_kernel() has already done it by the time we get here.
   --
@@ -1637,7 +1637,7 @@ local function initialise()
     add_backend("shen.x.*zmq-backend*", "shen.x/zmq-host")
     -- The community extension's `features.initialise` additionally hooks the
     -- legacy macro registration API (`shen.set-lambda-form-entry`), which is
-    -- not present in the refreshed 41.2 kernel.  Seed its backing global
+    -- not present in the refreshed 42 kernel.  Seed its backing global
     -- directly; `features.current` is the stable API consumed by Batteries
     -- and `features.add` can still extend this list later.
     P.GLOBALS["shen.x.features.*features*"] = R.from_table(detected)

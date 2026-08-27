@@ -3,14 +3,14 @@
 Branch: `perf/urdr-workload`  
 Host: macOS arm64, LuaJIT 2.1 rolling (`/Users/reuben/.local/Homebrew/bin/luajit`)  
 Pins: urdr suites under `shen/tests/{prng,world,search}`; shen-cl baseline
-`urdr-shen-cl-41.2/bin/sbcl/shen script …`.
+`urdr-shen-cl-42/bin/sbcl/shen script …`.
 
 Invocation (warm fasl; no `script` subcommand on shen-lua):
 
 ```bash
 export PATH="/Users/reuben/.local/Homebrew/bin:$PATH"
 export SHEN_LUA=/Users/reuben/projects/shen-lua/bin/shen
-export SHEN_CL=/Users/reuben/projects/urdr-shen-cl-41.2/bin/sbcl/shen
+export SHEN_CL=/Users/reuben/projects/urdr-shen-cl-42/bin/sbcl/shen
 cd /Users/reuben/projects/urdr
 /usr/bin/time -lp $SHEN_LUA shen/tests/prng/run-tests.shen
 /usr/bin/time -lp $SHEN_CL script shen/tests/prng/run-tests.shen
@@ -189,7 +189,7 @@ installed, not work being redone.
 | `bin/shen -q run-tests.shen` | 0 |
 
 `-q` is empty — the reported blocker — and is kernel-faithful (*hush* gates
-`pr` on 41.2), so it stays. `--hush-load` yields exactly the 71 lines the
+`pr` on 42), so it stays. `--hush-load` yields exactly the 71 lines the
 suite itself prints, and the relationship to shen-cl is exact: `diff` turns
 shen-cl's 232 lines into shen-lua's 71 by **deletion only** (161 deletions,
 0 insertions, 0 changes), i.e. shen-lua `--hush-load` stdout is byte-for-byte

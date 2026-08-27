@@ -14,8 +14,8 @@ primitives on a host runtime and (b) translating the kernel's `.kl` files into
 that host. This port does both by **compiling KLambda to Lua source** that
 LuaJIT then trace-compiles to machine code.
 
-It targets **Shen 41.2** (the KLambda is vendored under `klambda/`; see
-[`klambda/PROVENANCE.md`](klambda/PROVENANCE.md)) and passes the official 41.2
+It targets **Shen 42** (the KLambda is vendored under `klambda/`; see
+[`klambda/PROVENANCE.md`](klambda/PROVENANCE.md)) and passes the official 42
 kernel test suite (134/134). Earlier versions were certified against the Shen
 22.4 kernel test suite.
 
@@ -155,7 +155,7 @@ configuration.
 ## Requirements
 
 * **LuaJIT 2.1** (Lua 5.1 semantics). On Debian/Ubuntu: `apt-get install luajit`.
-* Nothing else — the **Shen 41.2 KLambda sources** (`klambda/`) are vendored in this
+* Nothing else — the **Shen 42 KLambda sources** (`klambda/`) are vendored in this
   repository for a self-contained clone-and-run experience. You can still point
   `SHEN_KL_DIR` at an external checkout if you are working against a different
   ShenOSKernel tree.
@@ -250,7 +250,7 @@ bin/shen -q prog.shen          # -q sets *hush*: silences load echo AND (output 
 
 #### Batch and golden-suite runners: `--hush-load`, not `-q`
 
-On the 41.2 kernel the `*hush*` global gates **`pr` itself**, so `-q` silences
+On the 42 kernel the `*hush*` global gates **`pr` itself**, so `-q` silences
 *all* standard output — including the program's own `(output ...)`. That makes
 `-q` useless for a runner that diffs a suite's printed results against a golden
 file (issue #46): the file comes back empty.
@@ -295,8 +295,8 @@ luarocks make --local shen-scm-1.rockspec   # or: install the development tree
 luarocks tree whose interpreter is LuaJIT, e.g.
 `luarocks --lua-dir=$(brew --prefix luajit) --lua-version=5.1 install shen`.)
 
-Rock versions map to kernels: **0.9.0** bundles kernel **41.1**, **0.10.0+**
-bundles **41.2** (check with `shen -e '(version)'`). **0.10.1** is the current
+Rock versions map to kernels: **0.9.0** bundles kernel **41.1**, while
+**0.10.0+** bundles **42** (check with `shen -e '(version)'`). **0.10.1** is the current
 release (0.10.0 + the warm-FASL `(load)` echo fix, #40). If luarocks hands you
 0.9.0, ask for the newer rock explicitly (`luarocks install shen 0.10.1-1`)
 or build from a checkout with the `scm` rockspec above.
@@ -364,9 +364,9 @@ browser. One `rules.shen`, two runtimes, no client/server drift. See its
 
 ## Certification / Testing
 
-The port loads and initialises the full 41.2 kernel plus the standard library
+The port loads and initialises the full 42 kernel plus the standard library
 (loaded at boot from the S-lineage Shen sources under `lib/StLib/`) and the
-extensions, and **passes the official 41.2 kernel test suite, 134/134**:
+extensions, and **passes the official 42 kernel test suite, 134/134**:
 
 ```sh
 luajit run-kernel-tests.lua    # => "passed ... 134 / failed ... 0 / pass rate ... 100%"
@@ -374,12 +374,12 @@ lua    run-kernel-tests.lua    # same result on PUC Lua 5.1 / 5.4 / 5.5 (slower)
 ```
 
 The official test suite is vendored in `tests/` (BSD-licensed, from the
-ShenOSKernel 41.2 distribution), so certification is verifiable from a bare
+ShenOSKernel 42 distribution), so certification is verifiable from a bare
 clone. `SHEN_TESTS_DIR` points the driver at a different suite location.
 Port-specific specs live in `test/` (engine, interop, REPL, tail-call
 lowering).
 
-See [doc/41.1-STATUS.md](doc/41.1-STATUS.md) for the original 41.1 certification write-up (the 41.2 upgrade re-ran the same suite, 134/134).
+See [doc/41.1-STATUS.md](doc/41.1-STATUS.md) for the original certification write-up.
 
 ## Benchmarks
 
@@ -391,8 +391,8 @@ deterministic metric):
 |----------|-----:|
 | Kernel boot, cold (compile all `.kl`) | ~0.7 s |
 | Kernel boot, warm (bytecode cache) | **~0.03 s** |
-| **Full 41.2 test suite, warm** (kernel + fasl caches) | **~2.3 s** |
-| Full 41.2 test suite, cold (caches off) | ~5.4 s |
+| **Full 42 test suite, warm** (kernel + fasl caches) | **~2.3 s** |
+| Full 42 test suite, cold (caches off) | ~5.4 s |
 | Reference typecheck (431,741 inferences) | ~0.061 s (8.9× vs legacy engine) |
 | Typechecker allocation | ~24 B/inf (−93% vs legacy) |
 | Einstein's riddle (Prolog backtracking) | ~0.002 s / solve (22× vs legacy) |

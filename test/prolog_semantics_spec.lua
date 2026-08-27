@@ -10,7 +10,7 @@
 -- kernel Prolog directly.
 --
 -- Every expectation below was MEASURED on shen-go, shen-cl and shen-rust
--- (pinned checkouts, kernel 41.2) and was byte-identical on all three. The
+-- (pinned checkouts, kernel 42) and was byte-identical on all three. The
 -- probe methodology is urdr's four-port portability spike,
 -- spikes/m1-prolog-portability: results are rendered by a printer defined
 -- here, never by a port's own value writer, so runtime variable naming and

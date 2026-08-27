@@ -1,6 +1,6 @@
-# Vendored KLambda for Shen 41.2
+# Vendored KLambda for Shen 42
 
-These are the KLambda kernel sources for **Shen 41.2**. They are included
+These are the KLambda kernel sources for **Shen 42**. They are included
 directly in this repository so that `shen-lua` is self-contained: you can
 `git clone` and run without needing a separate ShenOSKernel checkout.
 
@@ -14,12 +14,12 @@ sources, checksums, and the full list of what the refresh added/removed.
 
 There are 19 `.kl` files.
 
-**Kernel proper — S41.2 (2026-07-11 refresh), 15 files, byte-identical to
-`shenlanguage.org/Download/S41.2.zip`:**
+**Kernel proper — S42 (2026-07-11 refresh), 15 files, byte-identical to
+`shenlanguage.org/Download/S42.zip`:**
 - yacc, core, load, prolog, reader, sequent, sys, t-star, toplevel,
   track, types, writer, backend, declarations, macros
 
-**Extensions — retained from community ShenOSKernel-41.2:**
+**Extensions — retained from community ShenOSKernel-42:**
 - extension-features, extension-expand-dynamic, extension-launcher (booted)
 - extension-programmable-pattern-matching (vendored, opt-in; NOT on the boot list)
 
