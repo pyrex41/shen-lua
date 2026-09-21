@@ -6,6 +6,8 @@ build/shen-bundle.lua
 luacov.stats.out
 luacov.report.out
 *.src.rock
+# Shen→KL dumps next to example sources (rules.shen is the source of truth)
+examples/**/*.kl
 examples/*/logs/
 examples/*/client_body_temp/
 examples/*/fastcgi_temp/
