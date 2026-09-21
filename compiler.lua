@@ -75,6 +75,14 @@ local CTX  -- nil outside a defun compile; otherwise a fresh table per defun.
 -- there would cross a function boundary and fail to parse.
 local SELF
 
+-- Factoriser failure-continuations (S37+):
+--   (let G (freeze E) ... (thaw G) ...)
+-- Lowered when G is only thawed and never escapes (Astra/port-performance.md).
+-- Unique thaw: compile E at the thaw site (delayed eval, no BIND).
+-- Several tail thaws: one shared ::fail:: + goto (LuaJIT; PUC 5.1 keeps BIND).
+-- Nested KC/IIFE functions see only `inline` records (goto cannot cross).
+local CONT = {}
+
 -- The lowering emits `goto`/labels, which PUC Lua 5.1 cannot parse (goto is
 -- 5.2+/LuaJIT). Feature-detect once; without it every defun simply keeps the
 -- proper-tail-call form (correctness identical -- this is a perf-only lever).
@@ -329,6 +337,26 @@ local function ftab_ref(name)
   return 'F[' .. qstr(name) .. ']'
 end
 
+-- Direct `impl(...)` for self-calls and per-entry `local fN = F["name"]`
+-- for other known-arity callees. Lookup happens once per invocation of
+-- `impl`, not per inner call; redefinition between top-level calls is
+-- still seen. Nested KC/IIFE bodies keep F["name"] (those locals are not
+-- in scope). Self-calls use `impl` so recursion does not hash F at all.
+local IN_IMPL = false
+local DEFUN_NAME = nil
+local FREF_LIST = {}
+local FREF_MAP = {}
+local function callee_ref(name)
+  if not IN_IMPL then return ftab_ref(name) end
+  if DEFUN_NAME and name == DEFUN_NAME then return "impl" end
+  local ln = FREF_MAP[name]
+  if ln then return ln end
+  ln = "f" .. (#FREF_LIST + 1)
+  FREF_LIST[#FREF_LIST + 1] = { name = name, ln = ln }
+  FREF_MAP[name] = ln
+  return ln
+end
+
 -- 2-arg numeric primitives that get inlined to an ENV fast-path helper
 -- (see ENV.ADD/.../EQ in prims.lua and the call site in ccall). Track 1.1/1.2.
 local ARITH2 = {
@@ -514,7 +542,9 @@ local function chain_materialize(form, env)
   local hit = CCACHE[key]
   if hit then return hit end
   local inner = chain_materialize(form[2][1], env)
-  local expr = ftab_ref(form[1].name) .. "(" .. inner .. ")"
+  -- HD/TL helpers (see ccall): same is_cons check as F["hd"]/F["tl"], but a
+  -- direct ENV lookup rather than an F-table hash at every pattern step.
+  local expr = (form[1].name == "hd" and "HD(" or "TL(") .. inner .. ")"
   local name = chain_slot(expr)
   if not name then return expr end   -- slot budget exhausted: stay inline
   CCACHE[key] = name
@@ -538,7 +568,10 @@ end
 -- evaluating a later hoisted chain ahead of them is unobservable. Everything
 -- else (user calls, arithmetic that can type-error, control-form KC calls,
 -- APP dispatch, un-hoisted hd/tl) clears HOIST.pure.
-local PURE_HEADS = { ["cons?"]=true, ["="]=true, ["cons"]=true, ["not"]=true }
+local PURE_HEADS = {
+  ["cons?"]=true, ["="]=true, ["cons"]=true, ["not"]=true,
+  ["empty?"]=true, ["number?"]=true, ["string?"]=true, ["boolean?"]=true,
+}
 
 -- Compile `form` as the value expression of a statement being emitted NOW,
 -- with chain hoisting enabled. Returns prefix statements and the expression.
@@ -682,7 +715,7 @@ local function try_flatten_call_chain(form, env)
     local ar = C.ARITY[hname]
     local call_str
     if ar and #prev_strs + 1 == ar then
-      call_str = ftab_ref(hname) .. "(" .. arg_list .. ")"
+      call_str = callee_ref(hname) .. "(" .. arg_list .. ")"
     else
       -- fall back to APP for unknown / mismatched arity
       call_str = "APP(" .. symlit(hname) .. ", " .. arg_list .. ")"
@@ -700,7 +733,7 @@ local function try_flatten_call_chain(form, env)
   local ar = C.ARITY[hname]
   local call_str
   if ar and #prev_strs + 1 == ar then
-    call_str = ftab_ref(hname) .. "(" .. arg_list .. ")"
+    call_str = callee_ref(hname) .. "(" .. arg_list .. ")"
   else
     call_str = "APP(" .. symlit(hname) .. ", " .. arg_list .. ")"
   end
@@ -734,6 +767,23 @@ local function ccall(form, env)
         -- SUB, ..., EQ) instead of an F-table hash lookup. The helpers guard on
         -- type(number) and fall back to F[name], preserving KL semantics + late
         -- binding. Only when the head isn't a locally-bound var (checked above).
+        -- Equality specialization (shen-scheme emit-equality-check). When one
+        -- operand is a compile-time atom — (), a boolean/number/string
+        -- literal, or an unbound (self-evaluating) symbol — KL `=` is Lua
+        -- identity/`==` (interned symbols, interned strings, unique NIL).
+        -- Avoids the EQ helper entirely at the pattern-match sites the kernel
+        -- emits as `(= () X)` / `(= true X)` / `(= foo X)`.
+        if name == "=" and ar == 2 then
+          local function atom_lit(form)
+            if form == NIL then return true end
+            local t = type(form)
+            if t == "number" or t == "boolean" or t == "string" then return true end
+            return is_symbol(form) and not env[form.name]
+          end
+          if atom_lit(args[1]) or atom_lit(args[2]) then
+            return "(" .. cargs[1] .. ")==(" .. cargs[2] .. ")"
+          end
+        end
         local helper = ARITH2[name]
         if helper and ar == 2 then
           return helper .. "(" .. argstr .. ")"
@@ -753,7 +803,73 @@ local function ccall(form, env)
         if name == "cons" and ar == 2 then
           return "setmetatable({" .. argstr .. "}, CMT)"
         end
-        return ftab_ref(name) .. "(" .. argstr .. ")"
+        -- Unary KLambda ops that map onto a Lua test / operator (shen-scheme
+        -- unary-op-mapping). `not` matches the kernel `(if V false true)` —
+        -- Lua truthiness, no boolean guard. `hd`/`tl`/`thaw` go through ENV
+        -- helpers that keep the primitive's error / thunk paths.
+        if name == "empty?" and ar == 1 then
+          return "(" .. argstr .. ")==NIL"
+        end
+        if name == "cons?" and ar == 1 then
+          return "getmetatable(" .. argstr .. ")==CMT"
+        end
+        if name == "number?" and ar == 1 then
+          return "type(" .. argstr .. ")==\"number\""
+        end
+        if name == "string?" and ar == 1 then
+          return "type(" .. argstr .. ")==\"string\""
+        end
+        if name == "boolean?" and ar == 1 then
+          return "type(" .. argstr .. ")==\"boolean\""
+        end
+        if name == "not" and ar == 1 then
+          return "not (" .. argstr .. ")"
+        end
+        if name == "hd" and ar == 1 then
+          return "HD(" .. argstr .. ")"
+        end
+        if name == "tl" and ar == 1 then
+          return "TL(" .. argstr .. ")"
+        end
+        if name == "thaw" and ar == 1 then
+          return "THAW(" .. argstr .. ")"
+        end
+        -- `(intern "foo")` is a compile-time intern (shen-scheme: quote).
+        -- "true"/"false" follow the intern primitive's boolean mapping.
+        if name == "intern" and ar == 1 and type(args[1]) == "string" then
+          local s = args[1]
+          if s == "true" then return "true" end
+          if s == "false" then return "false" end
+          return symlit(s)
+        end
+        -- (value LIT): direct GLOBALS access (shen-scheme static globals).
+        -- Unbound still errors via the primitive fallback. `set` is NOT
+        -- inlined: boot.lua's fasl recorder wraps F["set"] to capture
+        -- expansion-time globals, and a SET_S that wrote GLOBALS directly
+        -- would silently drop those records (stdlib image ≠ uncached boot).
+        if name == "value" and ar == 1 and is_symbol(args[1]) and not env[args[1].name] then
+          return "VALUE_S(" .. qstr(args[1].name) .. ")"
+        end
+        -- String / vector primitives that map onto Lua ops (fallback helpers
+        -- preserve KL error messages on the slow path).
+        if name == "cn" and ar == 2 then return "CN(" .. argstr .. ")" end
+        if name == "@s" and ar == 2 then return "CN(" .. argstr .. ")" end
+        if name == "pos" and ar == 2 then return "POS(" .. argstr .. ")" end
+        if name == "tlstr" and ar == 1 then return "TLSTR(" .. argstr .. ")" end
+        if name == "string->n" and ar == 1 then return "STRN(" .. argstr .. ")" end
+        if name == "n->string" and ar == 1 then return "NSTR(" .. argstr .. ")" end
+        if name == "hdstr" and ar == 1 then return "POS(" .. argstr .. ", 0)" end
+        if name == "shen.hds=?" and ar == 2 then return "HDS_EQ(" .. argstr .. ")" end
+        if name == "shen.comb" and ar == 2 then return "COMB(" .. argstr .. ")" end
+        if name == "shen.in->" and ar == 1 then return "HD(" .. argstr .. ")" end
+        if name == "shen.<-out" and ar == 1 then return "HD(TL(" .. argstr .. "))" end
+        if name == "shen.ccons?" and ar == 1 then return "CCONS_Q(" .. argstr .. ")" end
+        if name == "<-address" and ar == 2 then return "ADDR(" .. argstr .. ")" end
+        if name == "address->" and ar == 3 then return "ADSET(" .. argstr .. ")" end
+        if name == "absvector?" and ar == 1 then
+          return "getmetatable(" .. argstr .. ")==VMT"
+        end
+        return callee_ref(name) .. "(" .. argstr .. ")"
       else
         -- Arity mismatch at compile time: route through APP so dispatch uses
         -- the *current* runtime arity (FA[F[name]]) rather than the value of
@@ -981,6 +1097,298 @@ local function compile_cons_tree(form, env)
 end
 
 -- ------------------------------------------------------------------
+-- trap-error peephole (shen-scheme emit-trap-error-optimize).
+-- (trap-error (value X) (lambda E H)) and the same for <-vector / <-address,
+-- when E is unused in H, become a non-throwing lookup. pcall is a LuaJIT
+-- trace barrier; the kernel uses this pattern for unbound globals and empty
+-- property-vector buckets.
+-- ------------------------------------------------------------------
+local function mentions_name(form, name, shadowed)
+  if not is_cons(form) then
+    return is_symbol(form) and form.name == name and not shadowed[name]
+  end
+  local head = form[1]
+  if is_symbol(head) then
+    local op = head.name
+    if op == "let" and not shadowed["let"] then
+      local var = car(cdr(form))
+      local val = car(cdr(cdr(form)))
+      local body = car(cdr(cdr(cdr(form))))
+      if mentions_name(val, name, shadowed) then return true end
+      local nb = {}; for k,v in pairs(shadowed) do nb[k] = v end
+      if is_symbol(var) then nb[var.name] = true end
+      return mentions_name(body, name, nb)
+    elseif op == "lambda" and not shadowed["lambda"] then
+      local var = car(cdr(form))
+      local body = car(cdr(cdr(form)))
+      local nb = {}; for k,v in pairs(shadowed) do nb[k] = v end
+      if is_symbol(var) then nb[var.name] = true end
+      return mentions_name(body, name, nb)
+    end
+  end
+  local cur = form
+  while is_cons(cur) do
+    if mentions_name(cur[1], name, shadowed) then return true end
+    cur = cur[2]
+  end
+  return false
+end
+
+local function const_lua(form, env)
+  if form == NIL then return "NIL" end
+  local t = type(form)
+  if t == "number" then return cnum(form) end
+  if t == "boolean" then return form and "true" or "false" end
+  if t == "string" then return qstr(form) end
+  if is_symbol(form) and not env[form.name] then return symlit(form.name) end
+  return nil
+end
+
+local function try_trap_opt(form, env)
+  if not (is_cons(form) and is_symbol(form[1]) and form[1].name == "trap-error"
+          and not env["trap-error"]) then
+    return nil
+  end
+  local expr = car(cdr(form))
+  local handler = car(cdr(cdr(form)))
+  if not (is_cons(handler) and is_symbol(handler[1]) and handler[1].name == "lambda"
+          and not env["lambda"]) then
+    return nil
+  end
+  local var = car(cdr(handler))
+  local body = car(cdr(cdr(handler)))
+  if not is_symbol(var) then return nil end
+  if mentions_name(body, var.name, {}) then return nil end
+  if not is_cons(expr) then return nil end
+  local eh = expr[1]
+  if not (is_symbol(eh) and not env[eh.name]) then return nil end
+  local default = const_lua(body, env)
+  if not default then
+    default = "function() return " .. cexpr(body, env) .. " end"
+  end
+  -- Operands must not raise (shen-scheme note; bifrost trap-error-operand-raises).
+  -- Variables and literals are safe; (<-vector (simple-error "boom") 1) is not.
+  local function safe_op(form)
+    if form == NIL then return true end
+    local t = type(form)
+    if t == "number" or t == "boolean" or t == "string" then return true end
+    return is_symbol(form)
+  end
+  if eh.name == "value" then
+    local x = car(cdr(expr))
+    if not safe_op(x) then return nil end
+    if is_symbol(x) and not env[x.name] then
+      return "VALUE_OR_S(" .. qstr(x.name) .. ", " .. default .. ")"
+    end
+    return "VALUE_OR(" .. cexpr(x, env) .. ", " .. default .. ")"
+  elseif eh.name == "<-vector" then
+    local v = car(cdr(expr))
+    local n = car(cdr(cdr(expr)))
+    if not (safe_op(v) and safe_op(n)) then return nil end
+    return "VEC_OR(" .. cexpr(v, env) .. ", " .. cexpr(n, env) .. ", " .. default .. ")"
+  elseif eh.name == "<-address" then
+    local v = car(cdr(expr))
+    local n = car(cdr(cdr(expr)))
+    if not (safe_op(v) and safe_op(n)) then return nil end
+    return "ADDR_OR(" .. cexpr(v, env) .. ", " .. cexpr(n, env) .. ", " .. default .. ")"
+  elseif eh.name == "get" then
+    local x = car(cdr(expr))
+    local y = car(cdr(cdr(expr)))
+    local z = car(cdr(cdr(cdr(expr))))
+    if not (safe_op(x) and safe_op(y) and safe_op(z)) then return nil end
+    return "GET_OR(" .. cexpr(x, env) .. ", " .. cexpr(y, env) .. ", "
+           .. cexpr(z, env) .. ", " .. default .. ")"
+  end
+  return nil
+end
+
+-- ------------------------------------------------------------------
+-- freeze-let failure continuations (see CONT).
+-- ------------------------------------------------------------------
+local function analyze_cont(form, cname, env, tailpos)
+  if not is_cons(form) then
+    if is_symbol(form) and form.name == cname then
+      return true, 0, 1, 0
+    end
+    return false, 0, 0, 0
+  end
+  local head = car(form)
+  if is_symbol(head) and not env[head.name] then
+    local op = head.name
+    if op == "thaw" then
+      local args = to_array(cdr(form))
+      if #args == 1 and is_symbol(args[1]) and args[1].name == cname then
+        if tailpos then return false, 1, 0, 0 end
+        return false, 1, 0, 1
+      end
+    elseif op == "let" then
+      local var = car(cdr(form))
+      local val = car(cdr(cdr(form)))
+      local body = car(cdr(cdr(cdr(form))))
+      local e1, t1, o1, n1 = analyze_cont(val, cname, env, false)
+      if is_symbol(var) and var.name == cname then
+        return e1, t1, o1, n1
+      end
+      local e2, t2, o2, n2 = analyze_cont(body, cname, env, tailpos)
+      return e1 or e2, t1 + t2, o1 + o2, n1 + n2
+    elseif op == "lambda" then
+      local var = car(cdr(form))
+      local body = car(cdr(cdr(form)))
+      if is_symbol(var) and var.name == cname then return false, 0, 0, 0 end
+      local e, t, o, n = analyze_cont(body, cname, env, false)
+      if t > 0 or o > 0 then return true, t, o, n end
+      return e, t, o, n
+    elseif op == "freeze" then
+      local body = car(cdr(form))
+      local e, t, o, n = analyze_cont(body, cname, env, false)
+      if t > 0 or o > 0 then return true, t, o, n end
+      return e, t, o, n
+    elseif op == "trap-error" then
+      local e1, t1, o1, n1 = analyze_cont(car(cdr(form)), cname, env, false)
+      local e2, t2, o2, n2 = analyze_cont(car(cdr(cdr(form))), cname, env, false)
+      if t1 + t2 > 0 or o1 + o2 > 0 then return true, t1 + t2, o1 + o2, n1 + n2 end
+      return e1 or e2, t1 + t2, o1 + o2, n1 + n2
+    elseif op == "if" then
+      local test = car(cdr(form))
+      local th = car(cdr(cdr(form)))
+      local rest = cdr(cdr(cdr(form)))
+      local el = is_cons(rest) and car(rest) or nil
+      local e, t, o, n = analyze_cont(test, cname, env, false)
+      local e2, t2, o2, n2 = analyze_cont(th, cname, env, tailpos)
+      e, t, o, n = e or e2, t + t2, o + o2, n + n2
+      if el then
+        local e3, t3, o3, n3 = analyze_cont(el, cname, env, tailpos)
+        e, t, o, n = e or e3, t + t3, o + o3, n + n3
+      end
+      return e, t, o, n
+    elseif op == "cond" then
+      local e, t, o, n = false, 0, 0, 0
+      local cur = cdr(form)
+      while is_cons(cur) do
+        local cl = cur[1]
+        local e1, t1, o1, n1 = analyze_cont(car(cl), cname, env, false)
+        local e2, t2, o2, n2 = analyze_cont(car(cdr(cl)), cname, env, tailpos)
+        e, t, o, n = e or e1 or e2, t + t1 + t2, o + o1 + o2, n + n1 + n2
+        cur = cur[2]
+      end
+      return e, t, o, n
+    elseif op == "do" then
+      local forms = to_array(cdr(form))
+      local e, t, o, n = false, 0, 0, 0
+      for i = 1, #forms do
+        local e1, t1, o1, n1 = analyze_cont(forms[i], cname, env, tailpos and i == #forms)
+        e, t, o, n = e or e1, t + t1, o + o1, n + n1
+      end
+      return e, t, o, n
+    elseif op == "and" or op == "or" then
+      local a = car(cdr(form)); local b = car(cdr(cdr(form)))
+      local e1, t1, o1, n1 = analyze_cont(a, cname, env, false)
+      local e2, t2, o2, n2 = analyze_cont(b, cname, env, tailpos)
+      return e1 or e2, t1 + t2, o1 + o2, n1 + n2
+    elseif op == "type" then
+      return analyze_cont(car(cdr(form)), cname, env, tailpos)
+    end
+  end
+  if is_symbol(head) and head.name == cname then
+    return true, 0, 1, 0
+  end
+  local e, t, o, n = false, 0, 0, 0
+  local cur = form
+  while is_cons(cur) do
+    local e1, t1, o1, n1 = analyze_cont(cur[1], cname, env, false)
+    e, t, o, n = e or e1, t + t1, o + o1, n + n1
+    cur = cur[2]
+  end
+  return e, t, o, n
+end
+
+local function lookup_cont(name)
+  for i = #CONT, 1, -1 do
+    if CONT[i].name == name then return CONT[i] end
+  end
+end
+
+local function snapshot_env(eform, env)
+  if not SELF then return env, "" end
+  local fv = {}
+  collect_free(eform, env, {}, fv)
+  local newenv = {}; for k, v in pairs(env) do newenv[k] = v end
+  local stmts = {}
+  local params = {}
+  for i = 1, #SELF.lnames do params[SELF.lnames[i]] = true end
+  for kname in pairs(fv) do
+    local ln = env[kname]
+    if type(ln) == "string" and params[ln] then
+      local cap = gen("c")
+      stmts[#stmts + 1] = "local " .. cap .. " = " .. ln .. ";"
+      newenv[kname] = cap
+    end
+  end
+  return newenv, table.concat(stmts, " ")
+end
+
+local function try_cont_thaw(form, env, tail)
+  if not is_cons(form) then return nil end
+  local h = form[1]
+  if not (is_symbol(h) and h.name == "thaw" and not env["thaw"]) then return nil end
+  local rest = form[2]
+  if not (is_cons(rest) and rest[2] == NIL and is_symbol(rest[1])) then return nil end
+  local rec = lookup_cont(rest[1].name)
+  if not rec then return nil end
+  if rec.kind == "inline" then
+    if tail then return ctail(rec.expr, rec.env) end
+    return cexpr(rec.expr, rec.env)
+  end
+  if rec.kind == "goto" and tail then
+    return "goto " .. rec.label
+  end
+  return nil
+end
+
+local function try_lower_freeze_let(var, val, body, env)
+  -- SHEN_FREEZE_CONT=off keeps BIND/THAW (A/B for load/compile benches).
+  if os.getenv("SHEN_FREEZE_CONT") == "off" then return nil end
+  if not is_symbol(var) then return nil end
+  if not (is_cons(val) and is_symbol(val[1]) and val[1].name == "freeze"
+          and not env["freeze"]) then
+    return nil
+  end
+  local eform = car(cdr(val))
+  local escapes, nthaw, nother, nontail = analyze_cont(body, var.name, env, true)
+  if escapes or nother > 0 or nthaw == 0 then return nil end
+  local freeze_env, snap = snapshot_env(eform, env)
+  if nthaw == 1 then
+    CONT[#CONT + 1] = { name = var.name, kind = "inline", expr = eform, env = freeze_env }
+    local s = ctail(body, env)
+    CONT[#CONT] = nil
+    return (snap ~= "" and (snap .. " ") or "") .. s
+  end
+  if nontail > 0 or not HAS_GOTO then return nil end
+  local rec = {
+    name = var.name, kind = "goto", expr = eform, env = freeze_env,
+    label = gen("fail"),
+  }
+  CONT[#CONT + 1] = rec
+  local body_s = ctail(body, env)
+  CONT[#CONT] = nil
+  -- Inner `do` so a `return` in the body is the last statement of its block;
+  -- `goto fail` still reaches the label after (same idiom as ::tco::).
+  return (snap ~= "" and (snap .. " ") or "")
+         .. "do " .. body_s .. " end ::" .. rec.label .. ":: "
+         .. ctail(eform, freeze_env)
+end
+
+local function push_inline_cont()
+  local saved = CONT
+  local f = {}
+  for i = 1, #CONT do
+    if CONT[i].kind == "inline" then f[#f + 1] = CONT[i] end
+  end
+  CONT = f
+  return saved
+end
+
+-- ------------------------------------------------------------------
 -- cexpr : value position (returns a Lua expression string)
 -- ------------------------------------------------------------------
 function cexpr(form, env)
@@ -1017,6 +1425,13 @@ function cexpr(form, env)
   if k then return k end
   if is_symbol(head) and not env[head.name] then
     local op = head.name
+    if op == "trap-error" then
+      local opt = try_trap_opt(form, env)
+      if opt then
+        if HOIST then HOIST.pure = false end
+        return opt
+      end
+    end
     if op == "if" or op == "cond" or op == "let" or op == "do"
        or op == "trap-error" or op == "and" or op == "or" then
       -- Control form in value position. The obvious codegen wraps the tail
@@ -1049,10 +1464,13 @@ function cexpr(form, env)
         -- in the enclosing function are not in scope here.
         local saved_self = SELF
         local saved_h, saved_cc, saved_fnl = HOIST, CCACHE, FNL
-        SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true)
+        local saved_cont = push_inline_cont()
+        local saved_impl = IN_IMPL
+        SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true); IN_IMPL = false
         local body_stmts = ctail(form, env)
         if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
         SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
+        CONT = saved_cont; IN_IMPL = saved_impl
         local idx = #CTX.cbodies + 1
         CTX.cbodies[idx] = "function(" .. params .. ") " .. body_stmts .. " end"
         -- The KC call itself may raise or side-effect: later siblings in the
@@ -1064,10 +1482,13 @@ function cexpr(form, env)
       -- (Clear SELF here too: the IIFE is a separate function.)
       local saved_self = SELF
       local saved_h, saved_cc, saved_fnl = HOIST, CCACHE, FNL
-      SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true)
+      local saved_cont = push_inline_cont()
+      local saved_impl = IN_IMPL
+      SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true); IN_IMPL = false
       local body_stmts = ctail(form, env)
       if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
       SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
+      CONT = saved_cont; IN_IMPL = saved_impl
       if HOIST then HOIST.pure = false end
       return "(function() " .. body_stmts .. " end)()"
     end
@@ -1081,9 +1502,11 @@ function cexpr(form, env)
       local ln = gen("v")
       local e2 = extend(env, v.name, ln)
       -- Deferred body: nothing inside may be hoisted to the creation site.
-      local saved_h = HOIST; HOIST = nil
+      -- Not impl-scope: `fN` locals live in impl, not this nested function.
+      local saved_h, saved_impl = HOIST, IN_IMPL
+      HOIST = nil; IN_IMPL = false
       local bodyc = cexpr(body, e2)
-      HOIST = saved_h
+      HOIST = saved_h; IN_IMPL = saved_impl
       return "MKFUN(1, function(" .. ln .. ") return " .. bodyc .. " end)"
     elseif op == "freeze" then
       local body = car(cdr(form))
@@ -1100,18 +1523,20 @@ function cexpr(form, env)
         for kname in pairs(fv) do lnames[#lnames+1] = env[kname] end
         table.sort(lnames)  -- stable order for caller / body
         -- Deferred body: nothing inside may be hoisted to the creation site.
-        local saved_h = HOIST; HOIST = nil
+        local saved_h, saved_impl = HOIST, IN_IMPL
+        HOIST = nil; IN_IMPL = false
         local body_str = cexpr(body, env)
-        HOIST = saved_h
+        HOIST = saved_h; IN_IMPL = saved_impl
         local idx = #CTX.cbodies + 1
         CTX.cbodies[idx] = "function(" .. table.concat(lnames, ", ") .. ") return "
                            .. body_str .. " end"
         local call_args = (#lnames == 0) and "" or (", " .. table.concat(lnames, ", "))
         return "BIND(KC[" .. idx .. "]" .. call_args .. ")"
       end
-      local saved_h = HOIST; HOIST = nil
+      local saved_h, saved_impl = HOIST, IN_IMPL
+      HOIST = nil; IN_IMPL = false
       local bodyc = cexpr(body, env)
-      HOIST = saved_h
+      HOIST = saved_h; IN_IMPL = saved_impl
       return "MKFUN(0, function() return " .. bodyc .. " end)"
     elseif op == "defun" then
       error("defun in expression position")
@@ -1119,9 +1544,13 @@ function cexpr(form, env)
       -- (type EXPR TYPE) : types erased at KL boundary -> just the expr
       return cexpr(car(cdr(form)), env)
     else
+      local ct = try_cont_thaw(form, env, false)
+      if ct then return ct end
       return ccall(form, env)
     end
   else
+    local ct = try_cont_thaw(form, env, false)
+    if ct then return ct end
     return ccall(form, env)
   end
 end
@@ -1245,6 +1674,8 @@ function ctail(form, env)
       local v   = car(cdr(form))
       local val = car(cdr(cdr(form)))
       local body= car(cdr(cdr(cdr(form))))
+      local lowered = try_lower_freeze_let(v, val, body, env)
+      if lowered then return lowered end
       local ln = gen("v")
       local pre, valc = cstmt_expr(val, env)
       local e2 = extend(env, v.name, ln)
@@ -1276,6 +1707,8 @@ function ctail(form, env)
       local pre, ac = cstmt_expr(a, env)
       return pre .. "if (" .. ac .. ") then return true end " .. ctail(b, env)
     elseif op == "trap-error" then
+      local opt = try_trap_opt(form, env)
+      if opt then return "return " .. opt end
       local expr = car(cdr(form))
       local handler = car(cdr(cdr(form)))
       -- (trap-error E H): if E raises a Shen exception, apply H to it.
@@ -1287,6 +1720,8 @@ function ctail(form, env)
     elseif op == "lambda" or op == "freeze" then
       return "return " .. cexpr(form, env)
     else
+      local ct = try_cont_thaw(form, env, true)
+      if ct then return ct end
       local floated = try_let_float(form, env)
       if floated then return ctail(floated, env) end
       -- try_flatten_call_chain BEFORE try_self_tail: a >=16-deep last-arg
@@ -1375,9 +1810,20 @@ local function cdefun(form)
   else
     SELF = nil
   end
+  local saved_cont = CONT
+  CONT = {}
+  local saved_in, saved_dn = IN_IMPL, DEFUN_NAME
+  local saved_fl, saved_fm = FREF_LIST, FREF_MAP
+  IN_IMPL, DEFUN_NAME, FREF_LIST, FREF_MAP = true, name, {}, {}
   local body_src = ctail(body, env)
+  local fref_decls = {}
+  for i, r in ipairs(FREF_LIST) do
+    fref_decls[i] = "local " .. r.ln .. " = F[" .. qstr(r.name) .. "];"
+  end
   local lowered = SELF ~= nil and SELF.used
   SELF = saved_self
+  CONT = saved_cont
+  IN_IMPL, DEFUN_NAME, FREF_LIST, FREF_MAP = saved_in, saved_dn, saved_fl, saved_fm
   if lowered then
     -- `while true` (not a bare backward goto) so LuaJIT emits a real LOOP
     -- bytecode -- the natural trace anchor. ::tco:: sits at the end of the
@@ -1398,6 +1844,7 @@ local function cdefun(form)
   -- declared outside the tco loop: every PT slot is written before it is read
   -- on every path of every iteration, so one table per call suffices.
   if FNL.pt then body_src = "local PT = {}; " .. body_src end
+  if #fref_decls > 0 then body_src = table.concat(fref_decls, " ") .. " " .. body_src end
   FNL = saved_fnl
   CCACHE = saved_cc
   -- Hoisted (freeze ...) bodies AND value-position control-form bodies both go

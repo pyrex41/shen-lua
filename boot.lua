@@ -106,25 +106,13 @@ local function find_kldir()
   local env = os.getenv("SHEN_KL_DIR")
   if env and env ~= "" then return env end
 
-  -- 1. Vendored kernel inside this repo (preferred, makes the clone self-contained)
-  if io.open("klambda/toplevel.kl", "r") then
-    return "klambda"
-  end
-
-  -- 2. Common external locations (useful when developing against a full
-  --    ShenOSKernel checkout or the legacy shen-c reference implementation)
-  local candidates = {
-    "../cl-source/ShenOSKernel-42/klambda",
-    "../ShenOSKernel-42/klambda",
-    -- legacy shen-c (22.4) clone for comparison / older certification
-    "../shen-c/shen/src/kl",
-    "../shen-c/klambda",
-  }
-  -- 3. Relative to this module's own location, so requiring shen-lua from
-  --    another directory (LUA_PATH into a checkout, or a luarocks install)
-  --    works without chdir. For a luarocks install boot.lua lives at
-  --    <tree>/share/lua/5.1/boot.lua and copy_directories puts klambda at
-  --    <tree>/lib/luarocks/rocks-5.1/shen/<version>/klambda.
+  -- Prefer the klambda next to this module. Cwd-relative "klambda/" is
+  -- wrong when the launcher is invoked from another project (Bifrost's
+  -- cwd is ../bifrost; ../cl-source/... then wins and can be a different
+  -- kernel missing files). For a luarocks install boot.lua lives at
+  -- <tree>/share/lua/5.1/boot.lua and copy_directories puts klambda at
+  -- <tree>/lib/luarocks/rocks-5.1/shen/<version>/klambda.
+  local candidates = {}
   local src = debug.getinfo(1, "S").source
   local here = src:match("^@(.*)[/\\][^/\\]*$")
   if here then

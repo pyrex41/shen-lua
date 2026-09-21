@@ -54,6 +54,12 @@ do
   -- non-tail self-call only (result is consumed) -> not lowered
   src = gensrc("(defun tc-tree (N) (if (= N 0) 1 (+ (tc-tree (- N 1)) 1)))")
   check(not src:find("goto", 1, true), "non-tail self-call not lowered")
+  check(src:find("impl(", 1, true) and not src:find('F["tc-tree"](', 1, true),
+        "non-tail self-call uses impl() not F[name]")
+
+  src = gensrc("(defun tc-uses-rev (L) (reverse L))")
+  check(src:find('local f1 = F["reverse"]', 1, true) and src:find("f1(", 1, true),
+        "known-arity callee hoisted to impl-local")
 
   -- lambda closing over a param -> lowering must be skipped
   src = gensrc("(defun tc-cap (X Acc N) (if (= N 0) Acc (tc-cap X (cons (lambda Y X) Acc) (- N 1))))")

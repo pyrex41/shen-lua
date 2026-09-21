@@ -1086,6 +1086,590 @@ function P.install_native_stdlib()
     return comb_skip(rest)
   end
 
+  -- ---- shen-scheme-style kernel overrides --------------------------------
+  -- The kernel ships portable-but-slow defuns that overwrite the primitives
+  -- of the same name (integer?, boolean?, empty?, not, thaw, symbol?, ...) and
+  -- recursive-KL versions of list/string walkers (length, explode, nth, ...).
+  -- shen-scheme's overrides.shen / unary-op-mapping is the same idea: replace
+  -- those with a host mapping after the kernel loads. Error branches that have
+  -- a distinctive simple-error message still delegate to the captured original.
+
+  -- Kernel `(defun not (V) (if V false true))` — Lua truthiness, no boolean
+  -- guard. The primitive `not` type-checks; restoring THAT would reject (not 1).
+  local function native_not(x) return not x end
+  local function boolean_q(x) return type(x) == "boolean" end
+  local function empty_q(x) return x == NIL end
+  local function integer_q(x)
+    return type(x) == "number" and x == math.floor(x)
+           and x ~= math.huge and x ~= -math.huge
+  end
+  local function thaw(x)
+    if getmetatable(x) == Thunk then return runthunk(x) end
+    if type(x) == "function" then return x() end
+    return APP(x)
+  end
+  local function eqeq(a, b) return equal(a, b) end
+
+  -- symbol? / analyse-symbol?: kernel walks str via trap-error + hdstr/tlstr.
+  -- First char is alpha (letter or misc `=-*/+_?$!@~.><&%'#``); rest of those
+  -- plus digits. `{` `}` `:` `;` `,` are special-cased true in symbol?.
+  local orig_symbol = F["symbol?"]
+  local orig_analyse_sym = F["shen.analyse-symbol?"]
+  local SYMPAT = "^[=%-%*/%+_%?%$!@~%.><&%%'#`A-Za-z][=%-%*/%+_%?%$!@~%.><&%%'#`A-Za-z0-9]*$"
+  local SPECIAL_SYM = { ["{"]=true, ["}"]=true, [":"]=true, [";"]=true, [","]=true }
+  local function analyse_symbol_q(s)
+    if type(s) ~= "string" or s == "" then return orig_analyse_sym(s) end
+    return string.find(s, SYMPAT) ~= nil
+  end
+  local function symbol_q(x)
+    if is_symbol(x) then
+      local v = x.issym
+      if v == nil then
+        local n = x.name
+        v = SPECIAL_SYM[n] or string.find(n, SYMPAT) ~= nil
+        x.issym = v
+      end
+      return v
+    end
+    local t = type(x)
+    if t == "boolean" or t == "number" or t == "string"
+       or is_cons(x) or x == NIL then
+      return false
+    end
+    return orig_symbol(x)
+  end
+
+  -- length: kernel length-h is (if empty then acc else (length-h (tl L) (+ acc 1)))
+  -- so a non-list errors via `tl`. Delegate on an improper tail.
+  local orig_length = F["length"]
+  local orig_length_h = F["shen.length-h"]
+  local function length(lst)
+    local n, x = 0, lst
+    while is_cons(x) do n = n + 1; x = x[2] end
+    if x == NIL then return n end
+    return orig_length(lst)
+  end
+  local function length_h(lst, acc)
+    local n, x = acc, lst
+    while is_cons(x) do n = n + 1; x = x[2] end
+    if x == NIL then return n end
+    return orig_length_h(lst, acc)
+  end
+
+  -- explode / string->bytes: kernel is per-character tlstr recursion.
+  local orig_explode = F["explode"]
+  local function explode(v)
+    local s
+    if type(v) == "string" then s = v
+    elseif is_symbol(v) then s = v.name
+    elseif type(v) == "boolean" then s = v and "true" or "false"
+    elseif type(v) == "number" then s = numToStr(v)
+    else return orig_explode(v) end
+    local acc = NIL
+    for i = #s, 1, -1 do acc = cons(string.sub(s, i, i), acc) end
+    return acc
+  end
+  local orig_s2b = F["shen.string->bytes"]
+  local function string_to_bytes(s)
+    if type(s) ~= "string" then return orig_s2b(s) end
+    local acc = NIL
+    for i = #s, 1, -1 do acc = cons(string.byte(s, i), acc) end
+    return acc
+  end
+
+  -- concat: (intern (cn (str A) (str B))) — intern("true") is boolean true.
+  local function concat(a, b)
+    return F["intern"](F["str"](a) .. F["str"](b))
+  end
+
+  -- nth / sum / head / tail / hdstr / byte->digit / limit
+  local orig_nth = F["nth"]
+  local function nth(n, lst)
+    if type(n) ~= "number" then return orig_nth(n, lst) end
+    local i, x = n, lst
+    while i > 1 and is_cons(x) do i = i - 1; x = x[2] end
+    if i == 1 and is_cons(x) then return x[1] end
+    return orig_nth(n, lst)
+  end
+  local orig_sum = F["sum"]
+  local function sum(lst)
+    local acc, x = 0, lst
+    while is_cons(x) do
+      local h = x[1]
+      if type(h) ~= "number" then return orig_sum(lst) end
+      acc = acc + h; x = x[2]
+    end
+    if x == NIL then return acc end
+    return orig_sum(lst)
+  end
+  local orig_head = F["head"]
+  local orig_tail = F["tail"]
+  local function head(x)
+    if is_cons(x) then return x[1] end
+    return orig_head(x)
+  end
+  local function tail(x)
+    if is_cons(x) then return x[2] end
+    return orig_tail(x)
+  end
+  local orig_hdstr = F["hdstr"]
+  local function hdstr(s)
+    if type(s) ~= "string" or #s == 0 then return orig_hdstr(s) end
+    return string.sub(s, 1, 1)
+  end
+  local function byte_to_digit(n) return n - 48 end
+  local function limit(v) return v[2] end
+
+  -- difference / union / intersection: kernel is non-tail recursive + element?.
+  local orig_diff = F["difference"]
+  local orig_union = F["union"]
+  local orig_inter = F["intersection"]
+  local function difference(a, b)
+    local orig = a
+    local acc, last
+    while true do
+      if a == NIL then
+        if last then return acc else return NIL end
+      end
+      if not is_cons(a) then return orig_diff(orig, b) end
+      if not element_q(a[1], b) then
+        local cell = cons(a[1], NIL)
+        if last then last[2] = cell else acc = cell end
+        last = cell
+      end
+      a = a[2]
+    end
+  end
+  local function union(a, b)
+    local orig = a
+    local acc, last
+    local rest = b
+    while true do
+      if a == NIL then
+        if last then last[2] = rest; return acc else return rest end
+      end
+      if not is_cons(a) then return orig_union(orig, b) end
+      if not element_q(a[1], b) then
+        local cell = cons(a[1], NIL)
+        if last then last[2] = cell else acc = cell end
+        last = cell
+      end
+      a = a[2]
+    end
+  end
+  local function intersection(a, b)
+    local orig = a
+    local acc, last
+    while true do
+      if a == NIL then
+        if last then return acc else return NIL end
+      end
+      if not is_cons(a) then return orig_inter(orig, b) end
+      if element_q(a[1], b) then
+        local cell = cons(a[1], NIL)
+        if last then last[2] = cell else acc = cell end
+        last = cell
+      end
+      a = a[2]
+    end
+  end
+
+  -- occurrences / subst: tree walk. Lua recursion, same structure as the KL.
+  local function occurrences(x, y)
+    if equal(x, y) then return 1 end
+    if is_cons(y) then return occurrences(x, y[1]) + occurrences(x, y[2]) end
+    return 0
+  end
+  local function subst(n, o, tree)
+    if equal(o, tree) then return n end
+    if is_cons(tree) then return cons(subst(n, o, tree[1]), subst(n, o, tree[2])) end
+    return tree
+  end
+
+  -- mapcan: (append (F (hd L)) (mapcan F (tl L)))
+  local orig_mapcan = F["mapcan"]
+  local function mapcan(f, lst)
+    local orig = lst
+    local head, last
+    while true do
+      if lst == NIL then
+        if last then return head else return NIL end
+      end
+      if not is_cons(lst) then return orig_mapcan(f, orig) end
+      local chunk = APP(f, lst[1])
+      if chunk ~= NIL then
+        -- append copies the left spine; copy each chunk so we don't mutate
+        -- a list the mapper returned that might be shared. A non-list chunk
+        -- is the kernel append error — raise it without re-running `f`.
+        if not is_cons(chunk) then return orig_append(chunk, NIL) end
+        local c = chunk
+        while is_cons(c) do
+          local cell = cons(c[1], NIL)
+          if last then last[2] = cell else head = cell end
+          last = cell
+          c = c[2]
+        end
+        if c ~= NIL then return orig_mapcan(f, orig) end
+      end
+      lst = lst[2]
+    end
+  end
+
+  -- @p / fst / snd / tuple?  (kernel: 3-slot absvector tagged shen.tuple)
+  local tuple_tag = intern("shen.tuple")
+  local function atp(x, y)
+    return setmetatable({ [1] = 3, [2] = tuple_tag, [3] = x, [4] = y }, Vmt)
+  end
+  local function fst(v) return v[3] end
+  local function snd(v) return v[4] end
+  local function tuple_q(x)
+    return getmetatable(x) == Vmt and x[2] == tuple_tag
+  end
+
+  -- vector: absvector(N+1), slot 0 = N, slots 1..N = fail. Kernel fillvector
+  -- is one recursive address-> per slot.
+  local orig_vector = F["vector"]
+  local function vector(n)
+    if type(n) ~= "number" or n < 0 or n ~= math.floor(n) then
+      return orig_vector(n)
+    end
+    local v = { [1] = n + 1, [2] = n }
+    for i = 1, n do v[i + 2] = fail_sym end
+    return setmetatable(v, Vmt)
+  end
+
+  -- read-file-as-bytelist / read-file-as-string: kernel is per-byte read-byte
+  -- + reverse / cn (quadratic). Same path semantics as the `open` primitive
+  -- (filename as given; no *home-directory* prepend).
+  local orig_rfab = F["read-file-as-bytelist"]
+  local orig_rfas = F["read-file-as-string"]
+  local function read_file_as_bytelist(name)
+    if type(name) ~= "string" then return orig_rfab(name) end
+    local fh = io.open(name, "rb")
+    if not fh then return orig_rfab(name) end
+    local data = fh:read("*a") or ""
+    fh:close()
+    local acc = NIL
+    for i = #data, 1, -1 do acc = cons(string.byte(data, i), acc) end
+    return acc
+  end
+  local function read_file_as_string(name)
+    if type(name) ~= "string" then return orig_rfas(name) end
+    local fh = io.open(name, "rb")
+    if not fh then return orig_rfas(name) end
+    local data = fh:read("*a") or ""
+    fh:close()
+    return data
+  end
+
+  -- Property store (get/put/unput/arity). Kernel does hash + trap-error
+  -- <-vector + assoc; empty buckets are the fail object, which <-vector
+  -- turns into an exception. Same layout, no pcall.
+  local orig_get = F["get"]
+  local orig_put = F["put"]
+  local orig_unput = F["unput"]
+  local orig_arity = F["arity"]
+  local orig_change = F["shen.change-pointer-value"]
+  local orig_remove = F["shen.remove-pointer"]
+  local arity_sym = intern("arity")
+  local function bucket_at(vec, key)
+    if getmetatable(vec) ~= Vmt then return nil, nil end
+    local lim = vec[2]
+    if type(lim) ~= "number" or lim <= 0 then return nil, nil end
+    local h = hash(key, lim)
+    if type(h) ~= "number" then return nil, nil end
+    local slot = vec[h + 2]
+    if slot == fail_sym or slot == nil then return NIL, h end
+    return slot, h
+  end
+  local function pointer_match(pair, key, prop)
+    if not is_cons(pair) then return false end
+    local kp = pair[1]
+    if not is_cons(kp) then return false end
+    local rest = kp[2]
+    return is_cons(rest) and rest[2] == NIL
+       and equal(kp[1], key) and equal(rest[1], prop)
+  end
+  local function change_pointer(key, prop, val, lst)
+    local orig = lst
+    local head, last
+    while true do
+      if lst == NIL then
+        local cell = cons(cons(cons(key, cons(prop, NIL)), val), NIL)
+        if last then last[2] = cell; return head end
+        return cell
+      end
+      if not is_cons(lst) then return orig_change(key, prop, val, orig) end
+      local pair = lst[1]
+      if pointer_match(pair, key, prop) then
+        local cell = cons(cons(pair[1], val), lst[2])
+        if last then last[2] = cell; return head end
+        return cell
+      end
+      local cell = cons(pair, NIL)
+      if last then last[2] = cell else head = cell end
+      last = cell
+      lst = lst[2]
+    end
+  end
+  local function remove_pointer(key, prop, lst)
+    local orig = lst
+    local head, last
+    while true do
+      if lst == NIL then
+        if last then return head else return NIL end
+      end
+      if not is_cons(lst) then return orig_remove(key, prop, orig) end
+      if pointer_match(lst[1], key, prop) then
+        if last then last[2] = lst[2]; return head end
+        return lst[2]
+      end
+      local cell = cons(lst[1], NIL)
+      if last then last[2] = cell else head = cell end
+      last = cell
+      lst = lst[2]
+    end
+  end
+  -- Sidecar Lua table for *property-vector* (port-performance.md: property
+  -- access). Kernel keys are almost always interned symbols, so identity
+  -- table lookup beats hash+assoc. The absvector remains the observable
+  -- store; the cache is a write-through index.
+  local PGET = {}
+  local function cacheable(x)
+    local t = type(x)
+    return t == "string" or t == "number" or t == "boolean" or is_symbol(x)
+  end
+  local function cache_get(key, prop)
+    if not (cacheable(key) and cacheable(prop)) then return nil, false end
+    local t = PGET[key]
+    if not t then return nil, false end
+    local v = t[prop]
+    if v == nil then return nil, false end
+    return v, true
+  end
+  local function cache_put(key, prop, val)
+    if not (cacheable(key) and cacheable(prop)) then return end
+    local t = PGET[key]
+    if not t then t = {}; PGET[key] = t end
+    t[prop] = val
+  end
+  local function cache_rm(key, prop)
+    local t = PGET[key]
+    if t then t[prop] = nil end
+  end
+  local pv_of = function() return GLOBALS["*property-vector*"] end
+  local function get(key, prop, vec)
+    if vec == pv_of() then
+      local v, ok = cache_get(key, prop)
+      if ok then return v end
+    end
+    local bucket, h = bucket_at(vec, key)
+    if h == nil then return orig_get(key, prop, vec) end
+    if bucket == NIL then return orig_get(key, prop, vec) end
+    local pair = assoc(cons(key, cons(prop, NIL)), bucket)
+    if pair == NIL or not is_cons(pair) then return orig_get(key, prop, vec) end
+    local val = pair[2]
+    if vec == pv_of() then cache_put(key, prop, val) end
+    return val
+  end
+  local function put(key, prop, val, vec)
+    local bucket, h = bucket_at(vec, key)
+    if h == nil then return orig_put(key, prop, val, vec) end
+    vec[h + 2] = change_pointer(key, prop, val, bucket)
+    if vec == pv_of() then cache_put(key, prop, val) end
+    return val
+  end
+  local function unput(key, prop, vec)
+    local bucket, h = bucket_at(vec, key)
+    if h == nil then return orig_unput(key, prop, vec) end
+    vec[h + 2] = remove_pointer(key, prop, bucket)
+    if vec == pv_of() then cache_rm(key, prop) end
+    return key
+  end
+  local function arity(name)
+    local v, ok = cache_get(name, arity_sym)
+    if ok then return v end
+    local pv = pv_of()
+    if pv == nil then return -1 end
+    local bucket, h = bucket_at(pv, name)
+    if h == nil or bucket == NIL then return -1 end
+    local pair = assoc(cons(name, cons(arity_sym, NIL)), bucket)
+    if pair == NIL or not is_cons(pair) then return -1 end
+    cache_put(name, arity_sym, pair[2])
+    return pair[2]
+  end
+  local function get_or(key, prop, vec, default)
+    if vec == pv_of() then
+      local v, ok = cache_get(key, prop)
+      if ok then return v end
+    end
+    local bucket, h = bucket_at(vec, key)
+    if h == nil or bucket == NIL then
+      if type(default) == "function" then return default() end
+      return default
+    end
+    local pair = assoc(cons(key, cons(prop, NIL)), bucket)
+    if pair == NIL or not is_cons(pair) then
+      if type(default) == "function" then return default() end
+      return default
+    end
+    local val = pair[2]
+    if vec == pv_of() then cache_put(key, prop, val) end
+    return val
+  end
+  P.ENV.GET_OR = get_or
+
+  -- vector? / <-vector / vector->  (trap-error around >= / fail-slot)
+  local orig_vref = F["<-vector"]
+  local orig_vset = F["vector->"]
+  local function vector_q(x)
+    if getmetatable(x) ~= Vmt then return false end
+    local n = x[2]
+    return type(n) == "number" and n >= 0
+  end
+  local function vref(v, i)
+    if type(i) ~= "number" or i == 0 then return orig_vref(v, i) end
+    local w = v[i + 2]
+    if w == nil or w == fail_sym then return orig_vref(v, i) end
+    return w
+  end
+  local function vset(v, i, x)
+    if type(i) ~= "number" or i == 0 then return orig_vset(v, i, x) end
+    v[i + 2] = x
+    return v
+  end
+
+  -- gensym / @s / bound? / +string? / byte class predicates (reader)
+  local function gensym(x)
+    local n = (GLOBALS["shen.*gensym*"] or 0) + 1
+    GLOBALS["shen.*gensym*"] = n
+    return F["intern"](F["str"](x) .. numToStr(n))
+  end
+  local native_cn = F["cn"]
+  local function ats(a, b) return native_cn(a, b) end
+  local function bound_q(x)
+    if not symbol_q(x) then return false end
+    return GLOBALS[x.name] ~= nil
+  end
+  local orig_s2sym = F["string->symbol"]
+  local function string_to_symbol(s)
+    if type(s) ~= "string" then return orig_s2sym(s) end
+    local w = F["intern"](s)
+    if is_symbol(w) then return w end
+    return orig_s2sym(s)
+  end
+  local function plus_string_q(s) return type(s) == "string" and #s > 0 end
+  local function digit_q(n) return type(n) == "number" and n >= 48 and n <= 57 end
+  local function uppercase_q(n) return type(n) == "number" and n >= 65 and n <= 90 end
+  local function lowercase_q(n) return type(n) == "number" and n >= 97 and n <= 122 end
+  local MISC = {
+    [61]=true,[45]=true,[42]=true,[47]=true,[43]=true,[95]=true,[63]=true,
+    [36]=true,[33]=true,[64]=true,[126]=true,[46]=true,[62]=true,[60]=true,
+    [38]=true,[37]=true,[39]=true,[35]=true,[96]=true,
+  }
+  local function misc_q(n) return MISC[n] == true end
+  local function alpha_q(n)
+    return uppercase_q(n) or lowercase_q(n) or misc_q(n)
+  end
+  local orig_proc_nl = F["shen.proc-nl"]
+  local function proc_nl(s)
+    if type(s) ~= "string" then return orig_proc_nl(s) end
+    return (s:gsub("~%%", "\n"))
+  end
+
+  -- Compile-path: define/yacc parser + free-var analysis (port-performance.md
+  -- "source processing"). Called once per token / per define, not at runtime.
+  local orig_analyse_var = F["shen.analyse-variable?"]
+  local orig_alphanums = F["shen.alphanums?"]
+  local function analyse_variable_q(s)
+    if type(s) ~= "string" or s == "" then return orig_analyse_var(s) end
+    return string.find(s, VARPAT) ~= nil
+  end
+  local function alphanums_q(s)
+    if type(s) ~= "string" then return orig_alphanums(s) end
+    if s == "" then return true end
+    return string.find(s, "^[A-Za-z0-9=%-%*/%+_%?%$!@~%.><&%%'#`]*$") ~= nil
+  end
+  local orig_in = F["shen.in->"]
+  local orig_out = F["shen.<-out"]
+  local function hds_eq(v, x) return is_cons(v) and equal(v[1], x) end
+  local function comb(a, b) return cons(a, cons(b, NIL)) end
+  local function in_to(v)
+    if is_cons(v) then return v[1] end
+    return orig_in(v)
+  end
+  local function out_of(v)
+    if is_cons(v) and is_cons(v[2]) then return v[2][1] end
+    return orig_out(v)
+  end
+  local function ccons_q(v)
+    if not is_cons(v) then return false end
+    local h = v[1]
+    return is_cons(h) or h == NIL
+  end
+  local orig_params = F["shen.parameters"]
+  local v_sym = intern("V")
+  local function parameters(n)
+    if type(n) ~= "number" or n < 0 or n ~= math.floor(n) then
+      return orig_params(n)
+    end
+    local cells = {}
+    for i = 1, n do cells[i] = gensym(v_sym) end
+    local acc = NIL
+    for i = n, 1, -1 do acc = cons(cells[i], acc) end
+    return acc
+  end
+  local function extract_vars(x)
+    if variable_q(x) then return cons(x, NIL) end
+    if is_cons(x) then return union(extract_vars(x[1]), extract_vars(x[2])) end
+    return NIL
+  end
+  local protect_sym, let_sym, lambda_sym = intern("protect"), intern("let"), intern("lambda")
+  local function find_free_vars(bound, form)
+    if is_cons(form) then
+      local h, t = form[1], form[2]
+      if h == protect_sym and is_cons(t) and t[2] == NIL then return NIL end
+      if h == let_sym and is_cons(t) then
+        local x, t2 = t[1], t[2]
+        if is_cons(t2) then
+          local val, t3 = t2[1], t2[2]
+          if is_cons(t3) and t3[2] == NIL then
+            local body = t3[1]
+            return union(find_free_vars(bound, val),
+                         find_free_vars(cons(x, bound), body))
+          end
+        end
+      end
+      if h == lambda_sym and is_cons(t) then
+        local x, t2 = t[1], t[2]
+        if is_cons(t2) and t2[2] == NIL then
+          return find_free_vars(cons(x, bound), t2[1])
+        end
+      end
+      return union(find_free_vars(bound, h), find_free_vars(bound, t))
+    end
+    if variable_q(form) and not element_q(form, bound) then return cons(form, NIL) end
+    return NIL
+  end
+  local function unprotect(x)
+    if tuple_q(x) then return atp(unprotect(fst(x)), unprotect(snd(x))) end
+    if is_cons(x) and x[1] == protect_sym and is_cons(x[2]) and x[2][2] == NIL then
+      return unprotect(x[2][1])
+    end
+    if is_cons(x) then return map(unprotect, x) end
+    return x
+  end
+  local orig_repx = F["shen.rep-X"]
+  local function rep_X(old, new, tree)
+    if equal(old, tree) then return new end
+    if is_cons(tree) then
+      local w = rep_X(old, new, tree[1])
+      if equal(w, tree[1]) then return cons(tree[1], rep_X(old, new, tree[2])) end
+      return cons(w, tree[2])
+    end
+    return tree
+  end
+
   local function install(name, fn, arity) F[name] = fn; FA[fn] = arity end
   install("shen.<singleline>", singleline_p, 1)
   install("shen.<multiline>", multiline_p, 1)
@@ -1106,6 +1690,71 @@ function P.install_native_stdlib()
   install("reverse", reverse, 1)
   install("shen.map-h", map_h, 3)
   install("map", map, 2)
+  install("not", native_not, 1)
+  install("boolean?", boolean_q, 1)
+  install("empty?", empty_q, 1)
+  install("integer?", integer_q, 1)
+  install("thaw", thaw, 1)
+  install("==", eqeq, 2)
+  install("symbol?", symbol_q, 1)
+  install("shen.analyse-symbol?", analyse_symbol_q, 1)
+  install("length", length, 1)
+  install("shen.length-h", length_h, 2)
+  install("explode", explode, 1)
+  install("shen.string->bytes", string_to_bytes, 1)
+  install("concat", concat, 2)
+  install("nth", nth, 2)
+  install("sum", sum, 1)
+  install("head", head, 1)
+  install("tail", tail, 1)
+  install("hdstr", hdstr, 1)
+  install("shen.byte->digit", byte_to_digit, 1)
+  install("limit", limit, 1)
+  install("difference", difference, 2)
+  install("union", union, 2)
+  install("intersection", intersection, 2)
+  install("occurrences", occurrences, 2)
+  install("subst", subst, 3)
+  install("mapcan", mapcan, 2)
+  install("@p", atp, 2)
+  install("fst", fst, 1)
+  install("snd", snd, 1)
+  install("tuple?", tuple_q, 1)
+  install("vector", vector, 1)
+  install("read-file-as-bytelist", read_file_as_bytelist, 1)
+  install("read-file-as-string", read_file_as_string, 1)
+  install("get", get, 3)
+  install("put", put, 4)
+  install("unput", unput, 3)
+  install("arity", arity, 1)
+  install("shen.change-pointer-value", change_pointer, 4)
+  install("shen.remove-pointer", remove_pointer, 3)
+  install("vector?", vector_q, 1)
+  install("<-vector", vref, 2)
+  install("vector->", vset, 3)
+  install("gensym", gensym, 1)
+  install("@s", ats, 2)
+  install("bound?", bound_q, 1)
+  install("string->symbol", string_to_symbol, 1)
+  install("shen.+string?", plus_string_q, 1)
+  install("shen.digit?", digit_q, 1)
+  install("shen.uppercase?", uppercase_q, 1)
+  install("shen.lowercase?", lowercase_q, 1)
+  install("shen.misc?", misc_q, 1)
+  install("shen.alpha?", alpha_q, 1)
+  install("shen.proc-nl", proc_nl, 1)
+  install("shen.analyse-variable?", analyse_variable_q, 1)
+  install("shen.alphanums?", alphanums_q, 1)
+  install("shen.hds=?", hds_eq, 2)
+  install("shen.comb", comb, 2)
+  install("shen.in->", in_to, 1)
+  install("shen.<-out", out_of, 1)
+  install("shen.ccons?", ccons_q, 1)
+  install("shen.parameters", parameters, 1)
+  install("shen.extract-vars", extract_vars, 1)
+  install("shen.find-free-vars", find_free_vars, 2)
+  install("shen.unprotect", unprotect, 1)
+  install("shen.rep-X", rep_X, 3)
   P.install_native_lambda_entry()   -- no-op if boot.lua already did it
 
   -- shen.x host SHA-256 (OpenSSL libcrypto). See pyrex41/shen-extensions.
@@ -1252,9 +1901,108 @@ local ENV = {
   -- compiler.lua). Keeps the hottest allocation out of the tiny F["cons"]
   -- wrapper proto, which LuaJIT otherwise blacklists under cons-heavy loads.
   CMT = R.Cons,
+  -- Unary helpers for compiler inlining (see ccall in compiler.lua).
+  -- HD/TL keep the primitive error path; THAW keeps the thunk / function /
+  -- APP dispatch of the thaw primitive (which the kernel otherwise overwrites
+  -- with `(defun thaw (V) (V))`).
+  HD = function(x) if is_cons(x) then return x[1] end return F["hd"](x) end,
+  TL = function(x) if is_cons(x) then return x[2] end return F["tl"](x) end,
+  -- Yacc/define parser combinators (compile path).
+  HDS_EQ = function(v, x) return is_cons(v) and equal(v[1], x) end,
+  COMB = function(a, b)
+    return setmetatable({ a, setmetatable({ b, NIL }, R.Cons) }, R.Cons)
+  end,
+  CCONS_Q = function(v)
+    if not is_cons(v) then return false end
+    local h = v[1]
+    return is_cons(h) or h == NIL
+  end,
+  THAW = function(x)
+    if getmetatable(x) == Thunk then return runthunk(x) end
+    if type(x) == "function" then return x() end
+    return APP(x)
+  end,
+  -- Direct GLOBALS access (compiler value/set of literal symbols, and the
+  -- trap-error peephole). `false` is a valid stored value; only nil is unbound.
+  G = GLOBALS,
+  VALUE_S = function(key)
+    local v = GLOBALS[key]
+    if v ~= nil then return v end
+    return F["value"](intern(key))
+  end,
+  SET_S = function(key, v) GLOBALS[key] = v; return v end,
+  VALUE_OR_S = function(key, default)
+    local v = GLOBALS[key]
+    if v ~= nil then return v end
+    if type(default) == "function" then return default() end
+    return default
+  end,
+  VALUE_OR = function(sym, default)
+    local key = is_symbol(sym) and sym.name or tostring(sym)
+    local v = GLOBALS[key]
+    if v ~= nil then return v end
+    if type(default) == "function" then return default() end
+    return default
+  end,
+  VEC_OR = function(v, n, default)
+    if type(n) ~= "number" or n == 0 or type(v) ~= "table" then
+      if type(default) == "function" then return default() end
+      return default
+    end
+    local w = v[n + 2]
+    if w == nil or w == FAILOBJ then
+      if type(default) == "function" then return default() end
+      return default
+    end
+    return w
+  end,
+  ADDR_OR = function(v, n, default)
+    if type(v) ~= "table" or type(n) ~= "number" then
+      if type(default) == "function" then return default() end
+      return default
+    end
+    return v[n + 2]
+  end,
+  -- Placeholder: trap-error (get ...) during kernel load, before native get.
+  -- install_native_stdlib replaces this with a pcall-free lookup.
+  GET_OR = function(key, prop, vec, default)
+    local ok, v = pcall(F["get"], key, prop, vec)
+    if ok then return v end
+    if type(default) == "function" then return default() end
+    return default
+  end,
+  CN = function(a, b)
+    if type(a) == "string" and type(b) == "string" then return a .. b end
+    return F["cn"](a, b)
+  end,
+  POS = function(s, n)
+    if type(s) == "string" and type(n) == "number" and n >= 0 and n < #s then
+      return string.sub(s, n + 1, n + 1)
+    end
+    return F["pos"](s, n)
+  end,
+  TLSTR = function(s)
+    if type(s) == "string" and #s > 0 then return string.sub(s, 2) end
+    return F["tlstr"](s)
+  end,
+  STRN = function(s)
+    if type(s) == "string" and #s > 0 then return string.byte(s, 1) end
+    return F["string->n"](s)
+  end,
+  NSTR = function(n)
+    if type(n) == "number" then
+      local ok, ch = pcall(string.char, n)
+      if ok then return ch end
+    end
+    return F["n->string"](n)
+  end,
+  ADDR = function(v, i) return v[i + 2] end,
+  ADSET = function(v, i, x) v[i + 2] = x; return v end,
+  VMT = Vmt,
   -- allow compiled code to reach a few Lua builtins safely
   pcall = pcall, select = select, error = error,
   setmetatable = setmetatable, getmetatable = getmetatable,
+  type = type,
   math = math, string = string, table = table,
 }
 P.ENV = ENV

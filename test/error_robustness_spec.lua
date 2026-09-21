@@ -121,6 +121,9 @@ check(evs("(trap-error (hd ()) (lambda E 99))") == "99",
 check(evs("(trap-error (trap-error (hd ()) (lambda E (simple-error \"inner\"))) (lambda E (error-to-string E)))")
         == '"inner"',
       "nested trap-error: handler may re-raise and be caught by the outer trap")
+-- Operand of <-vector raises: must NOT leak through the trap-error peephole.
+check(evs("(trap-error (<-vector (simple-error \"boom\") 1) (lambda E 42))") == "42",
+      "trap-error catches errors while evaluating <-vector operands")
 
 io.write(string.format("error_robustness_spec: %d pass, %d fail\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)

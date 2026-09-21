@@ -1,433 +1,148 @@
-# shen-lua — a speed-focused LuaJIT port of the Shen kernel
+# shen-lua
 
-> [Shen](https://shenlanguage.org) — a functional Lisp with pattern matching,
-> an optional sequent-calculus type system, and integrated Prolog — on LuaJIT:
-> suite-certified, within ~1.5× of shen-cl on SBCL (measured same-machine),
-> embeds in any Lua host via a one-file ~6 MB bundle that boots in ~70 ms,
-> with bidirectional typed interop and fasl-style caching — and a
-> degraded-but-correct mode on plain Lua 5.1/5.4/5.5.
-
-`shen-lua` runs the [Shen](https://shenlanguage.org) language on **LuaJIT 2.1**.
-Shen programs compile down to **KLambda (Kλ)** — a small, untyped Lisp kernel of
-~46 primitives — and a "port" of Shen consists of (a) implementing those
-primitives on a host runtime and (b) translating the kernel's `.kl` files into
-that host. This port does both by **compiling KLambda to Lua source** that
-LuaJIT then trace-compiles to machine code.
-
-It targets **Shen 42** (the KLambda is vendored under `klambda/`; see
-[`klambda/PROVENANCE.md`](klambda/PROVENANCE.md)) and passes the official 42
-kernel test suite (134/134). Earlier versions were certified against the Shen
-22.4 kernel test suite.
-
-## Quick start
+[Shen](https://shenlanguage.org) on **LuaJIT 2.1**: pattern matching, optional
+sequent types, and Prolog, compiled to Lua. Shen 42, **134/134** official
+kernel tests. Embeds in any Lua host. Plain Lua 5.1/5.4/5.5 works too (slower,
+still correct).
 
 ```sh
 git clone https://github.com/pyrex41/shen-lua && cd shen-lua
-bin/shen                            # REPL: multiline input, history, helpful errors
+bin/shen                            # REPL
 bin/shen -e "(+ 1 2)"               # one-liner
-bin/shen examples/family.shen       # run a program (Shen Prolog in 20 lines)
-luajit examples/hello_embed.lua     # embed Shen in a Lua program in ~25 lines
-luajit examples/config_check.lua    # the showcase: a typed validation layer for Lua data
+bin/shen examples/family.shen       # a program (Shen Prolog in 20 lines)
+luajit examples/hello_embed.lua     # embed in Lua, ~25 lines
 ```
 
-The only requirement is **LuaJIT 2.1** (`brew install luajit` /
-`apt-get install luajit`); plain Lua 5.1/5.4/5.5 also works (slower — see the
-compatibility tier below). The first boot compiles the kernel (~1 s); after
-that the bytecode cache boots it in ~30 ms, and loaded programs are cached
-fasl-style, so everything is fast from the second run on. The examples are
-walked through in the [Examples](#examples) section and
-[`examples/README.md`](examples/README.md); for an **executable, verifiable
-tour of the whole system** see [`demo/walkthrough.md`](demo/walkthrough.md) —
-every code block in it re-runs via `showboat verify`
-([showboat](https://github.com/simonw/showboat) is Simon Willison's tool for
-executable proof-of-work documents; `uv tool install showboat`). New to Shen
-itself? Start at [shenlanguage.org](https://shenlanguage.org).
+Need only LuaJIT (`brew install luajit` / `apt-get install luajit`). First boot
+compiles the kernel (~1 s); after that the bytecode cache boots in ~30 ms.
+Loaded programs are cached fasl-style. Cross-port agreement lives in
+[Bifrost](https://github.com/pyrex41/bifrost). New to Shen?
+[shenlanguage.org](https://shenlanguage.org).
 
-## Why a compiler (not an interpreter)
+## How it works
 
-The design goal is speed, so the host backend is a **source-to-source compiler**,
-not a tree-walker:
-
-* KLambda special forms (`if`, `cond`, `let`, `do`, `and`, `or`, `trap-error`,
-  `lambda`, `freeze`, `defun`, `type`) compile to **native Lua control flow**.
-* Tail positions emit real Lua `return`/`if`-`elseif` chains, so deep recursion
-  uses LuaJIT's **proper tail calls** (the kernel relies on TCO heavily).
-* Function application uses **currying-on-demand**: when the callee's arity is
-  statically known the call is a direct, exact-arity table call; otherwise a
-  generic `APP` builds and applies closures.
-* `type` is **erased** at the Kλ boundary (it is identity), per the porting spec —
-  the actual type *checking* is the kernel's own Shen code and runs unchanged.
-
-## Architecture
+KLambda (the ~46-primitive untyped kernel) is compiled to Lua source; LuaJIT
+trace-compiles that to machine code. Special forms become native `if`/`return`;
+tail calls are real Lua TCO (and self-tails become loops). `type` is erased at
+the Kλ boundary — type *checking* is the kernel’s own Shen, unchanged.
 
 | File | Role |
 |------|------|
-| `runtime.lua`  | data representation, symbol interning, the KLambda reader |
-| `compiler.lua` | KLambda → Lua source compiler (statement-based codegen, tail-call → loop lowering) |
-| `prims.lua`    | runtime env: the primitive set, apply/curry machinery, native overrides, loader |
-| `boot.lua`     | kernel loading + initialisation, the bytecode + fasl caches |
-| `shen.lua`     | the public embedding API (`require("shen")`) |
-| `lua_interop.lua` | the Lua ⇄ Shen bridge (`lua.call`, `lua.function`, marshaling) |
-| `repl.lua`     | the interactive REPL (multiline input, error translation, backtraces) |
-| `prolog_engine.lua` / `prolog_compile.lua` / `typecheck_native.lua` | the native soa32 Prolog/typecheck engine |
+| `runtime.lua` | values, intern, KLambda reader |
+| `compiler.lua` | KLambda → Lua |
+| `prims.lua` | primitives, apply/curry, native overrides |
+| `boot.lua` | kernel load, bytecode + fasl caches |
+| `shen.lua` | embedding API (`require("shen")`) |
+| `lua_interop.lua` | Lua ⇄ Shen |
+| `repl.lua` | REPL |
+| `prolog_engine.lua` / `prolog_compile.lua` / `typecheck_native.lua` | native Prolog / typecheck |
 
-Data representation (chosen so hot paths stay trace-JIT-friendly):
+Numbers, strings, and booleans are Lua’s. Symbols are interned (identity `==`).
+`()` is a unique `NIL`. Cons is `{h,t}`; vectors are array tables.
 
-* numbers → Lua numbers; strings → Lua strings; KL `true`/`false` → Lua booleans
-* symbols → interned tables (identity `==`); `()` → a unique `NIL`
-* cons → `{h, t}` with a `Cons` metatable; vectors (absvector) → a pure-array table
-  with the metatable `Vmt` (`[1]` = size, KL element `i` at `[i+2]`, no hash part —
-  this keeps the size-2 prolog variables off Lua's hash-part allocation path)
-* functions → Lua functions, arity tracked in a weak table; exceptions → tagged tables
+## CLI
 
-### Performance work
+```sh
+bin/shen                       # REPL (multiline, history, Shen backtraces)
+bin/shen prog.shen ...         # (load) each file
+bin/shen -e "(+ 1 2)"          # eval and print
+bin/shen --hush-load prog.shen # run a program; no load echo (use this for golden suites)
+bin/shen -q prog.shen          # *hush*: silences load echo *and* (output ...)
+```
 
-The headline: **the Prolog engine and typechecker run on a native soa32
-substrate** that replaces the compiled-KL CPS execution model entirely —
-designed around what LuaJIT's tracing JIT rewards:
+`--hush-load` (or `SHEN_HUSH_LOAD=1`) is what batch runners want: the program’s
+own output stays, load chatter does not. `-q` sets `*hush*`, which on kernel 42
+gates `pr` itself.
 
-* **`prolog_engine.lua` — the soa32 substrate.** Terms are plain Lua numbers,
-  range-tagged (atom < 2²⁴ ≤ var < 2²⁵ ≤ cons) over `int32_t` FFI arrays; tag
-  tests are `<` compares, payloads are subtractions, **zero bit ops and zero
-  64-bit cdata** (int64 tag-packing measured 2.2× slower — see
-  `bench/wam_poc_v4.lua`). Iterative explicit-stack unification with batch
-  trail unwind; **defunctionalized continuations** (integer handles into an
-  int32 capture buffer — no freeze closures); choice points live in Lua stack
-  frames as plain-local marks; cut is a 1:1 transcription of the kernel's
-  lock algorithm.
-* **`prolog_compile.lua` — the clause compiler retarget.** The kernel's own
-  `shen.compile-prolog` still runs (its output is the spec); its emitted
-  define-form is *translated* into direct-coded Lua against the substrate ABI,
-  lazily on first dispatch. Covers `defprolog`, `prolog?` queries, datatype
-  rules, and asserta/retract through one seam, with the legacy CPS engine
-  dual-registered as the per-predicate fallback.
-* **`typecheck_native.lua` — the t-star driver.** The ~16 CPS driver functions
-  are machine-translated from `klambda/t-star.kl` through the same translator
-  (they share the goal vocabulary); the four that escape it (entry,
-  signature lookup, datatype search, spy display) are hand-ported. The 161
-  kernel signatures are harvested from the `(declare …)` forms in `types.kl`
-  into a native table (pre-refresh kernels harvest from `init.kl` instead). The
-  native driver performs the **byte-identical inference sequence** to the
-  legacy engine (431,741 inferences on the reference typecheck, exactly).
-* **Legacy native overrides** (`prims.lua`): native Prolog deref core with
-  pvar pooling, native stdlib (`element?`, `assoc`, `map`, …), and
-  arithmetic/`=` inlining (~97M dispatches eliminated) — these still serve
-  the `SHEN_PROLOG_ENGINE=legacy` fallback path.
+The launcher finds the vendored `klambda/` next to the checkout, so `bin/shen`
+works from any cwd.
 
-`SHEN_PROLOG_ENGINE=legacy` disables the engine; `SHEN_TYPECHECK_NATIVE=off`
-and `SHEN_PROLOG_NATIVE=off` disable the typechecker/query routing
-individually. Correctness never depends on native coverage: anything the
-translator refuses simply keeps its legacy definition.
-
-Three caches make warm starts near-instant (all content-keyed, all safe to
-delete at any time):
-
-* **Kernel bytecode cache** — the compiled kernel is `string.dump`ed after the
-  first boot (`.shen-kernel-cache.<build>.bin`, one file per exact Lua build,
-  since bytecode is not portable across builds — so e.g. your `luajit` and an
-  embedded OpenResty/Envoy LuaJIT each keep their own warm cache instead of
-  invalidating each other's). It also carries the kernel's 161 **type
-  signatures** as compiled prolog abstractions: `declare` runs the type theory
-  for real on each one, and re-running it on every boot was the single largest
-  item in a warm start. `SHEN_KERNEL_CACHE=off` disables; any other value is
-  used as the cache path.
-* **Standard-library boot image** — the whole `lib/StLib` load (its
-  `install.shen` driver *and* the ~20 files it loads) is recorded as one
-  artifact, `<fasl dir>/stdlib-<key>.img`, and replayed in one go. This is the
-  nearest a Lua host gets to shen-cl's `save-lisp-and-die`. It is keyed on the
-  kernel key plus `install.shen`, and it stores the content hash of every file
-  the recorded load touched, so editing any standard-library file invalidates
-  it. `SHEN_STDLIB_IMAGE=off` disables it (the per-file fasl entries below are
-  written either way, so turning it off only costs speed).
-* **User fasl cache** — `(load "prog.shen")` records its compiled chunks and
-  replays them on later runs, skipping the reader, macroexpansion *and
-  typechecking* (SBCL-fasl semantics: it typechecked when it compiled).
-  Invalidation is make-style: edit a file and everything loaded after it
-  recompiles. `SHEN_FASL=off` disables; `SHEN_FASL_DIR` relocates
-  (default `~/.cache/shen-lua-fasl`).
-
-A cached boot is required to be **indistinguishable from an uncached one** at
-the Shen level — same `shen.*sigf*` contents *and* order, same lambda table,
-same datatypes, same `shen.*gensym*` and `(inferences)` counters, same
-typechecking behaviour. `test/boot_cache_spec.lua` pins that across every cache
-configuration.
-
-## Requirements
-
-* **LuaJIT 2.1** (Lua 5.1 semantics). On Debian/Ubuntu: `apt-get install luajit`.
-* Nothing else — the **Shen 42 KLambda sources** (`klambda/`) are vendored in this
-  repository for a self-contained clone-and-run experience. You can still point
-  `SHEN_KL_DIR` at an external checkout if you are working against a different
-  ShenOSKernel tree.
-
-No build step is needed — the kernel is compiled from `.kl` to Lua **on boot**. 
-
-### PUC-Lua compatibility tier
-
-The port also runs on **plain PUC Lua** (tested: 5.1.5, 5.4.8, 5.5.0), passing
-the same 134/134 kernel test suite. Everything JIT-specific is feature-detected
-at boot and degrades gracefully:
-
-* **Prolog/typecheck engine** — the native soa32 engine needs the LuaJIT FFI;
-  without it the port automatically falls back to the compiled-KL CPS engine
-  (the same path as `SHEN_PROLOG_ENGINE=legacy`).
-* **All three boot caches** — keyed by FNV-1a hashes that use LuaJIT's `bit`
-  library; without it they self-disable (pure perf features — the kernel just
-  recompiles on every boot, ~0.4s).
-* **Lua 5.3+ integer subtype** — Lua 5.3+ int64 arithmetic *wraps* on overflow,
-  while the kernel assumes the IEEE-double model (LuaJIT/5.1); on 5.3+ the
-  arithmetic primitives compute in the float domain, reproducing LuaJIT's
-  number model exactly.
-
-Expect roughly **2x slower** than LuaJIT on the suite (legacy engine, no
-caches) — correct, but LuaJIT remains the recommended runtime.
-
-### aarch64 boot crash on old LuaJIT
-
-On **aarch64**, an **old LuaJIT** (the 2.1.0-beta3 era, still shipped by some
-distros and older OpenResty images) intermittently SIGSEGVs while compiling the
-kernel *during boot* (issue #43). Booting the kernel triggers ~1500 trace
-compilations up front, and beta3's arm64 JIT backend mis-compiles one of them:
-a trace branches to a bad target and jumps into unmapped memory. Once booted
-the process is stable — the crash surface is boot-time trace compilation. It is
-stochastic (observed ~0.3%/boot on a late beta3-string rolling build; **50/50**
-on the genuine 2017 v2.1.0-beta3 tag), so any workload that boots the kernel
-many times (a per-request CLI, a test matrix) will flake.
-
-**This is a LuaJIT bug, and it is already fixed upstream.** The primary fix is
-to run a **current LuaJIT 2.1 rolling release**: the same 50/50-crashing kernel
-boots cleanly (0 crashes) under today's `LuaJIT 2.1.ROLLING`. If you can update
-LuaJIT, do that.
-
-If you are pinned to an old LuaJIT, shen-lua automatically disables the JIT for
-the detected arm64/beta combination. Set **`SHEN_JIT=off`** to request this
-explicitly (the in-library equivalent of `luajit -j off`), or
-**`SHEN_JIT=on`** only after verifying a patched build. Embedders can
-equivalently pass `shen.boot{jit=false}`. Note this is **distinct from
-`SHEN_JIT_OPT=off`**, which only restores LuaJIT's default `jit.opt` limits and
-leaves the JIT *on* — it does not prevent the crash.
-
-## Installation & embedding
-
-### The `shen` module
+## Embed
 
 ```lua
-local shen = require("shen")          -- with the repo (or install) on package.path
-shen.boot{quiet=true}                 -- load kernel + (shen.initialise); idempotent
-shen.eval('(define square X -> (* X X))')   -- full Shen syntax; returns last value
-print(shen.call("square", 9))         --> 81  (curried if given fewer args)
-local sq = shen.fn("square")          -- plain Lua callable (tracks redefinition)
-shen.list({1,2,3})                    -- Lua array  -> cons list
-shen.totable(shen.eval("[a b c]"))    -- cons list  -> Lua array
-shen.sym("foo")                       -- interned symbol
-shen.value("*version*")               -- Shen global
-shen.tostring(x)                      -- render any Shen value
-shen.typecheck("[1 2]", "(list number)")  -- ask the typechecker; type or false
+local shen = require("shen")
+shen.boot{ quiet = true }
+shen.eval('(define square X -> (* X X))')
+print(shen.call("square", 9))         --> 81
+local sq = shen.fn("square")          -- ordinary Lua callable
+shen.typecheck("[1 2]", "(list number)")
 ```
 
-`shen.prims` / `shen.runtime` expose the underlying layers (function table
-`prims.F`, reader, printer) for advanced embedding.
+`shen.prims` / `shen.runtime` expose `F`, the reader, and the printer.
 
-`shen.typecheck(expr, ty)` is the supported way to call the typechecker from
-a host program (e.g. using Shen as a runtime policy/validation engine). It
-absorbs two kernel traps that bite direct `shen.typecheck` callers: the
-kernel entry point judges *syntax* (reader output), not evaluated values, and
-the kernel's inference counter is global and cumulative — without a per-call
-reset, a long-lived process eventually exceeds `*maxinferences*` and every
-later check fails. The helper reads its arguments from source strings and
-resets the counter per call, which turns `*maxinferences*` into a per-check
-inference budget (an over-budget check returns `false`, fail-closed).
-
-### The `bin/shen` launcher
-
-```sh
-bin/shen                       # interactive REPL
-bin/shen prog.shen ...         # (load) each file, then exit
-bin/shen -e "(+ 1 2)"          # evaluate and print (mixes with files, in order)
-bin/shen --hush-load prog.shen # silence load's echo only; (output ...) still prints
-bin/shen -q prog.shen          # -q sets *hush*: silences load echo AND (output ...)
-```
-
-#### Batch and golden-suite runners: `--hush-load`, not `-q`
-
-On the 42 kernel the `*hush*` global gates **`pr` itself**, so `-q` silences
-*all* standard output — including the program's own `(output ...)`. That makes
-`-q` useless for a runner that diffs a suite's printed results against a golden
-file (issue #46): the file comes back empty.
-
-Use **`--hush-load`** (or **`SHEN_HUSH_LOAD=1`** where the argv is fixed)
-instead. It silences only what `load` itself writes — the per-form
-`(fn name)` / value / type echo and the `run time:` / `typechecked in N
-inferences` banners — and leaves everything the loaded program prints alive:
-
-```sh
-$ bin/shen suite.shen              # default: user output buried in load echo
-(fn double)
-...
-run time: 0.0013 secs
-loaded
-RESULT: 42
-"RESULT: 42
-"
-$ bin/shen --hush-load suite.shen  # just the program's own output
-RESULT: 42
-```
-
-The mode composes with the fasl cache in both directions: a cache written
-under `--hush-load` replays correctly in the default (echoing) mode and vice
-versa, so warm and cold runs produce identical bytes. Embedders get the same
-switch as `shen.boot{hush_load = true}`.
-
-The REPL reads multiline forms (it tracks paren balance through strings and
-comments), keeps history (`~/.shen_history` with linenoise/readline installed,
-or run under `rlwrap`), and translates Lua-level failures into useful errors:
-undefined functions get a *did-you-mean* suggestion, and uncaught errors print
-a backtrace of **Shen** function names with the Lua plumbing filtered out.
-
-### luarocks
-
-```sh
-luarocks install shen                       # from luarocks.org: modules + the `shen` launcher
-luarocks make --local shen-scm-1.rockspec   # or: install the development tree
-```
-
-(LuaJIT required — declared as `lua == 5.1`; run the launcher with a
-luarocks tree whose interpreter is LuaJIT, e.g.
-`luarocks --lua-dir=$(brew --prefix luajit) --lua-version=5.1 install shen`.)
-
-Rock versions map to kernels: **0.9.0** bundles kernel **41.1**, while
-**0.10.0+** bundles **42** (check with `shen -e '(version)'`). **0.10.1** is the current
-release (0.10.0 + the warm-FASL `(load)` echo fix, #40). If luarocks hands you
-0.9.0, ask for the newer rock explicitly (`luarocks install shen 0.10.1-1`)
-or build from a checkout with the `scm` rockspec above.
-
-Prefer zero install? Grab `shen-bundle.lua` from the
-[latest release](https://github.com/pyrex41/shen-lua/releases/latest) —
-the whole system in one file.
-
-### Single-file bundle
-
-```sh
-luajit build/make-bundle.lua    # -> build/shen-bundle.lua (~6 MB, self-contained)
-```
-
-`shen-bundle.lua` embeds the Lua modules, the precompiled kernel bytecode and
-the `.kl` sources (fallback for a different LuaJIT build). Drop the one file
-anywhere and:
-
-```lua
-local shen = require("shen-bundle")
-shen.boot{quiet=true}            -- boots from embedded bytecode in ~tens of ms
-print(shen.eval("(+ 1 2)"))      --> 3
-```
-
-## Calling Lua from Shen (and Shen from Lua)
-
-Every Shen value *is* a Lua value, and the bridge is first-class in both
-directions (`lua_interop.lua`):
-
-```shen
-(lua.call "string.format" ["%s: %d" "answer" 42])  \\ any Lua function by dotted path
-(lua.require "cjson")                              \\ modules come back as opaque boxes
-(lua.method Obj "name" Args)                       \\ obj:name(...)
-```
-
-The headline feature is the **typed bridge** — `lua.function` registers a Lua
-function as a real Shen function *with a declared type*, so typechecked Shen
-code can call into Lua and the call sites are proved sound under `(tc +)`.
-From the Lua side, `shen.fn`/`shen.call` make any Shen function (including
-curried partials) an ordinary Lua callable. Marshaling rules are documented
-exhaustively at the top of [`lua_interop.lua`](lua_interop.lua).
+From Shen: `(lua.call "string.format" ["%s: %d" "answer" 42])`. `lua.function`
+registers a Lua function as a typed Shen function so `(tc +)` can prove call
+sites. Details at the top of [`lua_interop.lua`](lua_interop.lua).
 
 ## Examples
 
-The flagship is **[`examples/openresty/`](examples/openresty/)** — a complete
-guestbook web app whose validation rules are written once in Shen and run on
-*both* ends: as a typechecked core on the server (shen-lua inside OpenResty) and
-as a [Yggdrasil](https://github.com/pyrex41/yggdrasil)-shaken,
-[ShenScript](https://github.com/pyrex41/ShenScript)-compiled module in the
-browser. One `rules.shen`, two runtimes, no client/server drift. See its
-[README](examples/openresty/README.md) for the walkthrough.
-
 | | |
 |---|---|
-| [`examples/hello_embed.lua`](examples/hello_embed.lua) | the smallest useful embedding: boot, define a typed function, call it both ways (~25 lines) |
-| [`examples/family.shen`](examples/family.shen) | Shen Prolog in twenty lines: facts, rules, queries via `bin/shen` |
-| [`examples/config_check.lua`](examples/config_check.lua) | the showcase: Shen datatypes + rules as a **typed validation layer** for nested Lua config tables — the typechecker rejects buggy rules at load time ([walkthrough](examples/README.md)) |
-| [`examples/configc/`](examples/configc/) | a typed **config compiler**: one config validates *and* generates a Kubernetes Deployment + nginx server block; a generator type-bug is caught at load ([README](examples/configc/README.md)) |
-| [`examples/policy/`](examples/policy/) | a typed **authorization** gateway: one rule set enforced at the OpenResty edge and previewed in the browser, plus authz-as-type-inhabitation — a permission *is* a proof ([README](examples/policy/README.md)) |
-| [`examples/crdt/`](examples/crdt/) | a **CRDT** sync hub: replicas converge via a typed join-semilattice merge whose laws are checked by execution *and* by machine-checked sequent-calculus proof ([README](examples/crdt/README.md)) |
-| [`examples/pcr/`](examples/pcr/) | **proof-carrying requests over live facts**: the client carries a proof term, the OpenResty gate *checks* it — never searches — against a versioned fact store consulted at proof time, so revoking one fact makes the same proof bytes fail on the next request while delegation chains stay composable and every allow logs its justification ([README](examples/pcr/README.md)) |
-| [`examples/openresty/`](examples/openresty/) | a **complete web app in Shen on OpenResty** (nginx + LuaJIT): typed request validators + a Shen router behind a JSON API, with a front end that runs the **same** typed rules in the browser — Yggdrasil-shaken and ShenScript-compiled to a ~140 KB module. One `rules.shen`, validated client- and server-side. Runs standalone (`luajit examples/openresty/selftest.lua`) or under `openresty` ([README](examples/openresty/README.md)) |
-| [`examples/openresty-authz/`](examples/openresty-authz/) | durable multi-tenant **authorization**: the policy as a Prolog proof chain (`token → user → tenant → resource`), a typed `decision` witness that gates every response, and an event-sourced store (file + `lua-resty-lmdb`) whose append-only log makes decisions durable and auditable ([README](examples/openresty-authz/README.md)) |
-| [`examples/envoy/`](examples/envoy/) | **Shen at the edge**: Envoy fronting both apps above — `ext_authz` runs every request through the authz proof chain (edge decisions durably audited), and an Envoy **Lua filter** runs the same typed `rules.shen` inside the proxy, so malformed requests get their typed 400 before costing an upstream hop ([README](examples/envoy/README.md)) |
+| [`examples/hello_embed.lua`](examples/hello_embed.lua) | boot, define, call both ways |
+| [`examples/family.shen`](examples/family.shen) | Prolog facts and queries |
+| [`examples/config_check.lua`](examples/config_check.lua) | typed validation of Lua tables |
+| [`examples/openresty/`](examples/openresty/) | guestbook: one `rules.shen` on OpenResty and in the browser |
 
-## Certification / Testing
+More under [`examples/`](examples/README.md). A full tour:
+[`demo/walkthrough.md`](demo/walkthrough.md).
 
-The port loads and initialises the full 42 kernel plus the standard library
-(loaded at boot from the S-lineage Shen sources under `lib/StLib/`) and the
-extensions, and **passes the official 42 kernel test suite, 134/134**:
+## Tests
 
 ```sh
-luajit run-kernel-tests.lua    # => "passed ... 134 / failed ... 0 / pass rate ... 100%"
-lua    run-kernel-tests.lua    # same result on PUC Lua 5.1 / 5.4 / 5.5 (slower)
+make test                      # port specs (test/*_spec.lua)
+luajit run-kernel-tests.lua    # official 42 suite → 134/134
 ```
 
-The official test suite is vendored in `tests/` (BSD-licensed, from the
-ShenOSKernel 42 distribution), so certification is verifiable from a bare
-clone. `SHEN_TESTS_DIR` points the driver at a different suite location.
-Port-specific specs live in `test/` (engine, interop, REPL, tail-call
-lowering).
+The kernel suite is vendored in `tests/`. Port specs cover primitives, REPL,
+interop, tail-call lowering, boot caches.
 
-See [doc/41.1-STATUS.md](doc/41.1-STATUS.md) for the original certification write-up.
+## Install
 
-## Benchmarks
+```sh
+luarocks install shen                       # launcher + modules
+luarocks make --local shen-scm-1.rockspec   # this tree
+```
 
-Current numbers on Apple Silicon (LuaJIT 2.1, interleaved min-of-N — the host
-thermally throttles run-to-run, so timings are mins and allocation is the
-deterministic metric):
+LuaJIT required (`lua == 5.1`). Rocks: **0.10.1** is kernel **42**; **0.9.0**
+was 41.1. Or grab `shen-bundle.lua` from
+[Releases](https://github.com/pyrex41/shen-lua/releases/latest) — one file,
+`require("shen-bundle")`.
+
+```sh
+luajit build/make-bundle.lua    # → build/shen-bundle.lua
+```
+
+## Performance
 
 | workload | time |
 |----------|-----:|
-| Kernel boot, cold (compile all `.kl`) | ~0.7 s |
-| Kernel boot, warm (bytecode cache) | **~0.03 s** |
-| **Full 42 test suite, warm** (kernel + fasl caches) | **~2.3 s** |
-| Full 42 test suite, cold (caches off) | ~5.4 s |
-| Reference typecheck (431,741 inferences) | ~0.061 s (8.9× vs legacy engine) |
-| Typechecker allocation | ~24 B/inf (−93% vs legacy) |
-| Einstein's riddle (Prolog backtracking) | ~0.002 s / solve (22× vs legacy) |
-| Single-file bundle: require + boot + eval, from nothing | ~70 ms |
+| Kernel boot, warm | ~0.03 s |
+| Kernel boot, cold | ~0.7 s |
+| 42 suite, warm (fasl) | ~2–5 s |
+| Reference typecheck (431,741 infs) | ~0.06 s |
+| Einstein’s riddle | ~0.002 s / solve |
 
-Measured against the usual performance reference among ports — **shen-cl** on
-SBCL, same machine, suite in
-~1.6 s — the warm-cache gap is **~1.5×**, down from 5.5× before the caching and
-native-engine work. The big steps, in order: the native soa32 engine (terms as
-plain numbers over flat int32 storage, continuations as integers, replacing the
-allocation-bound CPS model), the kernel bytecode + user fasl caches, raising
-LuaJIT's mcode/trace limits (the default 512 KB area caused constant
-trace-cache flushes), and native overrides for the hottest kernel predicates.
-See [doc/PERF-HANDOFF.md](doc/PERF-HANDOFF.md) and [doc/BENCHMARKS.md](doc/BENCHMARKS.md) for the full measurement history
-(including the disproven levers).
+Prolog and the typechecker run on a native engine (`prolog_engine.lua`); the
+portable kernel predicates that show up on compile and execution paths are
+overridden in `prims.lua`. Caches (kernel bytecode, stdlib image, user fasl)
+are content-keyed and safe to delete. Internals:
+[`doc/PERF-HANDOFF.md`](doc/PERF-HANDOFF.md),
+[`doc/BENCHMARKS.md`](doc/BENCHMARKS.md).
 
-The historical Shen 22.4 head-to-head versus the `shen-c` 0.2.3 interpreter (same
-machine) is preserved in [doc/BENCHMARKS.md](doc/BENCHMARKS.md): fib 66–79× faster, n-queens ~2.5× faster,
-Einstein's riddle ~1.5× slower.
-## Optional Nix environment
+## Requirements
 
-Nix is optional; the normal shen-lua build and launcher commands continue to work
-with tools installed by any method. For a pinned development toolchain:
+LuaJIT 2.1. Kernel sources are in `klambda/` (see
+[`klambda/PROVENANCE.md`](klambda/PROVENANCE.md)). `SHEN_KL_DIR` can point at
+another tree.
 
-```sh
-nix develop
-```
+**PUC Lua 5.1/5.4/5.5:** same 134/134. No FFI → legacy Prolog engine; no `bit`
+→ caches off. Lua 5.3+ arithmetic is forced to floats so it matches LuaJIT.
 
-The flake also exports `packages.toolchain` for composition by
-[Bifrost](https://github.com/pyrex41/bifrost):
+**Old LuaJIT on aarch64** (2.1.0-beta3): boot-time JIT crash, fixed upstream.
+Use a current rolling LuaJIT, or `SHEN_JIT=off`.
 
-```sh
-nix shell .#toolchain
-```
+## Nix
 
-If direnv is installed, `direnv allow` opts this checkout into the same dev
-shell automatically. Nothing activates until that explicit authorization, and
-Nix is never required at runtime.
+Optional. `nix develop` or `direnv allow` for a pinned toolchain.
+`packages.toolchain` is what [Bifrost](https://github.com/pyrex41/bifrost)
+composes.
