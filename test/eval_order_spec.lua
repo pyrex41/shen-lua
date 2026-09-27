@@ -235,5 +235,88 @@ do
      "mixed literal/effect list literal has the right value")
 end
 
+-- ---------------------------------------------------------------------------
+-- curried call chains ((((fn f) a) b) c): what Shen 42 emits for a call into
+-- a function whose arity was unknown when the form was translated (a
+-- library the same file loads). compiler.lua curried_call turns the chain
+-- into one CURn call; order, errors and arity mismatches must not change.
+-- ---------------------------------------------------------------------------
+do
+  local F = shen.prims.F
+  local function kl(src)            -- compile+run one KL form
+    return F["eval-kl"](R.read_all(src)[1])
+  end
+  local function klsrc(src)
+    return C.compile_expr_chunk(R.read_all(src)[1])
+  end
+
+  shen.eval("(define eo-c3 A B C -> [A B C])")
+  eq(show(kl("((((fn eo-c3) 1) 2) 3)")), "1 2 3", "curried chain, exact arity")
+  check(klsrc("((((fn eo-c3) 1) 2) 3)"):find("CUR3(", 1, true),
+        "curried chain compiles to CUR3")
+
+  -- operands still evaluate left to right
+  shen.eval("(set eo-trace [])")
+  kl("((((fn eo-c3) (eo-log 1)) (eo-log 2)) (eo-log 3))")
+  eq(show(shen.eval("(reverse (value eo-trace))")), "1 2 3",
+     "curried chain: operands left to right")
+
+  -- shorter chain than the arity: still a partial application
+  eq(show(kl("(((((fn eo-c3) 1) 2)) 3)")), "1 2 3", "curried chain shorter than arity -> partial")
+
+  -- runtime arity smaller than the chain: over-application through the
+  -- original nested APPs (order-free args, so the rewrite applies)
+  shen.eval("(define eo-c1 A -> (/. B (/. C [A B C])))")
+  eq(show(kl("((((fn eo-c1) x) y) z)")), "x y z", "curried chain over-applies a 1-ary function")
+
+  -- effectful later operands + a compile-time arity that does not match the
+  -- chain: left as nested APPs, so intermediate calls keep their place
+  check(not klsrc("((((fn eo-c1) (eo-log 1)) (eo-log 2)) (eo-log 3))"):find("CUR3(", 1, true),
+        "mismatched arity + effectful operands: not rewritten")
+  shen.eval("(set eo-trace [])")
+  shen.eval("(define eo-c1l A -> (do (eo-log f) (/. B (/. C [A B C]))))")
+  kl("((((fn eo-c1l) (eo-log 1)) (eo-log 2)) (eo-log 3))")
+  eq(show(shen.eval("(reverse (value eo-trace))")), "1 f 2 3",
+     "mismatched arity: the call runs before later operands")
+
+  -- A matching compile-time arity is not permanent: an already-compiled
+  -- caller must preserve intermediate calls and errors after redefinition.
+  shen.eval("(define eo-redef A B -> [A B])")
+  kl("(defun eo-redef-call () (((fn eo-redef) (eo-log 1)) (eo-log 2)))")
+  shen.eval("(define eo-redef A -> (do (eo-log f) (/. B [A B])))")
+  shen.eval("(set eo-trace [])")
+  eq(show(kl("(eo-redef-call)")), "1 2", "redefined curried callee: result")
+  eq(show(shen.eval("(reverse (value eo-trace))")), "1 f 2",
+     "redefined curried callee runs before the later operand")
+  shen.eval('(define eo-redef A -> (simple-error "eo stop"))')
+  shen.eval("(set eo-trace [])")
+  local redef_ok, redef_err = pcall(kl, "(eo-redef-call)")
+  check(not redef_ok, "redefined curried callee raises")
+  eq(F["error-to-string"](redef_err), "eo stop", "redefined callee error preserved")
+  eq(show(shen.eval("(reverse (value eo-trace))")), "1",
+     "redefined curried callee error prevents the later operand")
+
+  -- an undefined function raises before any operand is evaluated
+  shen.eval("(set eo-trace [])")
+  local ok = pcall(kl, "((((fn eo-undefined-fn) (eo-log 1)) 2) 3)")
+  check(not ok, "curried chain to an undefined function raises")
+  eq(show(shen.eval("(reverse (value eo-trace))")), "",
+     "undefined function: no operand evaluated first")
+
+  -- the real shape: a file that loads a library and calls it
+  local dir = os.tmpname()
+  os.remove(dir)
+  local lib, main = dir .. "-eo-lib.shen", dir .. "-eo-main.shen"
+  local fh = assert(io.open(lib, "w"))
+  fh:write("(define eo-lib3 A B C -> (+ A (* B C)))\n"); fh:close()
+  fh = assert(io.open(main, "w"))
+  fh:write('(load "' .. lib .. '")\n(define eo-use X -> (eo-lib3 X 2 3))\n'); fh:close()
+  shen.prims.GLOBALS["*hush*"] = true
+  shen.eval('(load "' .. main .. '")')
+  shen.prims.GLOBALS["*hush*"] = false
+  os.remove(lib); os.remove(main)
+  eq(shen.eval("(eo-use 1)"), 7, "library call from a loading file")
+end
+
 io.write(string.format("eval_order_spec: %d pass, %d fail\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)

@@ -169,5 +169,154 @@ do
   check(ev("(tc-redef 5)") == R.intern("new"), "redefinition observed by new calls")
 end
 
+-- ---------------------------------------------------------------------------
+-- tail recursion modulo cons (TRMC, #58): (cons H (self ...)) builders
+-- ---------------------------------------------------------------------------
+local TRMC_ON = os.getenv("SHEN_TRMC") ~= "off"
+do
+  local src = gensrc("(defun tm-inc (L) (if (cons? L) (cons (+ 1 (hd L)) (tm-inc (tl L))) ()))")
+  check(not TRMC_ON or (src:find("TLOOP", 1, true) and src:find("TRMC_C", 1, true)),
+        "map-shaped builder is TRMC-lowered")
+  check(not src:find("goto", 1, true), "TRMC emits no goto")
+
+  -- the fall-through of a non-exhaustive define names the function as DATA
+  src = gensrc("(defun tm-fe (L) (if (cons? L) (cons (hd L) (tm-fe (tl L))) (shen.f-error tm-fe)))")
+  check(not TRMC_ON or src:find("TLOOP", 1, true), "(shen.f-error NAME) does not block TRMC")
+
+  -- a pure tail-recursive function keeps the plain goto loop
+  src = gensrc("(defun tm-acc (L A) (if (cons? L) (tm-acc (tl L) (cons (hd L) A)) A))")
+  local has_goto = (loadstring or load)("do goto x ::x:: end") ~= nil
+  check((not has_goto or src:find("goto tco", 1, true)) and not src:find("TLOOP", 1, true),
+        "pure tail recursion keeps the goto loop, not TRMC")
+
+  -- refusals: self in the head, a non-tail self-call, wrong arity
+  src = gensrc("(defun tm-h (L) (if (cons? L) (cons (tm-h (tl L)) (tm-h (tl L))) ()))")
+  check(not src:find("TLOOP", 1, true), "self-call in the car refuses TRMC")
+  src = gensrc("(defun tm-nt (L) (if (cons? L) (cons 1 (tm-nt (tl L))) (+ 1 (tm-nt ()))))")
+  check(not src:find("TLOOP", 1, true), "a non-tail self-call elsewhere refuses TRMC")
+  src = gensrc("(defun tm-ar (L N) (if (cons? L) (cons 1 (tm-ar (tl L))) ()))")
+  check(not src:find("TLOOP", 1, true), "wrong-arity self-call refuses TRMC")
+end
+
+do
+  ev("(defun tm-inc (L) (if (cons? L) (cons (+ 1 (hd L)) (tm-inc (tl L))) ()))")
+  check(show(ev("(tm-inc ())")) == "[]", "TRMC: empty input")
+  check(show(ev("(tm-inc (cons 1 ()))")) == "[2]", "TRMC: one element")
+  check(show(ev("(tm-inc (cons 1 (cons 2 (cons 3 ()))))")) == "[2 3 4]", "TRMC: three elements")
+
+  -- mixed filter shape: a cons site AND a plain tail self-call
+  ev("(defun tm-ev (L) (cond ((= L ()) ()) ((= 0 (shen.mod (hd L) 2)) (cons (hd L) (tm-ev (tl L)))) (true (tm-ev (tl L)))))")
+  check(show(ev("(tm-ev (cons 1 (cons 2 (cons 3 (cons 4 (cons 5 ()))))))")) == "[2 4]",
+        "TRMC: filter shape (cons + plain tail self-call)")
+  check(show(ev("(tm-ev (cons 1 (cons 3 ())))")) == "[]", "TRMC: filter keeping nothing")
+
+  -- the base case's value becomes the final cdr, whatever it is
+  ev("(defun tm-dot (N) (if (= N 0) end (cons N (tm-dot (- N 1)))))")
+  local d = ev("(tm-dot 2)")
+  check(R.is_cons(d) and d[1] == 2 and d[2][1] == 1 and d[2][2] == R.intern("end"),
+        "TRMC: non-list base value is the last cdr")
+
+  -- deep builders run in constant stack (1M cells; ordinary recursion
+  -- overflows the Lua stack long before this)
+  ev("(defun tm-upto (N M) (if (> N M) () (cons N (tm-upto (+ N 1) M))))")
+  if TRMC_ON then
+    check(ev("(length (tm-upto 1 1000000))") == 1000000, "TRMC: 1M-element builder")
+  end
+
+  -- evaluation order: H, then the recursive call's arguments, per cell
+  ev("(set tm-log ())")
+  ev([[(defun tm-ord (N) (if (= N 0) ()
+         (cons (do (set tm-log (cons (cons h (cons N ())) (value tm-log))) N)
+               (tm-ord (do (set tm-log (cons (cons a (cons N ())) (value tm-log))) (- N 1))))))]])
+  check(show(ev("(tm-ord 2)")) == "[2 1]", "TRMC: order test result")
+  check(show(ev("(reverse (value tm-log))")) == "[[h 2] [a 2] [h 1] [a 1]]",
+        "TRMC: H is evaluated before the call's arguments")
+
+  -- an error part-way through propagates, and the function still works after
+  ev([[(defun tm-err (L) (if (cons? L)
+         (cons (if (= (hd L) 3) (simple-error "tm boom") (hd L)) (tm-err (tl L))) ()))]])
+  check(ev([[(trap-error (tm-err (cons 1 (cons 2 (cons 3 (cons 4 ()))))) (lambda E (error-to-string E)))]])
+        == "tm boom", "TRMC: error mid-build propagates")
+  check(show(ev("(tm-err (cons 1 (cons 2 ())))")) == "[1 2]", "TRMC: usable after an error")
+
+  -- The step/loop handoff must not keep heads or arguments alive after a
+  -- call finishes (including errors). Observe collection without retaining
+  -- either the input vector or the returned list in this test's frame.
+  ev([[(defun tm-gc (N X Fail) (if (= N 0)
+         (if Fail (simple-error "tm gc boom") ())
+         (cons X (tm-gc (- N 1) X Fail))))]])
+  local weak = setmetatable({}, { __mode = "v" })
+  local function run_gc_case(fail)
+    local x = P.F["absvector"](1024)
+    weak[1] = x
+    local ok = pcall(P.F["tm-gc"], 3, x, fail)
+    return ok
+  end
+  check(run_gc_case(false), "TRMC: GC test builder succeeds")
+  collectgarbage("collect"); collectgarbage("collect")
+  check(weak[1] == nil, "TRMC: completed builder releases heads and arguments")
+  check(not run_gc_case(true), "TRMC: GC test builder raises")
+  collectgarbage("collect"); collectgarbage("collect")
+  check(weak[1] == nil, "TRMC: failed builder releases heads and arguments")
+
+  -- re-entrancy: H re-enters the same builder while its loop is running
+  ev("(defun tm-nest (L) (if (cons? L) (cons (tm-nest-h (hd L)) (tm-nest (tl L))) ()))")
+  ev("(defun tm-nest-h (X) (if (cons? X) (tm-nest X) (* X 10)))")
+  check(show(ev("(tm-nest (cons 1 (cons (cons 2 (cons 3 ())) (cons 4 ()))))")) == "[10 [20 30] 40]",
+        "TRMC: re-entrant builder")
+
+  -- closures over params stay per-cell (params are fresh per step)
+  ev("(defun tm-clo (N) (if (= N 0) () (cons (lambda Y N) (tm-clo (- N 1)))))")
+  check(show(ev("(map (lambda F (F 0)) (tm-clo 3))")) == "[3 2 1]",
+        "TRMC: lambdas capture each cell's params")
+
+  -- mutual tail recursion through the base case stays constant-space when
+  -- no cell has been built (the base case's tail call is a real tail call)
+  ev("(defun tm-a (N K) (cond ((= K 1) (cons N (tm-a (- N 1) 0))) ((= N 0) ()) (true (tm-b (- N 1)))))")
+  ev("(defun tm-b (N) (tm-a N 0))")
+  check(show(ev("(tm-a 1000000 0)")) == "[]", "TRMC: mutual tail recursion via base case, 1M deep")
+  check(show(ev("(tm-a 5 1)")) == "[5]", "TRMC: builder then base via mutual call")
+
+  -- partial application / (fn ...) of a TRMC function
+  ev("(defun tm-pair (X L) (if (cons? L) (cons (cons X (cons (hd L) ())) (tm-pair X (tl L))) ()))")
+  check(show(ev("(map (tm-pair a) (cons (cons 1 ()) ()))")) == "[[[a 1]]]",
+        "TRMC: partial application")
+end
+
+-- ---------------------------------------------------------------------------
+-- forward references (unknown arity at compile time) -> CALLn
+-- ---------------------------------------------------------------------------
+do
+  local src = gensrc("(defun cf-a (X) (cf-b-later X 1))")
+  check(src:find('CALL2("cf-b-later"', 1, true) and not src:find('APP(S("cf-b-later")', 1, true),
+        "forward reference compiles to CALLn, not APP(S(...))")
+  ev("(defun cf-a (X) (cf-b-later X 1))")
+  ev("(defun cf-b-later (X Y) (+ X Y))")
+  check(ev("(cf-a 5)") == 6, "CALLn: exact arity")
+  -- redefined with a larger arity: the call now yields a partial
+  ev("(defun cf-b-later (X Y Z) (+ X (+ Y Z)))")
+  check(ev("((cf-a 5) 10)") == 16, "CALLn: callee grew an argument -> partial")
+  -- redefined with a smaller arity returning a function: over-application
+  ev("(defun cf-b-later (X) (lambda Y (* X Y)))")
+  check(ev("(cf-a 5)") == 5, "CALLn: callee lost an argument -> over-application")
+  ev("(defun cf-c (X) (cf-undefined-fn X))")
+  local msg = ev("(trap-error (cf-c 1) (lambda E (error-to-string E)))")
+  check(type(msg) == "string" and msg:find("cf-undefined-fn", 1, true),
+        "CALLn: undefined callee still raises naming it")
+  ev("(defun cf-z () (cf-zero-later))")
+  ev("(defun cf-zero-later () zero)")
+  check(ev("(cf-z)") == R.intern("zero"), "CALLn: zero-arity forward reference")
+end
+
+-- ---------------------------------------------------------------------------
+-- (do A B): intermediate forms are statements, not closures
+-- ---------------------------------------------------------------------------
+do
+  local src = gensrc("(defun do-t (N) (do (set do-t-g N) (do N (+ N 1))))")
+  check(not src:find("function()", 1, true), "do emits no IIFE closure")
+  ev("(defun do-t (N) (do (set do-t-g N) (do N (+ N 1))))")
+  check(ev("(do-t 4)") == 5 and ev("(value do-t-g)") == 4, "do: effects and value")
+end
+
 io.write(string.format("tailcall_spec: %d pass, %d fail\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)

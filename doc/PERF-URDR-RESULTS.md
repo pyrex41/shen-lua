@@ -82,7 +82,7 @@ cons churn (bits as cons lists).
   scope unless vector-gated and trivial.
 - **Tail-recursion modulo cons** for `(cons H (self …))` (append / take /
   map-like) would target the remaining non-tail list constructors without
-  host SHA.
+  host SHA. *Done in #58/#66, see the section at the end.*
 - **Interpreter share still ~25–30%** on prng — further trace-friendly
   inlining of tiny prims may help, but measure carefully (short-list loops
   can regress).
@@ -203,3 +203,124 @@ the property a Bifrost-style exact-golden runner needs. Regression-locked in
 - `luajit run-kernel-tests.lua`: **134 passed / 0 failed, ok**
 - urdr prng / world: **ALL PASS**; stdout byte-identical to pre-change warm
   golden (modulo `run time:` banners)
+
+## Model-checking workload, TRMC and list codegen (#58, #66; 2026-09-27)
+
+Workload: `tla.shen` (pyrex41/shencheck `lib/tla`), the election spec at 6
+and 7 computers (3,526 / 23,634 states). Host: 4-core x86-64 container,
+LuaJIT 2.1.1703358377, load average ~0. Interleaved, `get-time run` CPU
+inside the check, 5 rounds.
+
+| Visited map | c6 min | c7 min | c7 median |
+|---|---:|---:|---:|
+| portable Shen map, main | 0.633 s | 8.24 s | 8.39 s |
+| portable Shen map, this branch | 0.617 s | 7.05 s | 8.50 s |
+| `native/lua.shen` (string keys via `lua.method`) | 0.222 s | 2.18 s | 2.29 s |
+| **`lua.map-*`** (3-line override, below) | **0.161 s** | **0.92 s** | **1.15 s** |
+
+shen-cl with the portable map is 2.3 s on the same spec (issue #66).
+
+```shen
+(define tla.map-new -> (lua.map-new))
+(define tla.map-get M K -> (lua.map-get M K -1))
+(define tla.map-put M K V -> (lua.map-put M K V))
+```
+
+Where the portable map's time goes, per state at c6: tla's own structural
+hash ~30 us (it builds a 5-cell list per `tla.mix`, i.e. per state node),
+bucket `=` ~3 us, `next` ~20 us. The hash is library design, so the port's
+answer is `lua.map-*`: hashing walks cons cells in Lua and a hit is
+confirmed with `equal`, with no marshaling and no key string.
+
+### What changed in codegen, and what each measured
+
+- **Tail recursion modulo cons.** A function whose self-calls are all tail
+  calls or the cdr of a tail `(cons H (self ...))` compiles to a step
+  function plus a builder loop (compiler.lua, "TRMC"). `(shen.f-error NAME)`
+  no longer blocks it (it names the function as data). The step hands
+  `H`/args over in upvalues, not as multiple return values, because
+  multi-value returns through traced frames aborted with "register
+  coalescing too complex". `bench/list_builders_ab.lua` compiles each shape
+  both ways in one process and calls it directly, min of 5. Ratios of TRMC
+  to recursive across 4 fresh processes:
+
+  | shape | n=8 | n=32 | n=1000 |
+  |---|---|---|---|
+  | `inc` (map-shaped) | 0.76-0.85 (one run 1.24) | 0.75-0.85 (one 1.20) | 0.78-0.80 (one 1.10) |
+  | `take` | 0.60-1.04 | 0.81-1.03 | 0.80-0.98 |
+  | `set-nth` | 0.96-1.09 | 0.94-1.11 | 0.85-1.11 |
+  | `evens` (filter) | 0.87-1.02 | 0.85-0.90 | 0.85-0.96 |
+  | `xor` bits | 1.00-1.13 | 0.80-0.97 | 0.72-0.97 |
+  | control: kernel `map` + lambda | 0.97-1.07 | 1.01-1.03 | 0.97-1.03 |
+
+  The control row is the noise floor (about 7%). The median is ~10-15%
+  faster. The 8-element `xor`/`set-nth` cases are neutral to +5%, and one
+  process in four lands on a slower trace layout. Called directly, the
+  election's own `election.with` (6 elements) went 520-690 ns to 260-316 ns.
+  **Whole workloads are neutral:** election c7 0.841 vs 0.848 s min (10
+  rounds, TRMC on/off), and `next` 19-22 vs 18-23 us. urdr `prng`/`search`/
+  `world` are unchanged within noise, and their stdout is byte-identical
+  (same digests) with TRMC on and off and on main. Those suites now spend
+  their time in the reader (`ues.quiet-load` evals `read-file` output every
+  run), not in list builders.
+  **Robustness:** on main, `[N | (upto ...)]` over 100,000 elements dies with
+  an untrappable Lua "stack overflow"; with TRMC, 1,000,000 elements work.
+  Stack use is otherwise unchanged: until a cell exists, base-case tail calls
+  are still tail calls, so mutual tail recursion through a builder stays
+  constant-space (regression-tested). `SHEN_TRMC=off` restores the old
+  codegen and is part of the cache keys.
+- **`(do A B)` without closures.** Intermediate `do` forms compiled to
+  `(function() return A end)()`, one FNEW per execution. FNEW is NYI in the
+  trace compiler, so every loop running a `do` aborted its trace. They are
+  now `do local _ = A end`, which also adds no locals.
+- **Forward references.** A call to a function defined later in the same
+  file compiled to `APP(S("name"), ...)`, which interns, takes APP's symbol
+  path and re-dispatches through varargs on every call. It is now
+  `CALLn("name", ...)`, a fixed-arity lookup with APP as the fallback, so
+  partial application, over-application and errors are unchanged.
+- **`=` on lists** walks the cdr spine in a loop and recurses only into
+  elements: deep-equal on a c6 state went 2.7-3.1 us to 2.1-2.7 us.
+
+- **Curried call chains.** Shen 42 translates a call as
+  `((((fn f) a) b) c)` whenever f's arity is unknown at translation time.
+  That covers every call into a library that the same file `load`s, even
+  inside `define`s, because the kernel reads the whole outer file before
+  the nested load runs. That was n nested APPs and n-1 partial closures per
+  call. It now compiles to `CURn(fn(f), a, b, c)`: a direct call when the
+  runtime arity is n, and the original nested APPs otherwise (compiler.lua
+  `curried_call`). The rewrite only applies where it cannot reorder effects
+  (see the comment there); `test/eval_order_spec.lua` pins order, errors
+  and arity mismatches. Interleaved against the previous commit:
+
+  | case | before | after |
+  |---|---:|---:|
+  | 1M calls from a `define` into a loaded 3-ary function | 3.25 s | 0.0014 s |
+  | toplevel `(/. N (election.with a x ...))`, match at head | 5.5 us | 2 ns |
+  | same, match at 6th element | 7.9 us | 0.78 us |
+  | same shape around `election.next` | 53 us | 44 us |
+
+  urdr `prng`/`search`/`world` output digests are unchanged, and
+  tla.shen conformance is 27/27.
+
+### Tracing note
+
+The boot-time mcode probe attached its own `trace` handler, and LuaJIT keeps
+one handler per VM event, so `luajit -jv` printed nothing unless
+`SHEN_JIT=on`. The probe now stands aside when `jit.v` / `jit.dump` is
+loaded, and `luajit -jv bin/shen ...` works as is.
+
+### Gates (this branch)
+
+- `make test`: all specs green (TRMC, forward-reference, `do` and `lua.map`
+  cases added to `tailcall_spec` / `interop_spec`), also with
+  `SHEN_TRMC=off`
+- `luajit run-kernel-tests.lua`: **134 passed / 0 failed**
+- `examples/*/selftest.lua`: all 6 pass
+- PUC Lua 5.1 `scripts/run-tests.lua`: same pre-existing failures as main
+  (goto-shape asserts, native Prolog engine, one numeric rendering case),
+  none new
+- urdr `prng` / `search` / `world`: ALL PASS, output digests identical to main
+- tla.shen `test/conformance.shen`: 27/27 with the portable map,
+  `native/lua.shen` and `lua.map-*`, each with TRMC on and off; election
+  state counts 38 / 132 / 762 / 3,526 / 23,634 unchanged
+

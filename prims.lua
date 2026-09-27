@@ -175,21 +175,35 @@ end
 P.APP, P.MKFUN, P.PARTIAL = APP, MKFUN, PARTIAL
 
 -- ---- equality ------------------------------------------------------------
+-- Lists are compared by walking the cdr spine in a loop and recursing only
+-- into elements: the old car-and-cdr recursion was one Lua frame per cell,
+-- which LuaJIT cannot trace (down-recursion aborts), so `=` on a list of N
+-- cells ran interpreted. Deep `=` on list-shaped states is the hot path of
+-- hash-map buckets and assoc lookups (issue #66).
+local Cons = R.Cons
 local function equal(a, b)
   if a == b then return true end
-  local ta, tb = type(a), type(b)
-  if ta ~= tb then return false end
-  if ta == "table" then
-    if is_cons(a) and is_cons(b) then
-      return equal(a[1], b[1]) and equal(a[2], b[2])
+  if type(a) ~= "table" or type(b) ~= "table" then return false end
+  local mt = getmetatable(a)
+  if mt ~= getmetatable(b) then return false end
+  if mt == Cons then
+    repeat
+      local x, y = a[1], b[1]
+      if x ~= y and not equal(x, y) then return false end
+      a, b = a[2], b[2]
+      if a == b then return true end
+    until getmetatable(a) ~= Cons or getmetatable(b) ~= Cons
+    return equal(a, b)
+  end
+  -- vectors (pure-array layout: [1]=size, [i+2]=KL elt i)
+  if mt == Vmt then
+    local n = a[1]
+    if n ~= b[1] then return false end
+    for i=0,n-1 do
+      local x, y = a[i+2], b[i+2]
+      if x ~= y and not equal(x, y) then return false end
     end
-    -- vectors (pure-array layout: [1]=size, [i+2]=KL elt i)
-    if getmetatable(a) == Vmt and getmetatable(b) == Vmt then
-      local n = a[1]
-      if n ~= b[1] then return false end
-      for i=0,n-1 do if not equal(a[i+2], b[i+2]) then return false end end
-      return true
-    end
+    return true
   end
   return false
 end
@@ -1896,6 +1910,10 @@ local ENV = {
   GE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a>=b end return F[">="](a,b) end,
   LE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a<=b end return F["<="](a,b) end,
   EQ  = function(a,b) if type(a)=="number" then return a==b end return equal(a,b) end,
+  -- CALL0..CALLn are generated below the table (see unknown_call in compiler.lua).
+  -- TRMC step markers (see TRMC in compiler.lua): never Shen values.
+  TRMC_C = setmetatable({}, { __tostring = function() return "#<trmc cons>" end }),
+  TRMC_T = setmetatable({}, { __tostring = function() return "#<trmc tail>" end }),
   -- CMT: the runtime Cons metatable, for the compiler's inlined exact-arity
   -- (cons A B) codegen — `setmetatable({A, B}, CMT)` (see ccall in
   -- compiler.lua). Keeps the hottest allocation out of the tiny F["cons"]
@@ -2006,6 +2024,47 @@ local ENV = {
   math = math, string = string, table = table,
 }
 P.ENV = ENV
+
+-- CALL0..CALLn: late-bound fixed-arity calls to a function NAMED at compile
+-- time whose arity was not yet known (forward references; see unknown_call
+-- in compiler.lua). Generated from one template so each is a plain
+-- fixed-parameter function LuaJIT can trace. Dispatch matches APP exactly:
+-- a function with recorded arity n, or none recorded, is called directly;
+-- anything else (partial / over-application, a missing or non-function
+-- entry) takes the old APP(S(name), ...) path.
+do
+  for n = 0, C.MAX_CALLN do
+    local ps = {}
+    for i = 1, n do ps[i] = "a" .. i end
+    local plist = table.concat(ps, ", ")
+    local comma = n > 0 and ", " or ""
+    local src = "local F, FA, APP, S = ...\n"
+      .. "return function(name" .. comma .. plist .. ")\n"
+      .. "  local f = F[name]\n"
+      .. "  if type(f) == 'function' then\n"
+      .. "    local ar = FA[f]\n"
+      .. "    if ar == " .. n .. " or ar == nil then return f(" .. plist .. ") end\n"
+      .. "  end\n"
+      .. "  return APP(S(name)" .. comma .. plist .. ")\n"
+      .. "end\n"
+    ENV["CALL" .. n] = assert((loadstring or load)(src, "=CALL" .. n))(F, FA, APP, intern)
+  end
+  -- CUR1..CURn: a curried chain ((((fn f) a1) a2) ... an) whose (fn f) has
+  -- already been evaluated to g (see curried_call in compiler.lua). Arity n:
+  -- one direct call. Otherwise the original nested applications, verbatim.
+  for n = 1, C.MAX_CALLN do
+    local ps = {}
+    for i = 1, n do ps[i] = "a" .. i end
+    local nested = "g"
+    for i = 1, n do nested = "APP(" .. nested .. ", a" .. i .. ")" end
+    local src = "local FA, APP = ...\n"
+      .. "return function(g, " .. table.concat(ps, ", ") .. ")\n"
+      .. "  if FA[g] == " .. n .. " then return g(" .. table.concat(ps, ", ") .. ") end\n"
+      .. "  return " .. nested .. "\n"
+      .. "end\n"
+    ENV["CUR" .. n] = assert((loadstring or load)(src, "=CUR" .. n))(FA, APP)
+  end
+end
 
 -- PUC Lua 5.3+ tier: the inline fast paths must compute in the float domain
 -- for the same int64-wrap reason as the `+`/`-`/`*`/`/` primitives above

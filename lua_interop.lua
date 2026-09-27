@@ -34,6 +34,27 @@
 --                                 TYPECHECKED Shen code can call it.
 --                                 e.g. (lua.function fmt "string.format"
 --                                        [string --> string --> string])
+--   (lua.table-new)               a fresh EMPTY Lua table, boxed. Use it for
+--                                 a table you mean to keep: a plain {} that
+--                                 crosses into Shen is a dense array of
+--                                 length 0 and marshals to () (see below),
+--                                 so (lua.call F []) where F returns {} gives
+--                                 back () and the table is lost. From Lua,
+--                                 return setmetatable({}, {}) to force a box.
+--
+--   Structural maps, keyed by Shen values under Shen `=` (lists, vectors
+--   and tuples by structure; atoms by value; functions/streams by identity).
+--   Keys are hashed in place over cons cells -- never marshaled or turned
+--   into strings -- so these are the fast path for visited sets and memo
+--   tables keyed by Shen data (#66). Keys are stored, not copied: do not
+--   mutate a vector after using it as a key.
+--   (lua.map-new)                 an empty map
+--   (lua.map-get M K Default)     the value stored for K, else Default
+--   (lua.map-put M K V)           store V under K; returns M
+--   (lua.map-has? M K)            is K present?
+--   (lua.map-remove M K)          drop K if present; returns M
+--   (lua.map-count M)             number of keys
+--   (lua.map? X)                  is X a lua.map?
 --
 -- Errors raised by Lua code inside any of these become ordinary Shen errors
 -- (trappable with trap-error; error-to-string yields "lua error in ...: msg").
@@ -149,7 +170,7 @@ local function is_shen_table(v)
   if v == R.NIL then return true end
   local mt = getmetatable(v)
   return mt == R.Cons or mt == R.Symbol or mt == R.Vmt or mt == R.Excn
-      or mt == P.Stream or mt == P.Thunk
+      or mt == P.Stream or mt == P.Thunk or mt == M.ShenMap
 end
 
 -- n if v is a metatable-free dense array with keys exactly 1..n (n >= 0)
@@ -252,6 +273,131 @@ local function marshal_args(lst, what)
   return a, n
 end
 
+-- ---- structural maps (lua.map-*) --------------------------------------------
+-- A hash map keyed by Shen values under Shen `=` (the port's `equal`): lists
+-- and vectors (tuples included) by structure, atoms by value, everything else
+-- (functions, streams, boxes, maps) by identity. Built for workloads whose
+-- hot path is a visited set / memo table keyed by Shen data -- model checkers,
+-- search, memoisation (#66). Keys are never marshaled or serialised: the hash
+-- walks cons cells and vector slots in place, and a bucket hit is confirmed
+-- with `equal`, so no key string is built per lookup.
+--
+-- Keys are stored as given, not copied: mutating a vector after using it as a
+-- key (address->) breaks lookups of that key, as in any hash map.
+local ShenMap = {
+  __tostring = function(m) return "#<lua.map " .. m.n .. ">" end,
+}
+M.ShenMap = ShenMap
+
+local HP = 2147483647            -- 2^31-1: h*31 + x stays exact in a double
+local HINF = 1234577             -- +-inf / NaN (NaN is never `=` to itself)
+local SYMH = {}                  -- symbol -> id (symbols are never collected)
+local nsym = 0
+local IDH = setmetatable({}, { __mode = "k" })   -- identity-keyed values
+local nid = 0
+local sbyte = string.byte
+
+local shash
+local function hash_atom_table(x, mt)
+  if mt == R.Symbol then
+    local h = SYMH[x]
+    if h == nil then nsym = nsym + 1; h = nsym * 2654435 % HP; SYMH[x] = h end
+    return h
+  end
+  if x == R.NIL then return 7 end
+  local h = IDH[x]
+  if h == nil then nid = nid + 1; h = (nid * 40503 + 17) % HP; IDH[x] = h end
+  return h
+end
+
+shash = function(x)
+  local t = type(x)
+  if t == "number" then
+    if x ~= x or x == math.huge or x == -math.huge then return HINF end
+    return x % HP
+  elseif t == "string" then
+    local n = #x
+    local h = n
+    -- every byte for short strings; a stride sample (plus length) for long
+    local step = n <= 32 and 1 or math.floor(n / 16)
+    for i = 1, n, step do h = (h * 31 + sbyte(x, i)) % HP end
+    return h
+  elseif t == "boolean" then
+    return x and 3 or 5
+  elseif t ~= "table" then
+    return hash_atom_table(x, nil)                -- functions etc: identity
+  end
+  local mt = getmetatable(x)
+  if mt == R.Cons then
+    local h = 11
+    repeat
+      h = (h * 31 + shash(x[1])) % HP
+      x = x[2]
+    until getmetatable(x) ~= R.Cons
+    if x == R.NIL then return h end               -- proper list
+    return (h * 31 + shash(x)) % HP               -- dotted tail
+  elseif mt == R.Vmt then
+    local n = x[1]
+    local h = (13 + n) % HP
+    for i = 2, n + 1 do h = (h * 31 + shash(x[i])) % HP end
+    return h
+  end
+  return hash_atom_table(x, mt)
+end
+M.hash = shash
+
+local function map_new()
+  return setmetatable({ n = 0, b = {} }, ShenMap)
+end
+
+-- bucket chain entries: { key, value, next }
+local function map_find(m, k)
+  local e = m.b[shash(k)]
+  local equal = P.equal
+  while e do
+    local ek = e[1]
+    if ek == k or equal(ek, k) then return e end
+    e = e[3]
+  end
+  return nil
+end
+
+local function map_put(m, k, v)
+  local h = shash(k)
+  local b = m.b
+  local head = b[h]
+  local e = head
+  local equal = P.equal
+  while e do
+    local ek = e[1]
+    if ek == k or equal(ek, k) then e[2] = v; return m end
+    e = e[3]
+  end
+  b[h] = { k, v, head }
+  m.n = m.n + 1
+  return m
+end
+
+local function map_remove(m, k)
+  local h = shash(k)
+  local b = m.b
+  local prev, e = nil, b[h]
+  local equal = P.equal
+  while e do
+    local ek = e[1]
+    if ek == k or equal(ek, k) then
+      if prev then prev[3] = e[3] else b[h] = e[3] end
+      m.n = m.n - 1
+      return m
+    end
+    prev, e = e, e[3]
+  end
+  return m
+end
+
+M.map_new, M.map_find, M.map_put, M.map_remove =
+  map_new, map_find, map_put, map_remove
+
 -- ---- install: the Shen-side surface -----------------------------------------
 
 -- Shen-LEVEL registration of name/arity: the `arity` property plus the
@@ -347,6 +493,43 @@ function M.install(prims)
     if not ok then ERR("lua error in lua.setindex: " .. tostring(r)) end
     return v
   end)
+
+  -- (lua.table-new): a fresh, EMPTY Lua table as an opaque box. A plain {}
+  -- returned from lua.call is a dense array of length 0, which marshals to
+  -- () -- the table itself is lost. Use this (or return
+  -- setmetatable({}, {}) from Lua) for a table you mean to keep and mutate.
+  reg("lua.table-new", 0, function() return box({}) end)
+
+  -- structural maps: see the ShenMap block above ----------------------------
+  local function check_map(m, what)
+    if getmetatable(m) ~= M.ShenMap then
+      ERR(what .. ": not a lua.map: " .. R.to_str(m))
+    end
+  end
+  reg("lua.map-new", 0, map_new)
+  reg("lua.map-get", 3, function(m, k, default)
+    check_map(m, "lua.map-get")
+    local e = map_find(m, k)
+    if e then return e[2] end
+    return default
+  end)
+  reg("lua.map-put", 3, function(m, k, v)
+    check_map(m, "lua.map-put")
+    return map_put(m, k, v)
+  end)
+  reg("lua.map-has?", 2, function(m, k)
+    check_map(m, "lua.map-has?")
+    return map_find(m, k) ~= nil
+  end)
+  reg("lua.map-remove", 2, function(m, k)
+    check_map(m, "lua.map-remove")
+    return map_remove(m, k)
+  end)
+  reg("lua.map-count", 1, function(m)
+    check_map(m, "lua.map-count")
+    return m.n
+  end)
+  reg("lua.map?", 1, function(m) return getmetatable(m) == M.ShenMap end)
 
   -- the typed bridge -----------------------------------------------------------
   local ARROW = R.intern("-->")
