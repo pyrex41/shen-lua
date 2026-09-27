@@ -1,0 +1,8 @@
+application off RESULT load=0.708923 typecheck=0.059198 kernel_compile=0.341980 kernel_bytes=588900 load_mkfun=149074 semantic=(listl-formula)
+application on RESULT load=0.491955 typecheck=0.113069 kernel_compile=0.326067 kernel_bytes=618740 load_mkfun=8366 semantic=(listl-formula)
+objects ordinary RESULT mode=ordinary seconds=0.102783 growth_kib=5556.453 retained_kib=689.262 code_bytes=576 compile_seconds=0.003182 total=55968000 probe_mkfun=1000
+ordinary workload_trace_abort_FNEW=26 workload_trace_lines=59
+objects optimized RESULT mode=optimized seconds=0.076007 growth_kib=5500.000 retained_kib=689.574 code_bytes=1029 compile_seconds=0.003307 total=55968000 probe_mkfun=0
+optimized workload_trace_abort_FNEW=0 workload_trace_lines=49
+objects manual RESULT mode=manual seconds=0.070935 growth_kib=5500.000 retained_kib=681.262 code_bytes=815 compile_seconds=0.002401 total=55968000 probe_mkfun=0
+manual workload_trace_abort_FNEW=0 workload_trace_lines=8

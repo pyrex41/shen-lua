@@ -109,3 +109,8 @@ Validation:
 Local full-run logs: `/tmp/shen-closures-baseline.log`,
 `/tmp/shen-closures-baseline-port.log`, `/tmp/shen-closures-on.log`.
 
+
+Follow-up: see [SPIKE-CALLBACKS.md](SPIKE-CALLBACKS.md) for guarded higher-order
+specialization, stateful escaping closures, and the fresh-process control audit.
+The follow-up judges gains against measured opportunity rather than a universal
+10% whole-application threshold.

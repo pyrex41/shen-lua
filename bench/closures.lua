@@ -13,6 +13,7 @@ print(jit.version..' '..jit.arch..' jit='..tostring(jit.status())..' iterations=
 print('case,mode,median_seconds,heap_growth_KiB_10000,retained_KiB,MKFUN_sites,trace_stops,trace_aborts,exit_events_1000')
 for _,case in ipairs(cases) do
  for _,on in ipairs{false,true} do
+  if not arg[2] or arg[2]==(on and "on" or "off") then
   C.CLOSURES=on
   local form=R.read_all('(defun cs-bench (N) '..case[2]..')')[1]
   local src=C.cdefun(form)
@@ -42,5 +43,6 @@ for _,case in ipairs(cases) do
   local q,r=math.floor(N/100),N%100
   local inputs=q*4950+r*(r+1)/2
   assert(sum==(case[1]=='local' and (2*inputs+7*N) or (inputs+3*N)))
+  end
  end
 end
