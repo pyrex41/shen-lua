@@ -72,7 +72,11 @@ shen.typecheck("[1 2]", "(list number)")
 
 From Shen: `(lua.call "string.format" ["%s: %d" "answer" 42])`. `lua.function`
 registers a Lua function as a typed Shen function so `(tc +)` can prove call
-sites. Details at the top of [`lua_interop.lua`](lua_interop.lua).
+sites. `lua.map-new` / `lua.map-get` / `lua.map-put` are hash maps keyed by
+Shen values under `=`, hashed in place over cons cells: the fast path for
+visited sets and memo tables. One gotcha: a plain `{}` returned from Lua is an
+empty array and comes back as `()`; use `(lua.table-new)` for a table you mean
+to keep. Details at the top of [`lua_interop.lua`](lua_interop.lua).
 
 ## Examples
 
@@ -121,6 +125,11 @@ luajit build/make-bundle.lua    # → build/shen-bundle.lua
 | 42 suite, warm (fasl) | ~2–5 s |
 | Reference typecheck (431,741 infs) | ~0.06 s |
 | Einstein’s riddle | ~0.002 s / solve |
+
+List builders of the `[X | (f ...)]` shape compile to a loop (tail recursion
+modulo cons), so they neither use a stack frame per element nor overflow on
+long lists; `SHEN_TRMC=off` restores plain recursion for A/B runs. To read
+LuaJIT trace logs, run `luajit -jv bin/shen ...`.
 
 Prolog and the typechecker run on a native engine (`prolog_engine.lua`); the
 portable kernel predicates that show up on compile and execution paths are

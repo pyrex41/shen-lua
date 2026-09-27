@@ -288,6 +288,76 @@ do
   check(not okSig, "signature without --> refused")
 end
 
+-- ---------------------------------------------------------------------------
+-- structural maps (lua.map-*) and lua.table-new (#66)
+-- ---------------------------------------------------------------------------
+do
+  I.eval("(tc -)")
+  I.eval("(set spec.m (lua.map-new))")
+  check(I.eval("(lua.map? (value spec.m))") == true, "lua.map? on a map")
+  check(I.eval("(lua.map? [1 2])") == false, "lua.map? on a list")
+  check(I.eval("(lua.map-count (value spec.m))") == 0, "new map is empty")
+  check(I.eval("(lua.map-get (value spec.m) [a b] -1)") == -1, "missing key -> default")
+
+  -- keys compare by Shen `=`: a freshly built equal list finds the entry
+  I.eval([==[(lua.map-put (value spec.m) [a [b 1] "s" 2.5] one)]==])
+  check(I.eval([==[(lua.map-get (value spec.m) [a [b 1] "s" 2.5] -1)]==]) == R.intern("one"),
+        "structural list key")
+  check(I.eval([==[(lua.map-get (value spec.m) [a [b 1] "t" 2.5] -1)]==]) == -1,
+        "different list key misses")
+  I.eval("(lua.map-put (value spec.m) (@p x [y]) tup)")
+  check(I.eval("(lua.map-get (value spec.m) (@p x [y]) -1)") == R.intern("tup"), "tuple key")
+  I.eval("(lua.map-put (value spec.m) [] empty)")
+  check(I.eval("(lua.map-get (value spec.m) [] -1)") == R.intern("empty"), "() key")
+  I.eval("(lua.map-put (value spec.m) 1 int)")
+  check(I.eval("(lua.map-get (value spec.m) 1.0 -1)") == R.intern("int"), "1 and 1.0 are one key")
+  I.eval([==[(lua.map-put (value spec.m) "a" str)]==])
+  check(I.eval("(lua.map-get (value spec.m) a -1)") == -1, "symbol a is not string \"a\"")
+  check(I.eval("(lua.map-count (value spec.m))") == 5, "count after 5 puts")
+
+  -- overwrite keeps the count; remove drops the entry
+  I.eval("(lua.map-put (value spec.m) (@p x [y]) tup2)")
+  check(I.eval("(lua.map-count (value spec.m))") == 5, "overwrite keeps count")
+  check(I.eval("(lua.map-get (value spec.m) (@p x [y]) -1)") == R.intern("tup2"), "overwrite value")
+  I.eval("(lua.map-remove (value spec.m) (@p x [y]))")
+  check(I.eval("(lua.map-has? (value spec.m) (@p x [y]))") == false, "removed key gone")
+  check(I.eval("(lua.map-count (value spec.m))") == 4, "count after remove")
+  I.eval("(lua.map-remove (value spec.m) not-there)")
+  check(I.eval("(lua.map-count (value spec.m))") == 4, "removing a missing key is a no-op")
+
+  -- many keys, including ones that share hash buckets, all round-trip
+  I.eval([==[(define spec.fill
+            N M -> M where (= N 0)
+            N M -> (spec.fill (- N 1) (lua.map-put M [N (* N N) [N]] N)))]==])
+  I.eval("(set spec.big (spec.fill 5000 (lua.map-new)))")
+  check(I.eval("(lua.map-count (value spec.big))") == 5000, "5000 distinct keys")
+  I.eval([==[(define spec.all
+            0 _ -> true
+            N M -> (and (= N (lua.map-get M [N (* N N) [N]] -1)) (spec.all (- N 1) M)))]==])
+  check(I.eval("(spec.all 5000 (value spec.big))") == true, "every key finds its value")
+
+  -- functions key by identity
+  I.eval("(set spec.fv (/. X X))")
+  I.eval("(set spec.fk (lua.map-put (lua.map-new) (value spec.fv) f))")
+  check(I.eval("(lua.map-get (value spec.fk) (value spec.fv) -1)") == R.intern("f"),
+        "function key by identity")
+  check(I.eval("(lua.map-get (value spec.fk) (/. X X) -1)") == -1,
+        "a different closure is a different key")
+
+  -- a map crosses the Lua boundary unchanged
+  check(getmetatable(I.to_shen(I.eval("(value spec.m)"))) == I.ShenMap, "to_shen passes a map through")
+
+  local okNot, msg = pcall(I.eval, "(lua.map-get [] 1 2)")
+  check(not okNot and I.error_message(msg):find("not a lua.map", 1, true), "non-map rejected")
+
+  -- lua.table-new: an empty table that stays a table (a plain {} returned
+  -- from lua.call marshals to the empty list)
+  check(I.to_shen({}) == R.NIL, "a plain {} crossing into Shen is ()")
+  I.eval([==[(set spec.t (lua.table-new))]==])
+  I.eval([==[(lua.setindex (value spec.t) "k" 7)]==])
+  check(I.eval([==[(lua.index (value spec.t) "k")]==]) == 7, "lua.table-new is a usable table")
+end
+
 -- make sure the spec leaves the typechecker off for whoever runs next
 I.eval("(tc -)")
 

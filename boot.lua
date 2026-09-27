@@ -63,8 +63,13 @@ do
       -- interpreted). Detect it directly — compile one throwaway hot loop and
       -- watch for a trace "stop" event — and fall back to the interpreter.
       -- SHEN_JIT=on skips the probe (explicit opt-in for verified hosts).
-      if os.getenv("SHEN_JIT") ~= "on" and jit.status and jit.status()
-         and jit.attach then
+      -- So does a loaded jit.v / jit.dump (`luajit -jv`, `-jdump`): LuaJIT
+      -- keeps ONE handler per VM event, so attaching the probe's watcher
+      -- replaced theirs and detaching it left none -- trace diagnostics
+      -- printed nothing (#66). Their own output shows whether traces compile.
+      local tracing = package.loaded["jit.v"] or package.loaded["jit.dump"]
+      if os.getenv("SHEN_JIT") ~= "on" and not tracing
+         and jit.status and jit.status() and jit.attach then
         local compiled = false
         local watcher = function(what)
           if what == "stop" then compiled = true end
@@ -265,6 +270,8 @@ end
 local function cache_key()
   local h = fnv1a(jit and (jit.version .. jit.arch) or _VERSION)
   h = fnv1a(CACHE_FORMAT .. table.concat(FILES, ","), h)
+  -- codegen switches that change compiled output (SHEN_TRMC -> compiler.lua C.TRMC)
+  h = fnv1a("trmc=" .. tostring(os.getenv("SHEN_TRMC") ~= "off"), h)
   for _, m in ipairs({ "compiler", "runtime", "prims" }) do
     h = fnv1a(module_source(m), h)
   end

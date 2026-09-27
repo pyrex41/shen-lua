@@ -88,6 +88,11 @@ local CONT = {}
 -- proper-tail-call form (correctness identical -- this is a perf-only lever).
 local HAS_GOTO = (loadstring or load)("do goto tco ::tco:: end") ~= nil
 
+-- Tail recursion modulo cons (see TRMC above try_self_tail). SHEN_TRMC=off
+-- keeps ordinary codegen, for A/B measurement; C.TRMC is read per defun, so
+-- an in-process A/B (bench/list_builders_ab.lua) can flip it too.
+C.TRMC = os.getenv("SHEN_TRMC") ~= "off"
+
 local function new_ctx()
   -- cbodies: hoisted bodies (both `freeze` bodies and value-position control
   --          forms), emitted into a single `KC` table at *chunk* scope (built
@@ -207,7 +212,10 @@ local function contains_name(form, name)
   return false
 end
 
-local function pure_tail_self(form, name, arity, tailpos)
+-- `st` (optional) enables the tail-recursion-modulo-cons extension: a
+-- (cons H (NAME a1..aN)) in tail position, H and the ai self-free and exact
+-- arity, is accepted too and recorded as st.cons = true (see TRMC below).
+local function pure_tail_self(form, name, arity, tailpos, st)
   if not is_cons(form) then
     -- a bare self-reference (value / partial application) is residual
     return not (is_symbol(form) and form.name == name)
@@ -215,6 +223,34 @@ local function pure_tail_self(form, name, arity, tailpos)
   local head = form[1]
   if is_symbol(head) then
     local op = head.name
+    if st and tailpos and op == "cons" and name ~= "cons" then
+      local rest = cdr(form)
+      if is_cons(rest) and is_cons(cdr(rest)) and cdr(cdr(rest)) == NIL then
+        local h, call = car(rest), car(cdr(rest))
+        if is_cons(call) and is_symbol(car(call)) and car(call).name == name
+           and not contains_name(h, name) then
+          local args = to_array(cdr(call))
+          if #args ~= arity then return false end
+          for i = 1, #args do
+            if contains_name(args[i], name) then return false end
+          end
+          st.cons = true
+          return true
+        end
+      end
+    end
+    -- (shen.f-error NAME): the fall-through clause of every non-exhaustive
+    -- `define`. NAME is data (the name printed in the error), never a call,
+    -- so it is not residual recursion. Exempted for TRMC only; the plain
+    -- loop lowering keeps refusing it (measured regression, see
+    -- doc/PERF-URDR-RESULTS.md "Tried / not shipped").
+    if st and op == "shen.f-error" then
+      local rest = cdr(form)
+      if is_cons(rest) and cdr(rest) == NIL and is_symbol(car(rest))
+         and car(rest).name == name then
+        return true
+      end
+    end
     if op == name then
       -- direct self-call: lowerable iff in tail position with exact arity and
       -- self-free arguments (arguments are evaluated in non-tail position)
@@ -229,7 +265,7 @@ local function pure_tail_self(form, name, arity, tailpos)
       if contains_name(car(rest), name) then return false end -- test: non-tail
       local cur = cdr(rest)
       while is_cons(cur) do
-        if not pure_tail_self(cur[1], name, arity, tailpos) then return false end
+        if not pure_tail_self(cur[1], name, arity, tailpos, st) then return false end
         cur = cur[2]
       end
       return true
@@ -238,7 +274,7 @@ local function pure_tail_self(form, name, arity, tailpos)
       while is_cons(cur) do
         local cl = cur[1]
         if contains_name(car(cl), name) then return false end  -- test: non-tail
-        if not pure_tail_self(car(cdr(cl)), name, arity, tailpos) then return false end
+        if not pure_tail_self(car(cdr(cl)), name, arity, tailpos, st) then return false end
         cur = cur[2]
       end
       return true
@@ -248,19 +284,19 @@ local function pure_tail_self(form, name, arity, tailpos)
       local body = car(cdr(cdr(cdr(form))))
       if is_symbol(var) and var.name == name then return false end -- rebinds it
       if contains_name(val, name) then return false end            -- val: non-tail
-      return pure_tail_self(body, name, arity, tailpos)
+      return pure_tail_self(body, name, arity, tailpos, st)
     elseif op == "do" then
       local forms = to_array(cdr(form))
       for i = 1, #forms - 1 do
         if contains_name(forms[i], name) then return false end     -- non-tail
       end
-      return #forms == 0 or pure_tail_self(forms[#forms], name, arity, tailpos)
+      return #forms == 0 or pure_tail_self(forms[#forms], name, arity, tailpos, st)
     elseif op == "and" or op == "or" then
       local a = car(cdr(form)); local b = car(cdr(cdr(form)))
       if contains_name(a, name) then return false end              -- a: non-tail
-      return pure_tail_self(b, name, arity, tailpos)
+      return pure_tail_self(b, name, arity, tailpos, st)
     elseif op == "type" then
-      return pure_tail_self(car(cdr(form)), name, arity, tailpos)  -- ctail: tail
+      return pure_tail_self(car(cdr(form)), name, arity, tailpos, st)  -- ctail: tail
     elseif op == "lambda" or op == "freeze" or op == "trap-error" then
       -- separate function bodies / pcall closure: any self-ref is residual
       return not contains_name(cdr(form), name)
@@ -280,6 +316,29 @@ local cexpr, ctail  -- forward
 
 -- a symbol used as a *value* (self-evaluating) -> intern at runtime
 local function symlit(name) return 'S(' .. qstr(name) .. ')' end
+
+-- A call (NAME a1..an) whose callee arity is unknown at compile time -- in
+-- practice a forward reference to a function defined later in the same file,
+-- since each toplevel `define` is compiled on its own. The generic form,
+-- APP(S(name), ...), interns the name, takes APP's symbol slow path and
+-- re-dispatches through a vararg call on every execution; a hot Shen helper
+-- written above its callees ran ~50x slower than the same call to an
+-- already-defined function (issue #66: tla.shen's hash, 2.3 us per 5-step
+-- reduce). CALLn looks up F[name] at call time, calls it directly when its
+-- runtime arity is n (or unrecorded, APP's own "assume exact" rule), and
+-- otherwise falls back to exactly the old APP(S(name), ...) path -- so
+-- partial / over-application, redefinition and "not a function" errors are
+-- unchanged. Fixed arity, no varargs: LuaJIT traces it.
+local MAX_CALLN = 8
+local function unknown_call(name, argstr, n)
+  if n <= MAX_CALLN then
+    if n == 0 then return "CALL0(" .. qstr(name) .. ")" end
+    return "CALL" .. n .. "(" .. qstr(name) .. ", " .. argstr .. ")"
+  end
+  if n == 0 then return "APP(" .. symlit(name) .. ")" end
+  return "APP(" .. symlit(name) .. ", " .. argstr .. ")"
+end
+C.MAX_CALLN = MAX_CALLN
 
 -- ------------------------------------------------------------------
 -- atom / literal compilation
@@ -672,8 +731,8 @@ local function try_flatten_call_chain(form, env)
 
   -- innermost value next
   -- If the innermost form is a (do A1 A2 ... AN), emit A1..A_{N-1} as
-  -- statement-level side-effects (via tiny IIFEs that capture nothing
-  -- expensive) and use AN as the value expression. This avoids wrapping the
+  -- statement-level side-effects (block-scoped `do local _ = A end`, no
+  -- closure) and use AN as the value expression. This avoids wrapping the
   -- whole innermost in a single IIFE that would capture every flattened
   -- local as an upvalue (Lua caps at 60 upvalues per function).
   local val_form = cur
@@ -681,7 +740,7 @@ local function try_flatten_call_chain(form, env)
      and cur[1].name == "do" then
     local do_args = to_array(cdr(cur))
     for i=1,#do_args-1 do
-      stmts[#stmts+1] = "(function() return " .. cexpr(do_args[i], env) .. " end)();"
+      stmts[#stmts+1] = "do local _ = " .. cexpr(do_args[i], env) .. " end"
     end
     val_form = do_args[#do_args]
   end
@@ -717,8 +776,9 @@ local function try_flatten_call_chain(form, env)
     if ar and #prev_strs + 1 == ar then
       call_str = callee_ref(hname) .. "(" .. arg_list .. ")"
     else
-      -- fall back to APP for unknown / mismatched arity
-      call_str = "APP(" .. symlit(hname) .. ", " .. arg_list .. ")"
+      -- fall back to APP for mismatched arity; late-bound for unknown
+      call_str = ar and ("APP(" .. symlit(hname) .. ", " .. arg_list .. ")")
+                 or unknown_call(hname, arg_list, #prev_strs + 1)
     end
     stmts[#stmts+1] = "local " .. next_name .. " = " .. call_str .. ";"
     inner_name = next_name
@@ -735,7 +795,8 @@ local function try_flatten_call_chain(form, env)
   if ar and #prev_strs + 1 == ar then
     call_str = callee_ref(hname) .. "(" .. arg_list .. ")"
   else
-    call_str = "APP(" .. symlit(hname) .. ", " .. arg_list .. ")"
+    call_str = ar and ("APP(" .. symlit(hname) .. ", " .. arg_list .. ")")
+               or unknown_call(hname, arg_list, #prev_strs + 1)
   end
   stmts[#stmts+1] = "return " .. call_str
   return table.concat(stmts, " ")
@@ -887,9 +948,9 @@ local function ccall(form, env)
         return "APP(" .. symlit(name) .. ", " .. argstr .. ")"
       end
     else
-      -- unknown arity: generic apply through function table / symbol
-      if #args == 0 then return "APP(" .. symlit(name) .. ")" end
-      return "APP(" .. symlit(name) .. ", " .. argstr .. ")"
+      -- unknown arity (typically a forward reference: a function defined
+      -- later in the same file) -> late-bound fixed-arity dispatch
+      return unknown_call(name, argstr, #args)
     end
   else
     -- head is a bound variable or a compound expression -> generic apply
@@ -897,6 +958,79 @@ local function ccall(form, env)
     if #args == 0 then return "APP(" .. hv .. ")" end
     return "APP(" .. hv .. ", " .. argstr .. ")"
   end
+end
+
+-- Tail recursion modulo cons (#58). A function whose self-calls are all in
+-- tail position OR are the cdr of a tail-position (cons H (self ...)) -- the
+-- `[X | (f Xs)]` list-builder shape -- compiles its body as
+--     TSTEP(m, a1..an)
+-- and installs  impl(a1..an) = return TSTEP(false, a1..an).
+-- With m false (the first call), every tail position behaves exactly as in
+-- ordinary codegen, and a (cons H (self args)) site tail-calls
+-- TLOOP(H, args). TLOOP allocates the first cell and iterates TSTEP(true, ..):
+-- with m true a cons site returns TRMC_C (append a cell holding H, go on
+-- with args), a plain self-call returns TRMC_T (go on with args), and any
+-- other value is the list's tail, linked into the last cell before TLOOP
+-- returns the head. The cells are fresh and unreachable from anything else until TLOOP
+-- returns, so filling their cdrs in place is unobservable -- the argument
+-- prims.lua's native append / shen.reverse-help already rely on.
+--
+-- One Lua frame per output element becomes a loop LuaJIT can trace (the
+-- `[X | (f ...)]` shape otherwise aborts with "register coalescing too
+-- complex" / down-recursion), and deep builders no longer consume stack.
+-- Stack behaviour is otherwise unchanged: until a cell exists, base-case
+-- tail calls are real tail calls (so mutual tail recursion through a
+-- builder's base case stays constant-space), and once cells exist the
+-- original was already non-tail. No goto: works on every host.
+--
+-- The building-mode handoff is ONE return value (the marker); the new cell's
+-- car and the next arguments travel in chunk-level upvalues TH, T1..Tn,
+-- stored after every sub-expression has been evaluated and read by TLOOP
+-- immediately after TSTEP returns, so nothing can run in between. Returning
+-- them as multiple results instead made LuaJIT abort traces that returned
+-- through TSTEP ("NYI: register coalescing too complex").
+local function trmc_site(h, cargs, marker)
+  local vals, slots = {}, {}
+  if h then vals[1] = h; slots[1] = "TH" end
+  for i = 1, #cargs do vals[#vals + 1] = cargs[i]; slots[#slots + 1] = "T" .. i end
+  local names = {}
+  for i = 1, #vals do names[i] = gen("r") end
+  local nl = table.concat(names, ", ")
+  local direct
+  if marker == "TRMC_C" then
+    direct = "TLOOP(" .. nl .. ")"
+  else
+    direct = "TSTEP(false" .. (#names > 0 and (", " .. nl) or "") .. ")"
+  end
+  local bind, store = "", ""
+  if #names > 0 then
+    bind = "local " .. nl .. " = " .. table.concat(vals, ", ") .. "; "
+    store = table.concat(slots, ", ") .. " = " .. nl .. "; "
+  end
+  return "do " .. bind .. "if " .. SELF.mode .. " then " .. store .. "return "
+         .. marker .. " end return " .. direct .. " end"
+end
+
+-- (cons H (self args)) in tail position of a TRMC body -> trmc_site.
+local function try_trmc_cons(form, env)
+  if not (SELF and SELF.trmc) then return nil end
+  local head = car(form)
+  if not (is_symbol(head) and head.name == "cons" and not env["cons"]) then return nil end
+  local rest = cdr(form)
+  if not (is_cons(rest) and is_cons(cdr(rest)) and cdr(cdr(rest)) == NIL) then return nil end
+  local call = car(cdr(rest))
+  if not (is_cons(call) and is_symbol(car(call)) and car(call).name == SELF.name
+          and not env[SELF.name]) then
+    return nil
+  end
+  local args = to_array(cdr(call))
+  if #args ~= SELF.arity then return nil end
+  SELF.used = true
+  -- KL evaluates cons's arguments left to right: H, then the call's args.
+  local hc = cexpr(car(rest), env)
+  local cargs = {}
+  for i = 1, #args do cargs[i] = cexpr(args[i], env) end
+  return trmc_site(hc, cargs, "TRMC_C")
 end
 
 -- Tail-position DIRECT self-call with exact declared arity -> loop continue.
@@ -914,6 +1048,13 @@ local function try_self_tail(form, env)
   local args = to_array(cdr(form))
   if #args ~= SELF.arity then return nil end
   SELF.used = true
+  if SELF.trmc then
+    -- TRMC step body: a plain tail self-call continues the builder loop
+    -- (building) or is an ordinary tail call of the step (not building).
+    local cargs = {}
+    for i = 1, #args do cargs[i] = cexpr(args[i], env) end
+    return trmc_site(nil, cargs, "TRMC_T")
+  end
   if #args == 0 then return "goto tco" end
   local cargs = {}
   for i = 1, #args do cargs[i] = cexpr(args[i], env) end
@@ -1685,12 +1826,15 @@ function ctail(form, env)
       local s = {}
       for i=1,#forms-1 do
         local es = cexpr(forms[i], env)
-        -- Always turn intermediate do values into a statement via IIFE.
-        -- This is guaranteed valid Lua syntax for any expression (var, call, etc.)
-        -- and introduces no new named locals in the enclosing function scope.
-        -- Critical for giant do-chains in 42 stlib.initialise-* and
-        -- shen.initialise-lambda-forms.
-        s[#s+1] = "(function() return " .. es .. " end)();"
+        -- Turn intermediate do values into a statement with a block-scoped
+        -- throwaway local. Valid Lua for any expression (var, call, etc.),
+        -- and the local dies at `end`, so giant do-chains (42's
+        -- stlib.initialise-*, shen.initialise-lambda-forms) still add no
+        -- locals toward the 200-local limit. This used to be an IIFE,
+        -- `(function() return E end)();`, which allocated a closure (FNEW)
+        -- on every execution -- and FNEW is NYI in the LuaJIT trace
+        -- compiler, so any loop running a `do` aborted its trace (#66).
+        s[#s+1] = "do local _ = " .. es .. " end"
       end
       s[#s+1] = ctail(forms[#forms], env)
       return table.concat(s, " ")
@@ -1742,7 +1886,7 @@ function ctail(form, env)
       -- rule bodies would otherwise still nest past the parser limit).
       local saved_h = HOIST
       HOIST = { out = {}, pure = true }
-      local selfjump = try_self_tail(form, env)
+      local selfjump = try_trmc_cons(form, env) or try_self_tail(form, env)
       if selfjump then
         local pre = table.concat(HOIST.out)
         HOIST = saved_h
@@ -1804,12 +1948,20 @@ local function cdefun(form)
   -- step wrapper installed around F[name]) is not observed by an already-
   -- running loop. Non-tail self-calls and APP/partial calls are unaffected.
   local saved_self = SELF
+  local trmc_st = { cons = false }
   if HAS_GOTO and not ARITH2[name] and pure_tail_self(body, name, #params, true)
      and not lambda_captures_param(body, env, {}) then
     SELF = { name = name, arity = #params, lnames = lnames, used = false }
+  elseif C.TRMC and not ARITH2[name] and name ~= "cons"
+     and pure_tail_self(body, name, #params, true, trmc_st) and trmc_st.cons then
+    -- TRMC step body: its params never mutate (each TSTEP call is a fresh
+    -- frame), so lambda_captures_param does not apply.
+    SELF = { name = name, arity = #params, lnames = lnames, used = false,
+             trmc = true, mode = gen("m") }
   else
     SELF = nil
   end
+  local trmc = SELF ~= nil and SELF.trmc
   local saved_cont = CONT
   CONT = {}
   local saved_in, saved_dn = IN_IMPL, DEFUN_NAME
@@ -1820,7 +1972,9 @@ local function cdefun(form)
   for i, r in ipairs(FREF_LIST) do
     fref_decls[i] = "local " .. r.ln .. " = F[" .. qstr(r.name) .. "];"
   end
-  local lowered = SELF ~= nil and SELF.used
+  local lowered = SELF ~= nil and SELF.used and not trmc
+  local trmc_used = trmc and SELF.used
+  local trmc_mode = trmc and SELF.mode
   SELF = saved_self
   CONT = saved_cont
   IN_IMPL, DEFUN_NAME, FREF_LIST, FREF_MAP = saved_in, saved_dn, saved_fl, saved_fm
@@ -1868,10 +2022,33 @@ local function cdefun(form)
     kc_init = table.concat(parts, " ") .. " "
   end
   CTX = saved
-  local src = "do " .. kc_init
-            .. "local function impl(" .. table.concat(lnames, ", ") .. ") "
+  local plist = table.concat(lnames, ", ")
+  local src
+  if trmc_used then
+    local cm = #lnames > 0 and ", " or ""
+    local tl = {}
+    for i = 1, #lnames do tl[i] = "T" .. i end
+    local tlist = table.concat(tl, ", ")
+    src = "do " .. kc_init
+      .. "local impl, TSTEP, TLOOP, TH" .. cm .. tlist .. "; "
+      .. "TSTEP = function(" .. trmc_mode .. cm .. plist .. ") " .. body_src .. " end; "
+      .. "TLOOP = function(h" .. cm .. plist .. ") "
+      ..   "local head = setmetatable({h, NIL}, CMT); local last = head; "
+      ..   "while true do "
+      ..     "local k = TSTEP(true" .. cm .. plist .. "); "
+      ..     "if k == TRMC_C then local c = setmetatable({TH, NIL}, CMT); last[2] = c; last = c; "
+      ..     "elseif k ~= TRMC_T then last[2] = k; return head end "
+      ..     (#lnames > 0 and (plist .. " = " .. tlist .. "; ") or "")
+      ..   "end "
+      .. "end; "
+      .. "impl = function(" .. plist .. ") return TSTEP(false" .. cm .. plist .. ") end; "
+      .. "F[" .. qstr(name) .. "] = impl; FA[impl] = " .. #params .. " end"
+  else
+    src = "do " .. kc_init
+            .. "local function impl(" .. plist .. ") "
             .. body_src .. " end "
             .. "F[" .. qstr(name) .. "] = impl; FA[impl] = " .. #params .. " end"
+  end
   return src
 end
 C.cdefun = cdefun
