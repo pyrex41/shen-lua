@@ -1,0 +1,38 @@
+controls identical source sha256=dd97c5fe93b23c62e08cc125e24af7c676c3a1c2ccc5d45ccaba0d5733beab80
+app {'load': '0.736475', 'typecheck': '0.060459', 'kernel_compile': '0.422396', 'kernel_bytes': '588900', 'load_mkfun': '-1', 'semantic': '(listl-formula)', 'round': 0, 'mode': 'off'}
+app {'load': '0.591180', 'typecheck': '0.146308', 'kernel_compile': '0.440880', 'kernel_bytes': '618740', 'load_mkfun': '-1', 'semantic': '(listl-formula)', 'round': 0, 'mode': 'on'}
+objects {'mode': 'ordinary', 'seconds': '0.133343', 'growth_kib': '5554.688', 'retained_kib': '655.820', 'code_bytes': '576', 'compile_seconds': '0.003528', 'total': '55968000', 'probe_mkfun': '-1', 'round': 0}
+objects {'mode': 'optimized', 'seconds': '0.103044', 'growth_kib': '5500.000', 'retained_kib': '656.062', 'code_bytes': '1029', 'compile_seconds': '0.003881', 'total': '55968000', 'probe_mkfun': '-1', 'round': 0}
+objects {'mode': 'manual', 'seconds': '0.092902', 'growth_kib': '5500.000', 'retained_kib': '648.062', 'code_bytes': '815', 'compile_seconds': '0.004005', 'total': '55968000', 'probe_mkfun': '-1', 'round': 0}
+app {'load': '0.547895', 'typecheck': '0.131657', 'kernel_compile': '0.458172', 'kernel_bytes': '618740', 'load_mkfun': '-1', 'semantic': '(listl-formula)', 'round': 1, 'mode': 'on'}
+app {'load': '0.753705', 'typecheck': '0.058485', 'kernel_compile': '0.426760', 'kernel_bytes': '588900', 'load_mkfun': '-1', 'semantic': '(listl-formula)', 'round': 1, 'mode': 'off'}
+objects {'mode': 'ordinary', 'seconds': '0.120599', 'growth_kib': '5554.688', 'retained_kib': '655.820', 'code_bytes': '576', 'compile_seconds': '0.001983', 'total': '55968000', 'probe_mkfun': '-1', 'round': 1}
+objects {'mode': 'manual', 'seconds': '0.082645', 'growth_kib': '5500.000', 'retained_kib': '647.543', 'code_bytes': '815', 'compile_seconds': '0.003052', 'total': '55968000', 'probe_mkfun': '-1', 'round': 1}
+objects {'mode': 'optimized', 'seconds': '0.096073', 'growth_kib': '5500.000', 'retained_kib': '655.812', 'code_bytes': '1029', 'compile_seconds': '0.002723', 'total': '55968000', 'probe_mkfun': '-1', 'round': 1}
+app {'load': '0.810611', 'typecheck': '0.162242', 'kernel_compile': '0.391570', 'kernel_bytes': '588900', 'load_mkfun': '-1', 'semantic': '(listl-formula)', 'round': 2, 'mode': 'off'}
+app {'load': '0.532443', 'typecheck': '0.062623', 'kernel_compile': '0.380144', 'kernel_bytes': '618740', 'load_mkfun': '-1', 'semantic': '(listl-formula)', 'round': 2, 'mode': 'on'}
+objects {'mode': 'optimized', 'seconds': '0.098806', 'growth_kib': '5500.000', 'retained_kib': '655.543', 'code_bytes': '1029', 'compile_seconds': '0.003804', 'total': '55968000', 'probe_mkfun': '-1', 'round': 2}
+objects {'mode': 'ordinary', 'seconds': '0.128137', 'growth_kib': '5554.688', 'retained_kib': '656.062', 'code_bytes': '576', 'compile_seconds': '0.003664', 'total': '55968000', 'probe_mkfun': '-1', 'round': 2}
+objects {'mode': 'manual', 'seconds': '0.091718', 'growth_kib': '5500.000', 'retained_kib': '648.062', 'code_bytes': '815', 'compile_seconds': '0.003794', 'total': '55968000', 'probe_mkfun': '-1', 'round': 2}
+app {'load': '0.486806', 'typecheck': '0.129009', 'kernel_compile': '0.421693', 'kernel_bytes': '618740', 'load_mkfun': '-1', 'semantic': '(listl-formula)', 'round': 3, 'mode': 'on'}
+app {'load': '0.726390', 'typecheck': '0.062396', 'kernel_compile': '0.437516', 'kernel_bytes': '588900', 'load_mkfun': '-1', 'semantic': '(listl-formula)', 'round': 3, 'mode': 'off'}
+objects {'mode': 'optimized', 'seconds': '0.098020', 'growth_kib': '5500.000', 'retained_kib': '655.730', 'code_bytes': '1029', 'compile_seconds': '0.003506', 'total': '55968000', 'probe_mkfun': '-1', 'round': 3}
+objects {'mode': 'manual', 'seconds': '0.086522', 'growth_kib': '5500.000', 'retained_kib': '647.730', 'code_bytes': '815', 'compile_seconds': '0.004353', 'total': '55968000', 'probe_mkfun': '-1', 'round': 3}
+objects {'mode': 'ordinary', 'seconds': '0.104714', 'growth_kib': '5554.688', 'retained_kib': '655.812', 'code_bytes': '576', 'compile_seconds': '0.003512', 'total': '55968000', 'probe_mkfun': '-1', 'round': 3}
+app {'load': '0.768166', 'typecheck': '0.150995', 'kernel_compile': '0.424315', 'kernel_bytes': '588900', 'load_mkfun': '-1', 'semantic': '(listl-formula)', 'round': 4, 'mode': 'off'}
+app {'load': '0.562775', 'typecheck': '0.114666', 'kernel_compile': '0.441122', 'kernel_bytes': '618740', 'load_mkfun': '-1', 'semantic': '(listl-formula)', 'round': 4, 'mode': 'on'}
+objects {'mode': 'manual', 'seconds': '0.086975', 'growth_kib': '5500.000', 'retained_kib': '647.723', 'code_bytes': '815', 'compile_seconds': '0.002665', 'total': '55968000', 'probe_mkfun': '-1', 'round': 4}
+objects {'mode': 'ordinary', 'seconds': '0.124753', 'growth_kib': '5554.688', 'retained_kib': '655.812', 'code_bytes': '576', 'compile_seconds': '0.002177', 'total': '55968000', 'probe_mkfun': '-1', 'round': 4}
+objects {'mode': 'optimized', 'seconds': '0.097547', 'growth_kib': '5585.938', 'retained_kib': '656.102', 'code_bytes': '1029', 'compile_seconds': '0.003061', 'total': '55968000', 'probe_mkfun': '-1', 'round': 4}
+app {'load': '0.522398', 'typecheck': '0.036322', 'kernel_compile': '0.394084', 'kernel_bytes': '618740', 'load_mkfun': '-1', 'semantic': '(listl-formula)', 'round': 5, 'mode': 'on'}
+app {'load': '0.627108', 'typecheck': '0.136074', 'kernel_compile': '0.384590', 'kernel_bytes': '588900', 'load_mkfun': '-1', 'semantic': '(listl-formula)', 'round': 5, 'mode': 'off'}
+objects {'mode': 'manual', 'seconds': '0.075787', 'growth_kib': '5500.000', 'retained_kib': '648.062', 'code_bytes': '815', 'compile_seconds': '0.002903', 'total': '55968000', 'probe_mkfun': '-1', 'round': 5}
+objects {'mode': 'optimized', 'seconds': '0.081064', 'growth_kib': '5585.938', 'retained_kib': '655.820', 'code_bytes': '1029', 'compile_seconds': '0.002685', 'total': '55968000', 'probe_mkfun': '-1', 'round': 5}
+objects {'mode': 'ordinary', 'seconds': '0.102052', 'growth_kib': '5554.688', 'retained_kib': '655.730', 'code_bytes': '576', 'compile_seconds': '0.003070', 'total': '55968000', 'probe_mkfun': '-1', 'round': 5}
+application off median= 0.74509 range= 0.627108 0.810611
+application on median= 0.540169 range= 0.486806 0.59118
+typecheck off median= 0.099235 range= 0.058485 0.162242
+typecheck on median= 0.12183750000000002 range= 0.036322 0.146308
+objects manual median= 0.0867485 range= 0.075787 0.092902
+objects optimized median= 0.0977835 range= 0.081064 0.103044
+objects ordinary median= 0.12267600000000001 range= 0.102052 0.133343

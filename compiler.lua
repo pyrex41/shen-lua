@@ -10,6 +10,10 @@ local is_symbol = R.is_symbol
 
 local C = {}
 
+-- Experimental, opt-in lexical closure elimination; see SPIKE-CLOSURES.md.
+C.CLOSURES = os.getenv("SHEN_CLOSURES") == "on"
+C.MAP_CLOSURES = os.getenv("SHEN_MAP_CLOSURES") == "on"
+
 -- list helpers over runtime cons
 local function car(x) return x[1] end
 local function cdr(x) return x[2] end
@@ -312,7 +316,7 @@ local function extend(env, kname, lname)
   local e = {}; for k,v in pairs(env) do e[k]=v end; e[kname]=lname; return e
 end
 
-local cexpr, ctail  -- forward
+local cexpr, ctail, push_inline_cont  -- forward
 
 -- a symbol used as a *value* (self-evaluating) -> intern at runtime
 local function symlit(name) return 'S(' .. qstr(name) .. ')' end
@@ -860,8 +864,61 @@ local function curried_call(form, env)
          .. table.concat(cargs, ", ") .. ")"
 end
 
+-- Bounded known-consumer experiment: a literal unary callback to native map.
+-- Code and captures become a chunk-scope worker with explicit parameters.
+-- A different consumer identity materializes the ordinary closure and calls it.
+local function try_map_closure(form, env)
+  if not C.MAP_CLOSURES or not CTX or env.map or env.lambda
+     or not is_symbol(car(form)) or car(form).name ~= "map"
+     or C.ARITY.map ~= 2 then return end
+  local args = to_array(cdr(form))
+  if #args ~= 2 or not is_cons(args[1]) then return end
+  local lam = to_array(args[1])
+  if #lam ~= 3 or not is_symbol(lam[1]) or lam[1].name ~= "lambda"
+     or not is_symbol(lam[2]) then return end
+  local nodes = 0
+  local function count(x)
+    nodes = nodes + 1
+    if nodes > 80 then return end
+    if is_cons(x) then count(x[1]); count(x[2]) end
+  end
+  count(lam[3]); if nodes > 80 then return end
+  local fv, caps = {}, {}
+  collect_free(args[1], env, {}, fv)
+  for k in pairs(fv) do caps[#caps+1] = env[k] end
+  table.sort(caps)
+  if #caps > 8 then return end
+  local consumer = callee_ref("map")
+  local item, target, xs, rev, out = gen("v"), gen("mf"), gen("ml"), gen("mr"), gen("mo")
+  local saved_self, saved_h, saved_cc, saved_fnl = SELF, HOIST, CCACHE, FNL
+  local saved_impl, saved_cont = IN_IMPL, push_inline_cont()
+  SELF=nil; HOIST=nil; CCACHE={}; FNL=new_fnl(true); IN_IMPL=false
+  local body = cexpr(lam[3], extend(env, lam[2].name, item))
+  -- A spill table belongs to this worker, not the enclosing implementation.
+  local spill = FNL.pt and "local PT = {}; " or ""
+  SELF, HOIST, CCACHE, FNL = saved_self, saved_h, saved_cc, saved_fnl
+  IN_IMPL, CONT = saved_impl, saved_cont
+  local fallback = "MKFUN(1, function(" .. item .. ") return " .. body .. " end)"
+  local suffix = #caps > 0 and (", " .. table.concat(caps, ", ")) or ""
+  local idx = #CTX.cbodies + 1
+  CTX.cbodies[idx] = "function(" .. target .. ", " .. xs .. suffix .. ") " .. spill
+    .. "if MAP_BASE == nil or " .. target .. " ~= MAP_BASE then return " .. target .. "(" .. fallback .. ", " .. xs .. ") end; "
+    .. "local " .. rev .. " = NIL; while " .. xs .. " ~= NIL do "
+    .. "if getmetatable(" .. xs .. ") ~= CMT then return MAP_TAIL(" .. fallback .. ", " .. xs .. ", " .. rev .. ") end; "
+    .. "local " .. item .. " = " .. xs .. "[1]; "
+    .. rev .. " = setmetatable({" .. body .. ", " .. rev .. "}, CMT); "
+    .. xs .. " = " .. xs .. "[2]; end; local " .. out .. " = NIL; "
+    .. "while " .. rev .. " ~= NIL do " .. out .. " = setmetatable({" .. rev .. "[1], " .. out .. "}, CMT); "
+    .. rev .. " = " .. rev .. "[2]; end; return " .. out .. " end"
+  local input = cexpr(args[2], env)
+  if HOIST then HOIST.pure=false end
+  return "KC[" .. idx .. "](" .. consumer .. ", " .. input .. suffix .. ")"
+end
+
 -- compile a call (F a1..an) in expression position
 local function ccall(form, env)
+  local mapped = try_map_closure(form, env)
+  if mapped then return mapped end
   local head = car(form)
   local args = to_array(cdr(form))
   local cargs = {}
@@ -1580,7 +1637,7 @@ local function try_lower_freeze_let(var, val, body, env)
          .. ctail(eform, freeze_env)
 end
 
-local function push_inline_cont()
+push_inline_cont = function()
   local saved = CONT
   local f = {}
   for i = 1, #CONT do
@@ -1980,6 +2037,10 @@ local function cdefun(form)
   local name = car(cdr(form)).name
   local params = to_array(car(cdr(cdr(form))))
   local body = car(cdr(cdr(cdr(form))))
+  C.CLOSURE_REPORT = nil
+  if C.CLOSURES then
+    body, C.CLOSURE_REPORT = require("closure_ir").optimize(body, params)
+  end
   local env = {}
   local lnames = {}
   for i=1,#params do

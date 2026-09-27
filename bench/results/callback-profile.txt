@@ -1,0 +1,15 @@
+load-interpreter seconds=0.782151 map_inclusive_seconds=0.590701 calls=140708 elements=450870 mkfun=149074
+[string "core"]:48	94251	299894
+[string "macros"]:3	37560	122351
+[string "core"]:45	4536	14362
+[string "reader"]:119	3361	10016
+[string "macros"]:1	360	2520
+[string "reader"]:121	361	841
+[string "prolog"]:53	112	269
+[string "reader"]:122	10	188
+[string "core"]:7	52	126
+[string "t-star"]:10	32	64
+[string "core"]:44	26	63
+[string "prolog"]:15	16	56
+typecheck-y seconds=0.401663 map_inclusive_seconds=0.000180 calls=30 elements=60 mkfun=609
+[string "t-star"]:10	30	60

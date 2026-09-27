@@ -1704,6 +1704,8 @@ function P.install_native_stdlib()
   install("reverse", reverse, 1)
   install("shen.map-h", map_h, 3)
   install("map", map, 2)
+  -- Identity and malformed-tail fallback for the opt-in compiler experiment.
+  P.ENV.MAP_BASE, P.ENV.MAP_TAIL = map, orig_maph
   install("not", native_not, 1)
   install("boolean?", boolean_q, 1)
   install("empty?", empty_q, 1)
