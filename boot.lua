@@ -272,6 +272,8 @@ local function cache_key()
   h = fnv1a(CACHE_FORMAT .. table.concat(FILES, ","), h)
   -- codegen switches that change compiled output (SHEN_TRMC -> compiler.lua C.TRMC)
   h = fnv1a("trmc=" .. tostring(os.getenv("SHEN_TRMC") ~= "off"), h)
+  h = fnv1a("closures=" .. tostring(C.CLOSURES), h)
+  if C.CLOSURES then h = fnv1a(module_source("closure_ir"), h) end
   for _, m in ipairs({ "compiler", "runtime", "prims" }) do
     h = fnv1a(module_source(m), h)
   end

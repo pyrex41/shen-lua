@@ -1,0 +1,3 @@
+eliminated shen.typecheck kind=immediate calls=1
+eliminated declare kind=immediate calls=1
+defuns=737 candidates=31 eliminated=2 escaping_or_deferred=29

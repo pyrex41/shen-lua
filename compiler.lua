@@ -10,6 +10,9 @@ local is_symbol = R.is_symbol
 
 local C = {}
 
+-- Experimental, opt-in lexical closure elimination; see SPIKE-CLOSURES.md.
+C.CLOSURES = os.getenv("SHEN_CLOSURES") == "on"
+
 -- list helpers over runtime cons
 local function car(x) return x[1] end
 local function cdr(x) return x[2] end
@@ -1980,6 +1983,10 @@ local function cdefun(form)
   local name = car(cdr(form)).name
   local params = to_array(car(cdr(cdr(form))))
   local body = car(cdr(cdr(cdr(form))))
+  C.CLOSURE_REPORT = nil
+  if C.CLOSURES then
+    body, C.CLOSURE_REPORT = require("closure_ir").optimize(body, params)
+  end
   local env = {}
   local lnames = {}
   for i=1,#params do

@@ -1,0 +1,10 @@
+LuaJIT 2.1.1774638290 arm64 jit=true iterations=1000000
+case,mode,median_seconds,heap_growth_KiB_10000,retained_KiB,MKFUN_sites,trace_stops,trace_aborts,exit_events_1000
+immediate,off,0.430640,937.500,0.000,1,3,22,0
+immediate,on,0.020572,0.000,0.000,0,1,0,0
+local,off,0.540989,937.500,0.000,1,4,13,0
+local,on,0.027926,0.000,0.000,0,4,0,0
+escaping,off,0.502972,937.500,0.000,1,5,13,0
+escaping,on,0.523506,937.500,0.000,1,6,12,0
+deferred,off,0.477620,1796.875,0.000,1,4,12,0
+deferred,on,0.506964,1796.875,0.000,1,6,13,0
