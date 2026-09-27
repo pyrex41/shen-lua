@@ -239,6 +239,26 @@ do
         == "tm boom", "TRMC: error mid-build propagates")
   check(show(ev("(tm-err (cons 1 (cons 2 ())))")) == "[1 2]", "TRMC: usable after an error")
 
+  -- The step/loop handoff must not keep heads or arguments alive after a
+  -- call finishes (including errors). Observe collection without retaining
+  -- either the input vector or the returned list in this test's frame.
+  ev([[(defun tm-gc (N X Fail) (if (= N 0)
+         (if Fail (simple-error "tm gc boom") ())
+         (cons X (tm-gc (- N 1) X Fail))))]])
+  local weak = setmetatable({}, { __mode = "v" })
+  local function run_gc_case(fail)
+    local x = P.F["absvector"](1024)
+    weak[1] = x
+    local ok = pcall(P.F["tm-gc"], 3, x, fail)
+    return ok
+  end
+  check(run_gc_case(false), "TRMC: GC test builder succeeds")
+  collectgarbage("collect"); collectgarbage("collect")
+  check(weak[1] == nil, "TRMC: completed builder releases heads and arguments")
+  check(not run_gc_case(true), "TRMC: GC test builder raises")
+  collectgarbage("collect"); collectgarbage("collect")
+  check(weak[1] == nil, "TRMC: failed builder releases heads and arguments")
+
   -- re-entrancy: H re-enters the same builder while its loop is running
   ev("(defun tm-nest (L) (if (cons? L) (cons (tm-nest-h (hd L)) (tm-nest (tl L))) ()))")
   ev("(defun tm-nest-h (X) (if (cons? X) (tm-nest X) (* X 10)))")

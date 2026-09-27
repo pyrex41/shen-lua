@@ -818,12 +818,13 @@ end
 -- replays the original nested APPs on the already-evaluated arguments;
 -- that fallback can only reorder effects if an intermediate application
 -- runs code AND a later argument has effects. So the rewrite applies only
--- when the compiler already knows f's arity is n (a mismatch then needs a
--- redefinition, the same assumption every direct call makes), or when
--- a2..an are atoms or local variables, whose evaluation order is
--- unobservable. Every level must apply exactly one argument (the kernel's
--- curried form); a multi-argument level ((fn f) a b) is left to APP, whose
--- dispatch differs from nesting for a function with no recorded arity.
+-- when a2..an are atoms or local variables, whose evaluation order is
+-- unobservable. Even a known compile-time arity can change after a
+-- redefinition: evaluating effectful operands eagerly would break the
+-- fallback's ordering and error short-circuiting. Every level must apply
+-- exactly one argument (the kernel's curried form); a multi-argument level
+-- ((fn f) a b) is left to APP, whose dispatch differs from nesting for a
+-- function with no recorded arity.
 local function order_free(form, env)
   if is_cons(form) then return false end
   return true   -- number/string/boolean/(), symbol literal or local variable
@@ -849,10 +850,8 @@ local function curried_call(form, env)
   if not (is_symbol(sym) and not env[sym.name]) then return nil end
   local n = #args
   if n < 1 or n > MAX_CALLN then return nil end
-  if C.ARITY[sym.name] ~= n then
-    for i = 2, n do
-      if not order_free(args[i], env) then return nil end
-    end
+  for i = 2, n do
+    if not order_free(args[i], env) then return nil end
   end
   local fnref = callee_ref("fn")
   local cargs = {}
@@ -1046,9 +1045,11 @@ end
 -- The building-mode handoff is ONE return value (the marker); the new cell's
 -- car and the next arguments travel in chunk-level upvalues TH, T1..Tn,
 -- stored after every sub-expression has been evaluated and read by TLOOP
--- immediately after TSTEP returns, so nothing can run in between. Returning
--- them as multiple results instead made LuaJIT abort traces that returned
--- through TSTEP ("NYI: register coalescing too complex").
+-- immediately after TSTEP returns, so nothing can run in between. TLOOP
+-- clears the handoff slots before the next step, so neither a normal return
+-- nor an error keeps heads/arguments reachable through the installed function.
+-- Returning them as multiple results instead made LuaJIT abort traces that
+-- returned through TSTEP ("NYI: register coalescing too complex").
 local function trmc_site(h, cargs, marker)
   local vals, slots = {}, {}
   if h then vals[1] = h; slots[1] = "TH" end
@@ -2099,6 +2100,7 @@ local function cdefun(form)
       ..     "if k == TRMC_C then local c = setmetatable({TH, NIL}, CMT); last[2] = c; last = c; "
       ..     "elseif k ~= TRMC_T then last[2] = k; return head end "
       ..     (#lnames > 0 and (plist .. " = " .. tlist .. "; ") or "")
+      ..     "TH" .. cm .. tlist .. " = nil; "
       ..   "end "
       .. "end; "
       .. "impl = function(" .. plist .. ") return TSTEP(false" .. cm .. plist .. ") end; "

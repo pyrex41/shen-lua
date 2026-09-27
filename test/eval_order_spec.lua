@@ -279,6 +279,23 @@ do
   eq(show(shen.eval("(reverse (value eo-trace))")), "1 f 2 3",
      "mismatched arity: the call runs before later operands")
 
+  -- A matching compile-time arity is not permanent: an already-compiled
+  -- caller must preserve intermediate calls and errors after redefinition.
+  shen.eval("(define eo-redef A B -> [A B])")
+  kl("(defun eo-redef-call () (((fn eo-redef) (eo-log 1)) (eo-log 2)))")
+  shen.eval("(define eo-redef A -> (do (eo-log f) (/. B [A B])))")
+  shen.eval("(set eo-trace [])")
+  eq(show(kl("(eo-redef-call)")), "1 2", "redefined curried callee: result")
+  eq(show(shen.eval("(reverse (value eo-trace))")), "1 f 2",
+     "redefined curried callee runs before the later operand")
+  shen.eval('(define eo-redef A -> (simple-error "eo stop"))')
+  shen.eval("(set eo-trace [])")
+  local redef_ok, redef_err = pcall(kl, "(eo-redef-call)")
+  check(not redef_ok, "redefined curried callee raises")
+  eq(F["error-to-string"](redef_err), "eo stop", "redefined callee error preserved")
+  eq(show(shen.eval("(reverse (value eo-trace))")), "1",
+     "redefined curried callee error prevents the later operand")
+
   -- an undefined function raises before any operand is evaluated
   shen.eval("(set eo-trace [])")
   local ok = pcall(kl, "((((fn eo-undefined-fn) (eo-log 1)) 2) 3)")
