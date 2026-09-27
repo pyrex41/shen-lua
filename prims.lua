@@ -2049,6 +2049,21 @@ do
       .. "end\n"
     ENV["CALL" .. n] = assert((loadstring or load)(src, "=CALL" .. n))(F, FA, APP, intern)
   end
+  -- CUR1..CURn: a curried chain ((((fn f) a1) a2) ... an) whose (fn f) has
+  -- already been evaluated to g (see curried_call in compiler.lua). Arity n:
+  -- one direct call. Otherwise the original nested applications, verbatim.
+  for n = 1, C.MAX_CALLN do
+    local ps = {}
+    for i = 1, n do ps[i] = "a" .. i end
+    local nested = "g"
+    for i = 1, n do nested = "APP(" .. nested .. ", a" .. i .. ")" end
+    local src = "local FA, APP = ...\n"
+      .. "return function(g, " .. table.concat(ps, ", ") .. ")\n"
+      .. "  if FA[g] == " .. n .. " then return g(" .. table.concat(ps, ", ") .. ") end\n"
+      .. "  return " .. nested .. "\n"
+      .. "end\n"
+    ENV["CUR" .. n] = assert((loadstring or load)(src, "=CUR" .. n))(FA, APP)
+  end
 end
 
 -- PUC Lua 5.3+ tier: the inline fast paths must compute in the float domain

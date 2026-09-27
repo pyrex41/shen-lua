@@ -803,6 +803,64 @@ local function try_flatten_call_chain(form, env)
 end
 
 
+-- Curried call chains ((((fn f) a1) a2) ... an). Shen 42 translates a call
+-- as this chain whenever f's arity is unknown at TRANSLATION time -- which
+-- is every call into a library that the same file `load`s, even inside
+-- `define`s, because the kernel reads the whole outer file before the
+-- nested load has run. Compiled literally that is n nested APPs and n-1
+-- partial-application closures per call (~2.5 us for a 4-argument call).
+--
+-- Emitted instead:  CURn(fn(S"f"), a1, ..., an). Lua evaluates the
+-- arguments left to right, so (fn f) still runs -- and still raises for an
+-- undefined f -- before a1. When the function's runtime arity is n, every
+-- intermediate application of the original was a side-effect-free partial,
+-- so the direct call g(a1..an) is exactly equivalent. Otherwise CURn
+-- replays the original nested APPs on the already-evaluated arguments;
+-- that fallback can only reorder effects if an intermediate application
+-- runs code AND a later argument has effects. So the rewrite applies only
+-- when the compiler already knows f's arity is n (a mismatch then needs a
+-- redefinition, the same assumption every direct call makes), or when
+-- a2..an are atoms or local variables, whose evaluation order is
+-- unobservable. Every level must apply exactly one argument (the kernel's
+-- curried form); a multi-argument level ((fn f) a b) is left to APP, whose
+-- dispatch differs from nesting for a function with no recorded arity.
+local function order_free(form, env)
+  if is_cons(form) then return false end
+  return true   -- number/string/boolean/(), symbol literal or local variable
+end
+
+local function curried_call(form, env)
+  local args = {}
+  local cur = form
+  while is_cons(cur) and is_cons(car(cur)) do
+    local rest = cdr(cur)
+    if not (is_cons(rest) and cdr(rest) == NIL) then return nil end
+    table.insert(args, 1, car(rest))
+    cur = car(cur)
+  end
+  -- cur must be (fn SYM): `fn` not rebound, SYM a symbol literal
+  if not (is_cons(cur) and is_symbol(car(cur)) and car(cur).name == "fn"
+          and not env["fn"]) then
+    return nil
+  end
+  local rest = cdr(cur)
+  if not (is_cons(rest) and cdr(rest) == NIL) then return nil end
+  local sym = car(rest)
+  if not (is_symbol(sym) and not env[sym.name]) then return nil end
+  local n = #args
+  if n < 1 or n > MAX_CALLN then return nil end
+  if C.ARITY[sym.name] ~= n then
+    for i = 2, n do
+      if not order_free(args[i], env) then return nil end
+    end
+  end
+  local fnref = callee_ref("fn")
+  local cargs = {}
+  for i = 1, n do cargs[i] = cexpr(args[i], env) end
+  return "CUR" .. n .. "(" .. fnref .. "(" .. symlit(sym.name) .. "), "
+         .. table.concat(cargs, ", ") .. ")"
+end
+
 -- compile a call (F a1..an) in expression position
 local function ccall(form, env)
   local head = car(form)
@@ -953,6 +1011,8 @@ local function ccall(form, env)
       return unknown_call(name, argstr, #args)
     end
   else
+    local cur = curried_call(form, env)
+    if cur then return cur end
     -- head is a bound variable or a compound expression -> generic apply
     local hv = cexpr(head, env)
     if #args == 0 then return "APP(" .. hv .. ")" end

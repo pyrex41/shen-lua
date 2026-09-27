@@ -281,11 +281,26 @@ confirmed with `equal`, with no marshaling and no key string.
 - **`=` on lists** walks the cdr spine in a loop and recurses only into
   elements: deep-equal on a c6 state went 2.7-3.1 us to 2.1-2.7 us.
 
-Not done, measured for the next person: in a **toplevel** expression, Shen
-42 translates `(/. X (f a b c))` into a curried chain `((((fn f) a) b) c)`,
-which is 4 APPs and 3 partial closures per call, about 2.5 us. Micro-benchmarks
-written as toplevel lambdas mostly measure this; `bench/list_builders_ab.lua`
-avoids it. Inside `define`s the shape is rare.
+- **Curried call chains.** Shen 42 translates a call as
+  `((((fn f) a) b) c)` whenever f's arity is unknown at translation time.
+  That covers every call into a library that the same file `load`s, even
+  inside `define`s, because the kernel reads the whole outer file before
+  the nested load runs. That was n nested APPs and n-1 partial closures per
+  call. It now compiles to `CURn(fn(f), a, b, c)`: a direct call when the
+  runtime arity is n, and the original nested APPs otherwise (compiler.lua
+  `curried_call`). The rewrite only applies where it cannot reorder effects
+  (see the comment there); `test/eval_order_spec.lua` pins order, errors
+  and arity mismatches. Interleaved against the previous commit:
+
+  | case | before | after |
+  |---|---:|---:|
+  | 1M calls from a `define` into a loaded 3-ary function | 3.25 s | 0.0014 s |
+  | toplevel `(/. N (election.with a x ...))`, match at head | 5.5 us | 2 ns |
+  | same, match at 6th element | 7.9 us | 0.78 us |
+  | same shape around `election.next` | 53 us | 44 us |
+
+  urdr `prng`/`search`/`world` output digests are unchanged, and
+  tla.shen conformance is 27/27.
 
 ### Tracing note
 
