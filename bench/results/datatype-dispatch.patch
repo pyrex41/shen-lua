@@ -1,0 +1,97 @@
+diff --git a/typecheck_native.lua b/typecheck_native.lua
+index 88f835d..c23dc52 100644
+--- a/typecheck_native.lua
++++ b/typecheck_native.lua
+@@ -32,6 +32,13 @@
+ local R = require("runtime")
+
+ local M = {}
++M.DATATYPE_DISPATCH = os.getenv("SHEN_DATATYPE_DISPATCH") == "on"
++M.dispatch_stats = { builds=0, sites=0, bytes=0 }
++local generic_sud, dispatch_root, dispatch_worker
++local function refresh_datatype_dispatch()
++  if not M.DATATYPE_DISPATCH then return end
++  return M.refresh_datatype_dispatch()
++end
+
+ local P, E, F, NP, PC
+
+@@ -260,6 +267,7 @@ local function install_handports()
+     E.incinfs()
+     return sud(goal_t, assum_t, E.cdr(l), n, cont)
+   end
++  generic_sud = sud
+   NP["shen.search-user-datatypes"] = sud
+
+   -- shen.show (t-star.kl:25): spy display; materialize and reuse the plain
+@@ -280,10 +288,62 @@ M.NATIVE_MISS = setmetatable({}, { __tostring = function()
+   return "native typecheck: untranslatable datatype predicate"
+ end })
+
++-- Bounded callback specialization for the ordered datatype list. Each site
++-- keeps its live NP lookup (so redefinitions are observed) but has a distinct
++-- Lua call instruction. Guards fall back at the current suffix, never replaying
++-- predicates already tried. No predicate is translated merely to build this.
++function M.refresh_datatype_dispatch()
++  local root = P.GLOBALS["shen.*datatypes*"]
++  if root == dispatch_root and dispatch_worker then return end
++  local names, rest = {}, root
++  while getmt(rest) == Cons and #names < 32 do
++    local entry = rest[1]
++    if getmt(entry) ~= Cons or getmt(entry[1]) ~= Symbol then break end
++    names[#names+1] = entry[1]
++    rest = rest[2]
++  end
++  if #names == 0 then
++    NP["shen.search-user-datatypes"] = generic_sud
++    dispatch_root, dispatch_worker = root, nil
++    return
++  end
++  local code = { "local E,NP,names,generic,miss = ...; return function(goal,assum,l,n,cont) local r" }
++  for i,nm in ipairs(names) do
++    code[#code+1] = ([=[
++      do
++        if not E.lock_is_open() then return false end
++        l = E.lazyderef(l)
++        if l < E.CONS_BASE then return false end
++        local entry = E.lazyderef(E.car(l))
++        if entry < E.CONS_BASE or E.atomval(E.lazyderef(E.car(entry))) ~= names[%d] then
++          return generic(goal,assum,l,n,cont)
++        end
++        local fn = NP[%q]
++        if fn == nil then error(miss,0) end
++        E.incinfs()
++        r = fn(goal,assum,n,cont)
++        if r ~= false then return r end
++        if not E.lock_is_open() then return false end
++        E.incinfs()
++        l = E.cdr(l)
++      end
++    ]=]):format(i,nm.name)
++  end
++  code[#code+1] = "return generic(goal,assum,l,n,cont) end"
++  local src = table.concat(code, "\n")
++  local make = assert((loadstring or load)(src, "@datatype-dispatch"))
++  dispatch_worker = make(E,NP,names,generic_sud,M.NATIVE_MISS)
++  dispatch_root = root
++  NP["shen.search-user-datatypes"] = dispatch_worker
++  M.dispatch_stats.builds = M.dispatch_stats.builds + 1
++  M.dispatch_stats.sites, M.dispatch_stats.bytes = #names, #src
++end
++
+ -- ---------------------------------------------------------------------------
+ -- the typecheck entry (t-star.kl:1)
+ -- ---------------------------------------------------------------------------
+ local function native_typecheck(expr, type_)
++  refresh_datatype_dispatch()
+   -- pre-processing identical to the legacy entry (plain helpers via F)
+   local vars = F["shen.extract-vars"](type_)
+   local rect = F["shen.rectify-type"](type_)
+@@ -322,6 +382,7 @@ end
+ -- install
+ -- ---------------------------------------------------------------------------
+ function M.install(Pmod, Emod)
++  dispatch_root, dispatch_worker = nil, nil
+   P, E = Pmod, Emod
+   F, NP = P.F, E.NativePred
+   PC = require("prolog_compile")
