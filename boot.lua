@@ -1405,7 +1405,13 @@ local function find_stdlib_dir()
   local src = debug.getinfo(1, "S").source
   local here = src:match("^@(.*)[/\\][^/\\]*$")
   local candidates = {}
-  if here then candidates[#candidates+1] = here .. "/lib/StLib" end
+  if here then
+    candidates[#candidates+1] = here .. "/lib/StLib"
+    -- LuaRocks deploys copy_directories' lib/ tree under lib/lua/5.1,
+    -- separate from these modules under share/lua/5.1.
+    local tree = here:match("^(.*)/share/lua/[%d.]+$")
+    if tree then candidates[#candidates+1] = tree .. "/lib/lua/5.1/StLib" end
+  end
   candidates[#candidates+1] = "lib/StLib"
   for _, d in ipairs(candidates) do
     local f = io.open(d .. "/install.shen", "r")
