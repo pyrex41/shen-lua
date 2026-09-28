@@ -137,7 +137,7 @@ luarocks install shen                       # launcher + modules
 luarocks make --local shen-scm-1.rockspec   # this tree
 ```
 
-LuaJIT required (`lua == 5.1`). Release **0.11.0** uses kernel **42**; **0.9.0**
+LuaJIT required (`lua == 5.1`). Release **0.11.1** uses kernel **42**; **0.9.0**
 was 41.1. Or grab `shen-bundle.lua` from
 [Releases](https://github.com/pyrex41/shen-lua/releases/latest) — one file,
 `require("shen-bundle")`.
