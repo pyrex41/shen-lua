@@ -72,6 +72,34 @@ shen.typecheck("[1 2]", "(list number)")
 
 `shen.prims` / `shen.runtime` expose `F`, the reader, and the printer.
 
+### Checked integers at external boundaries
+
+LuaJIT's ordinary Shen numbers are IEEE-754 doubles. Beyond the contiguous
+exact integer range ±(2^53−1), distinct decimal literals can parse to the
+same number: `9007199254740993` and `9007199254740992` compare equal. The
+ordinary Shen number model remains unchanged for kernel compatibility.
+
+For integer IDs, counters, or amounts that must not silently round, pass the
+**original decimal string** to the opt-in checked path:
+
+```lua
+local id = shen.checked_integer("9007199254740991") -- accepts ±(2^53−1)
+local next_id = shen.checked_add(id, 0)
+-- shen.checked_integer("9007199254740993") raises before tonumber can round
+```
+
+In Shen, use `(lua.checked-integer "42")` and `lua.checked-add`,
+`lua.checked-sub`, or `lua.checked-mul` for operations whose result must stay
+in range. They raise trappable Shen errors on invalid input or overflow.
+The bridge registers `string --> number` and curried
+`number --> number --> number` signatures for typechecked Shen call sites;
+the runtime checks enforce the narrower safe-integer range.
+**Never pass an already-parsed numeric literal** to `lua.checked-integer`:
+its original digits may already be lost. The returned value is an ordinary
+Shen number; subsequent *ordinary* arithmetic does not carry this guarantee.
+For values outside ±(2^53−1), retain decimal text or use a separate exact
+integer representation instead of converting to a Shen number.
+
 From Shen: `(lua.call "string.format" ["%s: %d" "answer" 42])`. `lua.function`
 registers a Lua function as a typed Shen function so `(tc +)` can prove call
 sites. `lua.map-new` / `lua.map-get` / `lua.map-put` are hash maps keyed by

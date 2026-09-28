@@ -13,6 +13,7 @@
 
 local R = require("runtime")
 local P = require("boot")   -- boot.lua returns the prims module P, fully wired
+local checked_integer = require("checked_integer")
 
 local shen = {}
 
@@ -20,6 +21,12 @@ local shen = {}
 -- globals P.GLOBALS, reader R.read_all, printer R.to_str, ...).
 shen.prims   = P
 shen.runtime = R
+-- Exact decimal ingress and checked arithmetic for bounded integer data.
+-- Pass source TEXT to parse: a rounded Lua number cannot be repaired.
+shen.checked_integer = checked_integer.parse
+shen.checked_add = checked_integer.add
+shen.checked_sub = checked_integer.sub
+shen.checked_mul = checked_integer.mul
 
 -- ---- boot ------------------------------------------------------------------
 -- Load the kernel (bytecode cache / embedded bundle payload make this fast)

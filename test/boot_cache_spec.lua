@@ -112,8 +112,8 @@ do
   -- (d) image explicitly disabled: the per-file fasl path must still agree
   local noimg = boot(kc .. " SHEN_STDLIB_IMAGE=off SHEN_FASL_DIR=" .. sh_quote(d3))
 
-  check(ref:find("sigf 178 ", 1, true) ~= nil,
-        "#46: uncached boot registers the kernel signatures")
+  check(ref:find("sigf 182 ", 1, true) ~= nil,
+        "#46: uncached boot registers kernel, stdlib, and checked-integer signatures")
   check(ref:find("typecheck 49", 1, true) ~= nil,
         "#46: uncached boot typechecks a user definition")
   check(kcold == ref, "#46: cold kernel-bytecode-cache boot == uncached boot")
