@@ -29,8 +29,9 @@ openresty -p "$PWD/examples/crdt" -c nginx.conf
 
 The `doc` is the demoable one: two clients edit the same record offline and it
 converges field by field. The **register's value cannot exist without its
-clock** (it's one datatype), so a merge that "forgets" to compare clocks is not
-expressible — the type rules it out.
+clock** (it's one datatype), preventing a value from being represented without
+its clock. The type alone does not ensure that `merge` compares clocks correctly;
+the law tests exercise that behavior.
 
 ## Three tiers of assurance
 
@@ -38,8 +39,9 @@ The whole point of this example is that "frightening correctness" is not one
 thing — it's a ladder, and you pick the rung the stakes justify.
 
 **(a) Structure — free, always on.** `crdt.shen` loads under `(tc +)`. The
-datatypes make illegal states unrepresentable and every merge/value/law
-function is proved well-typed before anything runs. Zero extra work.
+datatypes constrain well-typed states and every merge/value/law function is
+checked for its declared type before anything runs. This is not a termination
+or convergence proof.
 
 **(b) Laws by execution — the default.** `gc-commutative?`,
 `gc-associative?`, `gc-idempotent?`, their LWW equivalents, and `doc-*` (the
@@ -76,8 +78,9 @@ just type them?" — **yes**: free variables in a rule are universally quantifie
 proposition (Curry–Howard). But be precise about what's proved:
 
 - The three laws are taken as **axioms** here — what any CRDT merge must
-  satisfy. Tier (c) proves universal *consequences* of them. Tier (b) is what
-  certifies the *executable* `gc-merge` actually satisfies them.
+  satisfy. Tier (c) proves universal *consequences* of them. Tier (b) tests
+  the *executable* merges on sampled states; it cannot certify the laws for
+  every state.
 - Re-deriving the axioms from `gc-merge`'s definition (induction over the
   tally-list representation) would *close* the model↔code gap, but that is real
   proof engineering and is deliberately out of scope. Tier (b)'s property run

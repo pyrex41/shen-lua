@@ -22,8 +22,9 @@ openresty -p "$PWD/examples/configc" -c nginx.conf
 
 `compile-config : val --> output` returns **either** the validation errors
 **or** the generated files — a sum type (`[invalid Errs]` / `[compiled Files]`),
-never half of each. So "was it valid?" and "what did it generate?" can't drift
-apart: an invalid config produces no manifest, by construction.
+never half of each in the typed Shen result. The host must still route and
+serialize only the selected variant; an invalid config yields no generated
+artifact through this example's compiler path.
 
 The generators (`emit-k8s`, `emit-nginx`) are **typed over the config's `val`
 structure**. They read fields through typed accessors with defaults and build
@@ -37,12 +38,12 @@ with:
 rejected by the typechecker: type error in rule 1 of bad-listen
 ```
 
-Everything is pure, portable Shen (`cn`/`str`/`n->string` only, no host
-bridges), so the identical compiler runs on the CLI, in this OpenResty preview,
-in a CI step, or at a Kubernetes admission webhook (via `shen-go`) — one
-definition of "valid", one definition of "what it generates", everywhere. That
-is the payoff: the config schema and the manifest templates stop being two
-artifacts that drift, and become one typed function.
+The compiler core is pure, portable Shen (`cn`/`str`/`n->string` only, no host
+bridges), and the CLI and OpenResty preview run the same compiler source.
+A CI step or Kubernetes admission webhook (via `shen-go`) could integrate it
+too, with its own host wiring and output validation. The schema and templates
+then live in one typed function; typechecking does not establish that the
+emitted YAML or nginx configuration is accepted by those systems.
 
 ## Files
 

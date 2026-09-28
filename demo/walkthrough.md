@@ -111,9 +111,9 @@ bad          5 problem(s):
 rejected by the typechecker: type error in rule 1 of broken-check-port
 ```
 
-## 6. How it boots fast: two caches
+## 6. How it boots fast: kernel, standard-library, and load caches
 
-First-ever boot compiles 21 `.kl` kernel files to Lua (~1 s). After that, a **kernel bytecode cache** (`string.dump` of the compiled chunks) boots in ~30 ms, and a **fasl-style cache** records each `(load)`-ed program so later runs skip the reader, macroexpansion *and typechecking*. Proof — a full kernel boot plus eval, wall-clock, must come in under 250 ms:
+First boot compiles the vendored S42 kernel files and loads the Shen-source standard library; later boots can use **kernel bytecode and standard-library caches**. A **fasl-style cache** records loaded programs so later loads can skip reader, macroexpansion and typechecking. The following check measures an in-process warm boot on this walkthrough's host, rather than a guaranteed startup time on every host (see [benchmark methodology](../doc/BENCHMARKS.md)):
 
 ```bash
 t0=$(luajit -e "io.write(os.clock())"); luajit -e "local shen=require(\"shen\"); shen.boot{quiet=true}; assert(shen.eval(\"(+ 1 2)\") == 3)" ; luajit -e "

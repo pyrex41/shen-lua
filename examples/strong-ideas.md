@@ -27,18 +27,20 @@ Then project that core into the host that owns the boundary:
 - **JavaScript/browser builds** for client validation from the same source of
   truth.
 
-The payoff is that policy, validation, generation, and audit stop being
-separate hand-maintained implementations. The Shen file becomes the semantic
-artifact; host code becomes glue, I/O, persistence, and acceleration.
+The payoff can be less drift between policy, validation, generation, and audit:
+the Shen file becomes a shared semantic artifact. Host code still owns input
+marshaling, identity, I/O, persistence, and enforcement, and must be tested at
+each boundary. Sharing source does not automatically prove equivalent behavior
+across ports or deployments.
 
 ## What Becomes Buildable
 
-- **Verified API gateways and edge policy engines.** A request reaches a
-  backend only if route, tenant, JWT claims, resource, action, and backend
-  destination satisfy one typed policy.
+- **Typed API gateways and edge policy engines.** Put route, tenant, claims,
+  resource, action, and backend destination checks in one policy, then test
+  that the actual gateway paths enforce it.
 - **Policy compilers with proof backpressure.** Generate Cedar, OpenResty,
   Kubernetes, JSON Schema, or other policy/config artifacts from Shen, then
-  check that generated output still preserves the source invariant.
+  validate generated output against the source invariant.
 - **Infrastructure safety controllers.** Use Shen-Go to reject unsafe cluster
   changes: public ingress without proof, workloads without limits, secrets in
   untrusted namespaces, or tenant routes that break isolation.
@@ -58,7 +60,7 @@ policy.shen
   -> openresty/policy.lua       request-time enforcement
   -> policy.cedar               authorization engine artifact
   -> admission-webhook          Go platform safety gate
-  -> policy-verifier            Rust CI/audit verifier
+  -> policy-verifier            Rust CI/audit checker
   -> client-validator.js        browser-side drift prevention
 ```
 
@@ -68,5 +70,6 @@ The demo invariant should be concrete and end-to-end:
 > binding, resource action, and backend destination all agree on the same tenant
 > and permission model.
 
-That is the useful scary part: one small verified semantic core, enforced at
-every boundary where the system can go wrong.
+That is the useful part: one small, checkable semantic core, with explicit
+integration tests at every boundary where the system can go wrong. This is a
+product direction, not a claim that the examples implement all five outputs.

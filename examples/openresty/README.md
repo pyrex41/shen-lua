@@ -15,7 +15,7 @@ checked client-side AND server-side from one source of truth.
 
 ```
 examples/openresty/
-  rules.shen      the TYPED core — field rules, proved sound at load time;
+  rules.shen      the TYPED core — field rules, typechecked at load time;
                   loaded by the server AND shaken into the browser build
   app.shen        the router — dispatch + storage orchestration (untyped shell)
   app.lua         the glue — boots Shen, marshals JSON <-> Shen, the handler
@@ -168,8 +168,9 @@ at runtime — just the committed file.
 
 This is the payoff of shen-lua (server) and ShenScript (browser) being two
 ports of the **same language**: the field rules live in one typed `.shen` file,
-proved sound at server startup and *generated into* the client build — one type
-system, no client/server drift. The only browser-only code is the marshaling
+typechecked at server startup and *generated into* the client build — one type
+system, with less opportunity for client/server rule drift when the generated
+module is rebuilt after changes. The browser-only code is the marshaling
 glue ([`scripts/client.glue.shen`](scripts/client.glue.shen), four lines that
 turn two form strings into the tagged `val` the rules match); everything about
 *what counts as valid* lives in `rules.shen`.

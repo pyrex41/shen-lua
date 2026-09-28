@@ -1,8 +1,9 @@
 # Examples
 
-Smallest first (everything except the OpenResty web apps runs with plain
-`luajit`/`bin/shen`, no external dependencies, no network; each web app also
-has a `selftest.lua` that runs off-nginx):
+Smallest first. The listed CLI runs and web-app selftests use `luajit` or
+`bin/shen` without nginx or network dependencies. Serving the web apps needs
+their documented hosts; browser builds and production adapters need additional
+tooling.
 
 | | |
 |---|---|
@@ -10,19 +11,18 @@ has a `selftest.lua` that runs off-nginx):
 | [`family.shen`](family.shen) | Shen Prolog in twenty lines — facts, rules, yes/no and binding queries. `bin/shen examples/family.shen` |
 | [`config_check.lua`](config_check.lua) | the interop showcase, walked through below. `luajit examples/config_check.lua` |
 | [`configc/`](configc/) | a typed config **compiler**: one config validates *and* generates a Kubernetes Deployment + nginx server block; a generator type-bug is caught at load. `luajit examples/configc/configc.lua` |
-| [`policy/`](policy/) | a typed **authorization** gateway: one rule set enforced at the OpenResty edge and previewed in the browser, plus authz-as-type-inhabitation (a permission *is* a proof). `luajit examples/policy/selftest.lua` |
-| [`crdt/`](crdt/) | a **CRDT** sync hub: replicas converge via a typed join-semilattice merge whose laws are checked by execution *and* by machine-checked sequent-calculus proof. `luajit examples/crdt/selftest.lua` |
+| [`policy/`](policy/) | a typed **authorization** gateway: runtime rules enforced at the OpenResty edge and previewed in the browser, plus a separate proof-term model of permissions. `luajit examples/policy/selftest.lua` |
+| [`crdt/`](crdt/) | a **CRDT** sync hub: typed merges tested for convergence and algebraic laws on sampled states; separate machine-checked derivations follow from axioms, not from the merge implementation. `luajit examples/crdt/selftest.lua` |
 | [`pcr/`](pcr/) | **proof-carrying requests over live facts**: the client attaches a proof term, the OpenResty gate *checks* it — never searches — against a versioned fact store consulted at proof time, so revoking one fact makes the same proof bytes fail on the next request while delegation chains stay composable and every allow logs its full justification. `luajit examples/pcr/selftest.lua` |
 | [`openresty/`](openresty/) | a complete web app — typed Shen validators + a Shen router on OpenResty (nginx + LuaJIT), with a front end that runs the **same** rules in the browser (Yggdrasil-shaken, ShenScript-compiled). Runs standalone via `luajit examples/openresty/selftest.lua`; see [its README](openresty/README.md) to serve it. |
-| [`openresty-authz/`](openresty-authz/) | durable multi-tenant **authorization**: the policy as a Prolog proof chain (`token → user → tenant → resource`), a typed `decision` witness that gates every response, and an event-sourced store (file + `lua-resty-lmdb`) whose append-only log makes decisions durable and auditable. Runs standalone via `luajit examples/openresty-authz/selftest.lua`; see [its README](openresty-authz/README.md). |
+| [`openresty-authz/`](openresty-authz/) | multi-tenant **authorization**: a Prolog decision chain (`token → user → tenant → resource`), a typed response projection, and an append-only file store; the LMDB adapter is exercised with a fake off-nginx. Runs standalone via `luajit examples/openresty-authz/selftest.lua`; see [its README](openresty-authz/README.md). |
 | [`envoy/`](envoy/) | **Shen at the edge**: Envoy in front of both apps above — its `ext_authz` filter sends every request through the authz app's proof chain (edge decisions land in the same durable audit log), and an Envoy **Lua filter** runs the guestbook's typed `rules.shen` *inside the proxy* (LuaJIT), rejecting malformed bodies at the edge with the origin's exact error strings. One typed rule file, four hosts. Runs standalone via `luajit examples/envoy/selftest.lua`; see [its README](envoy/README.md). |
 
-The last three (`configc/`, `policy/`, `crdt/`) are a themed trio: each extracts
-a correctness-critical kernel into one typed, portable Shen file that runs
-across tiers, and each climbs the same assurance ladder — types make illegal
-states unrepresentable, laws/rules are checked by execution, and the sharpest
-properties are *proved* by Shen's sequent-calculus type checker. See each
-example's README for the walkthrough.
+`configc/`, `policy/`, and `crdt/` illustrate different assurance levels:
+typed Shen source, executable rules and tests, and separately encoded proof
+terms. A checked type or proof establishes a property of its encoded model;
+host glue, dynamic facts, generated artifacts, and correspondence with the
+executed algorithm still need their own validation. See each example's README.
 
 ---
 
