@@ -24,9 +24,9 @@ examples/openresty-authz/
   app.shen       the policy (tc -): the authz PROOF CHAIN as Prolog rules, plus
                  the router. Leaf facts are read from the durable store.
   store.lua      durable, event-sourced fact store + append-only proof log.
-                 File backend (tested) and an lua-resty-lmdb backend (production).
-  auth.lua       identity at the head of the chain: local verification by default
-                 (JWT-style, no I/O); an opt-in cosocket resolver for opaque tokens.
+                 File backend (tested) and a lua-resty-lmdb adapter (demo integration).
+  auth.lua       identity at the head of the chain: caller-supplied local lookup
+                 by default; an opt-in cosocket resolver for opaque tokens.
   app.lua        the glue: boots Shen, wires host bridges, marshals JSON <-> val.
   selftest.lua   drives the whole thing under plain luajit — no nginx needed.
   nginx.conf     OpenResty config: boot once per worker, replay the log, serve.
@@ -117,9 +117,9 @@ durable-execution property, stated plainly:
 > Kill the process, reopen the same log, replay — you are in the exact same
 > state, facts **and** audit trail. Nothing lives only in RAM.
 
-`selftest.lua` demonstrates it literally: it builds up state, throws the store
-object away, constructs a fresh one over the same file, and shows a prior
-revocation still denies access.
+`selftest.lua` demonstrates process-style replay: it builds up state, throws
+the store object away, constructs a fresh one over the same file, and shows a
+prior revocation still denies access. This is not a power-loss durability test.
 
 Two backends sit behind one `append` + `each` interface:
 
@@ -133,9 +133,9 @@ Two backends sit behind one `append` + `each` interface:
 
 `selftest.lua` runs the **whole scenario against both backends** — the lmdb one
 in-process against a faithful fake of `resty.lmdb` — and asserts they produce an
-identical, decision-for-decision audit trail. So the lmdb adapter's logic
-(transactional append, replay) is tested here; only the real memory-mapped
-environment needs OpenResty.
+identical, decision-for-decision audit trail. The fake covers the adapter's
+interface logic; it does not test real LMDB transactions, process crashes, or
+multi-worker behavior. See the single-worker limitation below.
 
 [lmdb]: https://github.com/openresty/lua-resty-lmdb
 
@@ -151,10 +151,10 @@ The head of the proof chain is `token → authenticated user`. Whether resolving
 it touches the network is a **token-format** decision, not a given — and the
 default here is **no network at all**:
 
-- **Signed tokens (JWT/PASETO)** — the usual choice for a stateless gate. You
-  verify **locally**: signature + `exp`/`aud`/`iss`. That is CPU (crypto), not
-  I/O; the only network is a JWKS key fetch, cached for hours. No cosocket on the
-  hot path. This is `M.local_resolver` and the default the app ships with.
+- **Signed tokens (JWT/PASETO)** — a possible production integration: verify
+  signature and claims locally before returning a subject. That verification
+  is **not implemented here**. `M.local_resolver` delegates to a supplied
+  function; the demo maps fixed `tok-*` strings to users without cryptography.
 - **Opaque tokens (session ids / OAuth2 introspection)** — the token means
   nothing on its own, so it *must* be looked up in a remote store. **Only then**
   is identity network I/O, and a blocking socket would stall the whole
@@ -165,9 +165,9 @@ API**, `ngx.socket.tcp()`, whose `connect`/`send`/`receive`/`setkeepalive` yield
 to the event loop instead of blocking and pool connections across requests.
 `M.cosocket_resolver` uses it directly (a minimal Redis `GET auth:<token>`;
 `lua-resty-redis` / `lua-resty-http` wrap these same calls), with a short-TTL
-`lua_shared_dict` cache in front so even then the common request never touches
-the socket, and a fallback to the local resolver so a store outage degrades
-rather than fails:
+`lua_shared_dict` cache in front so cache hits avoid the socket. Store errors
+fail closed by default; `opts.fallback` explicitly enables local fallback
+with its own revocation-staleness tradeoff:
 
 ```lua
 local sock = ngx.socket.tcp()
@@ -198,9 +198,8 @@ its TTL (5s here) before every worker sees it — tune the TTL to your tolerance
 
 - The Prolog engine is the FFI/int32 soa32 machine — no boxing on the reasoning
   hot path; it JITs.
-- `authorize` is, per request, a handful of plain-hash-table lookups (the
-  materialized view) plus one ground Prolog query. The log append — the only
-  allocation-heavy step — is off the read/decide path.
+- `authorize` uses the materialized view plus one ground Prolog query per
+  request; the decision audit append is still on the request path.
 - Kernel boot + the typed load of `authz.shen` happen **once per worker** in
   `init_worker_by_lua`, never per request; log replay happens once at that boot.
 - Under the lmdb backend, fact reads are zero-copy through the resty.lmdb FFI.
@@ -237,10 +236,11 @@ curl -s localhost:8080/api/admin/audit -d '{"token":"tok-admin"}'
   it inside the txn and retry on conflict, or a compare-and-set) and having
   readers re-replay when the txn id advances. The file backend can't be shared
   at all.
-- **Tokens stand in for JWTs.** Off-nginx, `token_user` is a local lookup; under
-  nginx, `auth.lua` resolves it over a cosocket to a session store (or you'd
-  verify a JWT signature and return the subject). Either way the proof chain is
-  unchanged — only the leaf fact gets more honest.
+- **Tokens stand in for JWTs.** The demo uses a local `tok-*` lookup, not
+  signature validation. The optional cosocket resolver looks up opaque tokens
+  in a session store; a production signed-token resolver must implement and
+  test signature/claim verification. The Prolog chain consumes the resulting
+  identity, so the resolver is part of the trusted boundary.
 - **Never use Shen's blocking file I/O under nginx.** The file backend is for
   the off-nginx demo; under OpenResty use the lmdb backend (or reach a DB via
   the non-blocking cosocket libraries), exactly as the guestbook README warns.
@@ -254,5 +254,6 @@ protocol: Envoy forwards each edge request as `<method> /authz<path>` plus its
 chain and land in the same durable audit log as direct API calls, and every
 service behind Envoy gets this authorization without embedding anything. The
 response body is `check-response` in `authz.shen`: total over `decision` and
-structurally unable to include document content, so the gateway cannot leak.
+does not project document content in its typed cases; host routing and
+serialization still need review to avoid unintended disclosure.
 See [`examples/envoy`](../envoy) for the full three-layer setup.

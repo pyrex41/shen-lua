@@ -7,7 +7,8 @@ the judgment `(may SUBJECT ACTION RESOURCE)` and asks Shen's sequent-calculus
 typechecker whether the presented term inhabits it. Fact leaves are discharged
 against a **versioned live fact store** at check time, so granting a fact
 makes proofs start checking, and revoking it makes the *same proof bytes*
-stop checking on the very next request — on every worker. Allowed requests
+stop checking on the next request against the updated shared fact snapshot
+on every worker in the demo's authoritative mode. Allowed requests
 log the proof, the fact-world version, and the exact fact leaves consumed:
 
 ```
@@ -33,14 +34,15 @@ and diffs the output against what is recorded.
 
 Two asymmetries make this affordable and correct at request time:
 
-* **Checking a given term** against a given type is bounded by the term's
-  size; *searching* for a proof is the open-ended direction, and it never
-  runs at request time. The client obtained its proof earlier — the gate's
-  whole per-request price is one bounded check (~540 µs warm for the
-  delegation proof, ~1.9k checks/sec/core, parse-dominated).
+* **Checking a given term** avoids searching for a proof, but inference cost
+  is not guaranteed to be linear in term size. The gate limits proof bytes and
+  sets a per-check inference budget; a client obtains its proof earlier. The
+  selftest prints warm delegation-check timing on the current host; this is a
+  workload measurement, not a worst-case latency bound.
 * **The engine memoizes no answers.** The only caches in either engine hold
   translated clause *code*, never derivations, so a fact leaf consults the
-  store on every check and a revoked fact **cannot** keep proving. Verified:
+  store on every check and a revoked fact does not keep proving against an
+  updated snapshot. Verified in the selftest:
   toggling a fact flips the same proof true/false on every toggle, under
   both engines, with identical inference counts.
 

@@ -13,8 +13,10 @@ bin/shen examples/family.shen       # a program (Shen Prolog in 20 lines)
 luajit examples/hello_embed.lua     # embed in Lua, ~25 lines
 ```
 
-Need only LuaJIT (`brew install luajit` / `apt-get install luajit`). First boot
-compiles the kernel (~1 s); after that the bytecode cache boots in ~30 ms.
+LuaJIT 2.1 is the primary host (`brew install luajit` /
+`apt-get install luajit`); the source checkout also supports plain Lua as
+described below. First boot compiles the kernel and loads the Shen-source
+standard library; subsequent boots use bytecode and standard-library caches.
 Loaded programs are cached fasl-style. Cross-port agreement lives in
 [Bifrost](https://github.com/pyrex41/bifrost). New to Shen?
 [shenlanguage.org](https://shenlanguage.org).
@@ -120,11 +122,16 @@ luajit build/make-bundle.lua    # → build/shen-bundle.lua
 
 | workload | time |
 |----------|-----:|
-| Kernel boot, warm | ~0.03 s |
-| Kernel boot, cold | ~0.7 s |
-| 42 suite, warm (fasl) | ~2–5 s |
-| Reference typecheck (431,741 infs) | ~0.06 s |
-| Einstein’s riddle | ~0.002 s / solve |
+| Kernel load, warm bytecode cache (in-process CPU; earlier run) | ~0.03 s |
+| Full CLI startup, warm (wall; 2026-09-27 A/B host) | 0.119 s |
+| Full CLI startup, cold (wall; same host) | 1.383 s |
+| 42 suite, warm fasl (wall; same host) | 4.592 s |
+| Einstein solve in `bench.lua` (in-process CPU; same host) | 0.0682 s |
+
+These measure different boundaries; the warm kernel-load number excludes
+standard-library loading and process startup. See the
+[dated run and methodology](doc/BENCH-2026-09-27.md) and
+[benchmark guide](doc/BENCHMARKS.md); times are host- and workload-dependent.
 
 List builders of the `[X | (f ...)]` shape compile to a loop (tail recursion
 modulo cons), so they neither use a stack frame per element nor overflow on

@@ -10,19 +10,21 @@ integration seams for exactly what it is good at:
    path + `authorization` header, no body) to the authz service *before*
    routing it. The Prolog proof chain decides; a denial returns the discharge
    report to the client; and **every edge decision lands in the same durable
-   audit log** as a direct API call. No authorization code lives in the proxy.
+   audit log** as a direct API call. The proxy still owns filter ordering and
+   routing configuration; policy decisions live in the authz service.
 
 2. **A Lua filter → `rules.shen` inside the proxy.** Envoy's Lua filter embeds
-   LuaJIT — shen-lua's primary host — so the guestbook's typed field rules run
-   *in the proxy itself*: a malformed POST gets its 400 **at the edge**, with
+   LuaJIT in the tested Envoy build — shen-lua's primary host — so the
+   guestbook's typed field rules run *in the proxy itself*: a malformed POST
+   gets its 400 **at the edge**, with
    the same typed error strings the browser and the origin produce, before it
    costs an upstream hop.
 
 Which makes it one `rules.shen`, enforced on **four hosts** from one typed
 source: the browser (ShenScript, Yggdrasil-shaken), the Envoy edge (shen-lua on
 Envoy's LuaJIT), the origin (shen-lua on OpenResty), and plain `luajit` in the
-selftests. Proved sound by the sequent-calculus typechecker wherever shen-lua
-loads it.
+selftests. Typechecked on the shen-lua hosts; the browser uses a generated
+module and does not run the Shen typechecker.
 
 ```
 examples/envoy/
@@ -181,8 +183,9 @@ request path.
   resource `""` → owner tenant `""` → `denied "unknown resource"` (the app);
   and `failure_mode_allow: false` means an unreachable authz app is a 403,
   never an allow (Envoy). The check response body is a *typed* projection —
-  `check-response` in `authz.shen` is total over `decision` and structurally
-  cannot include document content, so the gateway cannot become a data leak.
+  `check-response` in `authz.shen` handles the declared `decision` variants
+  without projecting document content; proxy configuration and host glue are
+  still part of the disclosure boundary.
 - **Path resolution.** `filter.lua` finds the repo via its own file path (or
   `$SHEN_LUA_ROOT`, or the cwd as a last resort). Envoy loads it with
   `default_source_code: { filename: ... }`, resolved against the cwd.

@@ -1,4 +1,4 @@
-# Authorization gateway — one typed rule set, enforced and proved
+# Authorization gateway — typed decisions and illustrative proofs
 
 Authorization is the textbook drift bug: the edge, the service, and the admin
 UI each re-implement "who may do what", and they disagree. Here it is **one
@@ -32,30 +32,31 @@ curl -i -H 'X-Subject: boss' -H 'X-Role: admin' -H 'X-Tenant: t2' \
 ## The two halves
 
 **`policy.shen` — the decision engine (what the edge runs).** Typed datatypes
-for `principal`, `resource`, and `decision`; a total `decide` function that
-returns allow/deny **with the reason**. Tenant isolation is checked first and
-is absolute — no role, not even admin, crosses a tenant boundary. Because the
-type checker proves `decide` covers every case, "what about this combination?"
-has an answer at compile time, not in an incident.
+for `principal`, `resource`, and `decision`; `decide` returns allow/deny
+**with the reason** for the represented cases. Tenant isolation is checked
+first — no role, not even admin, crosses a tenant boundary in these rules.
+The typechecker checks the declared types at load time; exhaustiveness,
+termination, rule semantics, and the mapping from request headers to domain
+values still need separate review and tests.
 
 **`policy_proof.shen` — authorization as type inhabitation (the idea with
 teeth).** The same model as a logic: a term of type `(may S A R)` is a *proof*
 that subject `S` may take action `A` on resource `R`. Grant rules are inference
 rules; ownership/role/tenancy facts are axioms. Then:
 
-- a request is **authorized exactly when `(may S A R)` is inhabited**, and the
-  inhabiting term is the justification — a checkable audit trail of *why*;
-- a **denied** request is an **uninhabited type** — no rule builds the term, so
-  it cannot typecheck. "Deny by default" is not a line you can forget to write;
-  it is the absence of a proof. (`perm-bob-delete`, commented out, is a type
-  error if you uncomment it.)
+- in this *separate, static proof model*, a term checked against `(may S A R)`
+  is a justification under the encoded axioms and rules. The gateway itself
+  enforces the runtime `decide` function, not these proof terms;
+- failing to construct a term demonstrates denial for a particular attempted
+  proof, not a general proof that the type is uninhabited. `perm-bob-delete`,
+  commented out, is a type error if uncommented.
 
 This is the same sequent-calculus mechanism the CRDT example uses for its merge
 laws (see `examples/crdt/`), pointed at access control. The honest scope is the
 same too: the proof certifies the request against the *encoded* rules and facts;
 trusting it means trusting that encoding (you author the rules, there are no
-tactics, totality isn't enforced). It is stronger than a runtime `if`, short of
-a Coq-extracted gate.
+tactics, and termination is not enforced). The proof model does not certify
+that the separately executed `decide` function or the host glue agrees with it.
 
 ## Files
 
