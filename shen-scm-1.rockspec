@@ -40,6 +40,7 @@ build = {
       prolog_compile   = "prolog_compile.lua",
       typecheck_native = "typecheck_native.lua",
       lua_interop      = "lua_interop.lua",
+      checked_integer  = "checked_integer.lua",
       repl             = "repl.lua",
    },
    install = {

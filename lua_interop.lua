@@ -113,6 +113,7 @@
 
 local R = require("runtime")
 local C = require("compiler")
+local checked_integer = require("checked_integer")
 
 local M = {}
 local unpack = table.unpack or unpack
@@ -500,6 +501,21 @@ function M.install(prims)
   -- setmetatable({}, {}) from Lua) for a table you mean to keep and mutate.
   reg("lua.table-new", 0, function() return box({}) end)
 
+  -- These functions accept the original decimal text and check arithmetic
+  -- results. Plain Shen numeric literals and +, -, * retain their usual
+  -- floating-point behavior; the checked contract is explicitly opt-in.
+  local function checked(name, fn, arity)
+    reg(name, arity, function(...)
+      local ok, result = pcall(fn, ...)
+      if not ok then ERR(tostring(result)) end
+      return result
+    end)
+  end
+  checked("lua.checked-integer", checked_integer.parse, 1)
+  checked("lua.checked-add", checked_integer.add, 2)
+  checked("lua.checked-sub", checked_integer.sub, 2)
+  checked("lua.checked-mul", checked_integer.mul, 2)
+
   -- structural maps: see the ShenMap block above ----------------------------
   local function check_map(m, what)
     if getmetatable(m) ~= M.ShenMap then
@@ -594,6 +610,18 @@ function M.post_initialise()
     shen_register(R.intern(e[1]), e[2])
   end
   M.pending = {}
+  if M.checked_declared then return end
+  -- Unlike generic lua.call, the checked integer entries have fixed types.
+  -- Declare them through the live typechecker entry point, so typed Shen code
+  -- can use the checked path without treating it as an untyped escape hatch.
+  local arrow, number = R.intern("-->"), R.intern("number")
+  local from_decimal = R.from_table({ R.intern("string"), arrow, number })
+  local binary = F["shen.rectify-type"](R.from_table({ number, arrow, number, arrow, number }))
+  F["declare"](R.intern("lua.checked-integer"), from_decimal)
+  for _, name in ipairs{ "lua.checked-add", "lua.checked-sub", "lua.checked-mul" } do
+    F["declare"](R.intern(name), binary)
+  end
+  M.checked_declared = true
 end
 
 -- ---- Lua-side conveniences (need the live F table) ---------------------------

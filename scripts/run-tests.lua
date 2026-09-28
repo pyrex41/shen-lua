@@ -31,6 +31,7 @@ end
 local specs = {
   "test/boot_cache_spec.lua",
   "test/cli_spec.lua",
+  "test/checked_integer_spec.lua",
   "test/engine_spec.lua",
   "test/error_robustness_spec.lua",
   "test/eval_order_spec.lua",
