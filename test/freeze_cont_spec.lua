@@ -129,5 +129,21 @@ ev([[(defun fc-cap (X)
           (if false 1 (thaw G)))))]])
 check(ev("(fc-cap 8)") == 8, "freeze captures outer X, not inner let")
 
+-- an inline thaw inside a value-position control form: that form is hoisted
+-- into a KC function, which must receive the freeze body's free variables
+-- (here Z, which the hoisted `if` never mentions itself)
+ev([[(defun fc-kc (X Z)
+      (let G (freeze Z)
+        (let Y (if (= X 0) (thaw G) 5)
+          Y)))]])
+check(ev("(fc-kc 0 42)") == 42, "inline thaw in hoisted control form sees freeze captures")
+check(ev("(fc-kc 1 42)") == 5, "inline thaw in hoisted control form: other branch")
+ev([[(defun fc-kc2 (X Z W)
+      (let G1 (freeze W)
+        (let G2 (freeze (+ Z (thaw G1)))
+          (let Y (if (= X 0) (thaw G2) 5)
+            Y))))]])
+check(ev("(fc-kc2 0 40 2)") == 42, "nested inline thaws in hoisted control form")
+
 io.write(string.format("freeze_cont_spec: %d pass, %d fail\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)

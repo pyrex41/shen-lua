@@ -1590,6 +1590,55 @@ local function push_inline_cont()
   return saved
 end
 
+-- Lua names a hoisted KC body must take as parameters. Beyond the form's own
+-- free variables, an inline freeze-let thawed inside the form is expanded
+-- there with ITS env, so the freeze body's free variables must be passed in
+-- too (they are locals of the enclosing function, not visible from KC).
+local function kc_params(form, env)
+  local set = {}
+  local fv = {}
+  collect_free(form, env, {}, fv)
+  for k in pairs(fv) do set[env[k]] = true end
+  local pending, seen = { form }, {}
+  while #pending > 0 do
+    local f = table.remove(pending)
+    for i = 1, #CONT do
+      local rec = CONT[i]
+      if rec.kind == "inline" and not seen[rec] and mentions_name(f, rec.name, {}) then
+        seen[rec] = true
+        local rfv = {}
+        collect_free(rec.expr, rec.env, {}, rfv)
+        for k in pairs(rfv) do set[rec.env[k]] = true end
+        pending[#pending + 1] = rec.expr
+      end
+    end
+  end
+  local lnames = {}
+  for ln in pairs(set) do lnames[#lnames + 1] = ln end
+  table.sort(lnames)
+  return table.concat(lnames, ", "), #lnames
+end
+
+-- Compile `form` (tail-compiled) as a constant chunk-scope KC function taking
+-- its free variables as parameters; returns the `KC[i](params)` call. The
+-- body is a SEPARATE Lua function: no `goto tco` (SELF cleared), no goto-kind
+-- failure continuations, no impl-local fN refs, and its own local budget.
+local function hoist_kc(form, env)
+  local params = kc_params(form, env)
+  local saved_self = SELF
+  local saved_h, saved_cc, saved_fnl = HOIST, CCACHE, FNL
+  local saved_cont = push_inline_cont()
+  local saved_impl = IN_IMPL
+  SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true); IN_IMPL = false
+  local body_stmts = ctail(form, env)
+  if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
+  SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
+  CONT = saved_cont; IN_IMPL = saved_impl
+  local idx = #CTX.cbodies + 1
+  CTX.cbodies[idx] = "function(" .. params .. ") " .. body_stmts .. " end"
+  return "KC[" .. idx .. "](" .. params .. ")"
+end
+
 -- ------------------------------------------------------------------
 -- cexpr : value position (returns a Lua expression string)
 -- ------------------------------------------------------------------
@@ -1649,12 +1698,6 @@ function cexpr(form, env)
       -- the body FIRST so any nested freezes/control-forms claim lower KB
       -- indices before we take ours.
       if CTX then
-        local fv = {}
-        collect_free(form, env, {}, fv)
-        local lnames = {}
-        for kname in pairs(fv) do lnames[#lnames+1] = env[kname] end
-        table.sort(lnames)
-        local params = table.concat(lnames, ", ")
         -- Compile the body FIRST so nested freezes/control-forms claim their KC
         -- indices before we take ours. The body references only its param free
         -- vars, globals, and KC (a load-time upvalue) -- never an impl local --
@@ -1664,21 +1707,11 @@ function cexpr(form, env)
         -- would illegally cross the function boundary. Likewise reset the
         -- chain-hoist state: KC[i] has its own local budget, and locals cached
         -- in the enclosing function are not in scope here.
-        local saved_self = SELF
-        local saved_h, saved_cc, saved_fnl = HOIST, CCACHE, FNL
-        local saved_cont = push_inline_cont()
-        local saved_impl = IN_IMPL
-        SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true); IN_IMPL = false
-        local body_stmts = ctail(form, env)
-        if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
-        SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
-        CONT = saved_cont; IN_IMPL = saved_impl
-        local idx = #CTX.cbodies + 1
-        CTX.cbodies[idx] = "function(" .. params .. ") " .. body_stmts .. " end"
+        local call = hoist_kc(form, env)
         -- The KC call itself may raise or side-effect: later siblings in the
         -- enclosing statement must not hoist chains ahead of it.
         if HOIST then HOIST.pure = false end
-        return "KC[" .. idx .. "](" .. params .. ")"
+        return call
       end
       -- No per-defun context (top-level eval chunk): fall back to the IIFE.
       -- (Clear SELF here too: the IIFE is a separate function.)
