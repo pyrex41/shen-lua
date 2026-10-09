@@ -1,10 +1,14 @@
 -- Generated event traces (seeded). After every transition the rendered view
 -- is checked against an independent Lua model:
 --   * lines form an aligned, gap-free partition of [0, covered);
---   * covered equals the first message whose leaf is not yet built, so no
---     unresolved content reaches a turn;
+--   * covered equals the first message whose leaf is neither built nor
+--     standing in provisionally (uncertain), so no pending content reaches a
+--     turn;
 --   * every line's text is exactly the committed node's text (exact leaves
 --     verbatim, joins as left LF right, summaries as delivered);
+--   * a committed summary is the shortest fitting delivery for its node,
+--     the earliest on equal length; a provisional line shows that best
+--     delivery so far, else the raw leaf;
 --   * every merge replaced two adjacent siblings by their parent;
 --   * the core's own invariant checks report nothing.
 -- Re-running a seed reproduces every state hash.
@@ -35,6 +39,14 @@ local function run_trace(seed, steps, cfg)
   local cap = cfg.leaf_cap
   local texts, built_leaf, msgs = {}, {}, {}
   local delivered = {}
+  local fits = {}   -- node key -> { {attempt, job, text}, ... } deliveries within the cap
+  local function best_fit(key)
+    local b
+    for _, f in ipairs(fits[key] or {}) do
+      if not b or #f.text < #b.text or (#f.text == #b.text and f.attempt < b.attempt) then b = f end
+    end
+    return b
+  end
   local hashes = {}
   local count = 0
 
@@ -58,11 +70,16 @@ local function run_trace(seed, steps, cfg)
           local rt = texts[k.level - 1 .. "/" .. 2 * k.index + 1]
           T.ok(l and rt, "join without both children")
           texts[kstr(k)] = l .. "\n" .. rt
+        elseif d.origin._ == "provisional" then
+          local b, m = best_fit(kstr(k)), msgs[k.index]
+          texts[kstr(k)] = b and b.text or (m.kind .. ": " .. m.text)
         else
+          local b = best_fit(kstr(k))
+          T.ok(b and b.job == d.origin.job, "committed summary is not the shortest, earliest fit")
           texts[kstr(k)] = delivered[d.origin.job]
         end
         T.eq(#texts[kstr(k)], d.bytes, "committed byte count")
-        T.ok(d.bytes <= cap, "node over cap")
+        T.ok(d.bytes <= cap or d.origin._ == "provisional", "node over cap")
         if k.level == 0 then built_leaf[k.index] = true end
       end
     end
@@ -138,7 +155,8 @@ local function run_trace(seed, steps, cfg)
       local c = e:take(r(#e.pending) + 1)             -- out-of-order completion
       local o = r(100)
       if o < 3 then
-        out = e:apply(T.failed(c, "uncertain"))
+        local raw = c.input._ == "leaf-input" and msgs[c.input.message].text or nil
+        out = e:apply(T.uncertain(c, raw))
         T.ok(T.has_decision(out, "job-uncertain"), T.decision_names(out))
         parked[#parked + 1] = c.job
       elseif o < 6 then
@@ -149,6 +167,9 @@ local function run_trace(seed, steps, cfg)
         local text = ("[s %d/%d] "):format(c.key.level, c.key.index) .. body(r(cap - 20))
         text = require("unii.host.codec").utf8_prefix(text, cap)
         delivered[c.job] = text
+        local key = kstr(c.key)
+        fits[key] = fits[key] or {}
+        table.insert(fits[key], { attempt = c.attempt.n, job = c.job, text = text })
         out = e:apply(T.done(c, text))
       end
       done_cmds[#done_cmds + 1] = c
@@ -162,7 +183,7 @@ local CFG = { leaf_cap = 160, low = 900, high = 1800, lead_window = 4, max_infli
 
 return {
   { "6 seeded traces x 400 events keep coverage, alignment and exact merges", function()
-    local merges, batches, parked = 0, 0, 0
+    local merges, batches, parked, provisional, later = 0, 0, 0, 0, 0
     for seed = 1, 6 do
       local _, e = run_trace(seed, 400, CFG)
       for _, out in ipairs(e.log) do
@@ -170,12 +191,18 @@ return {
           if d._ == "view-merged" then merges = merges + 1 end
           if d._ == "batch-mode" and d.on then batches = batches + 1 end
           if d._ == "job-uncertain" then parked = parked + 1 end
+          if d._ == "node-committed" and d.origin._ == "provisional" then provisional = provisional + 1 end
+          if d._ == "node-committed" and d.origin._ == "summarized" and d.origin.attempt > 1 then
+            later = later + 1
+          end
         end
       end
     end
     T.ok(merges > 50, "traces should exercise merges (" .. merges .. ")")
     T.ok(batches > 5, "traces should exercise batches (" .. batches .. ")")
     T.ok(parked > 3, "traces should park uncertain jobs (" .. parked .. ")")
+    T.ok(provisional > 0, "traces should render provisional leaves (" .. provisional .. ")")
+    T.ok(later > 10, "traces should commit summaries from tries after the first (" .. later .. ")")
   end },
 
   { "replaying a seed reproduces every state hash", function()

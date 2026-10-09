@@ -87,68 +87,164 @@ return {
     T.eq(e:status().blocked, 1)
   end },
 
-  { "an uncertain outcome parks the job: never dispatched again without an operator", function()
-    local e = T.engine { max_attempts = 5, max_inflight = 1 }
-    local c0 = commands_of(e:apply(T.msg(0, "user", big(1000))), "submit-summary")[1]
-    e:apply(T.msg(1, "user", big(1000)))
-    T.eq(e:status().dispatched, 1, "inflight cap holds the second leaf back")
-    local out = e:apply(T.failed(c0, "uncertain"))
-    T.eq(out.decisions[1]._, "job-uncertain")
-    T.eq(out.decisions[1].cmd, c0.cmd)
-    local evs = commands_of(out, "emit-client-event")
-    T.eq(evs[1].event._, "effect-uncertain")
-    T.eq(evs[1].event.job, c0.job)
-    T.eq(evs[1].event.cmd, c0.cmd)
-    local subs = commands_of(out, "submit-summary")
-    T.eq(#subs, 1, "the freed slot goes to the next leaf, not the uncertain job")
-    T.ok(subs[1].job ~= c0.job and subs[1].key.index == 1, subs[1].job)
-    local st = e:status()
-    T.eq(st.uncertain, 1); T.eq(st.dispatched, 1); T.eq(st.queued, 0)
-    -- Further events never re-dispatch it, and late outcomes for it are ignored.
-    out = e:apply(T.done(subs[1], "summary one"))
-    T.eq(#commands_of(out, "submit-summary"), 0)
-    for _, ev in ipairs { T.done(c0, "late"), T.failed(c0, "retryable"), T.failed(c0, "uncertain") } do
-      out = e:apply(ev)
-      T.eq(T.decision_names(out), "completion-ignored")
-      T.eq(#out.commands, 0)
-    end
-    T.eq(e:status().uncertain, 1)
-    T.eq(e:status().covered, 0)
-    local stuck = e.C:stuck_jobs(e.state)
-    T.eq(#stuck, 1)
-    T.eq(stuck[1].job, c0.job); T.eq(stuck[1].state, "uncertain"); T.eq(stuck[1].detail, c0.cmd)
+  { "a round runs every try and commits the shortest fitting summary, earliest on ties", function()
+    local e = T.engine()
+    local c = commands_of(e:apply(T.msg(0, "user", big(1000))), "submit-summary")[1]
+    local texts = { big(300, "a"), big(600, "b"), big(120, "c"), big(120, "d"), big(200, "e") }
+    local seen = {}
+    local out, n = e:round(c, function(t)
+      seen[#seen + 1] = t.attempt.retry._ .. (t.attempt.retry.bytes and ("/" .. t.attempt.retry.bytes) or "")
+      return T.done(t, texts[t.attempt.n])
+    end)
+    T.eq(n, 5, "all five tries run although try 1 already fit")
+    T.eq(table.concat(seen, ","),
+      "first-attempt,retry-seek-shorter/300,retry-too-long/600,retry-seek-shorter/120,retry-seek-shorter/120")
+    local d = T.has_decision(out, "node-committed")
+    T.eq(d.origin._, "summarized"); T.eq(d.origin.attempt, 3, "try 3 and try 4 tie at 120 bytes: try 3 wins")
+    T.eq(d.bytes, 120)
+    T.eq(e.C:render(e.state), "0+1|" .. big(120, "c") .. "\n")
+    local kept = 0
+    for _, o in ipairs(e.log) do for _, x in ipairs(o.decisions) do
+      if x._ == "candidate-kept" then kept = kept + 1 end end end
+    T.eq(kept, 2, "candidates kept on try 1 and try 3 only")
     T.eq(#e:invariants(), 0)
   end },
 
-  { "operator retry requeues blocked or uncertain jobs past the attempt limit", function()
-    local e = T.engine { max_attempts = 1 }
-    local c0 = commands_of(e:apply(T.msg(0, "user", big(1000))), "submit-summary")[1]
-    local out = e:apply({ _ = "operator-retry", job = c0.job })
-    T.eq(out.decisions[1]._, "event-rejected", "a dispatched job is not stuck")
-    T.eq(out.decisions[1].reason, "operator retry: job is neither blocked nor uncertain")
-    e:apply(T.failed(c0, "uncertain"))
-    out = e:apply({ _ = "operator-retry", job = c0.job })
-    T.eq(T.decision_names(out), "job-retried")
-    local r = commands_of(out, "submit-summary")[1]
-    T.eq(r.attempt.n, 2); T.eq(r.attempt.retry._, "retry-by-operator")
-    T.eq(r.job, (c0.job:gsub("%-a1%-", "-a2-")))
-    -- attempt 2 > max_attempts 1: a retryable failure blocks instead of retrying
-    out = e:apply(T.failed(r, "retryable"))
+  { "over-cap summaries are never accepted; a round with none that fit blocks", function()
+    local e = T.engine { max_attempts = 3 }
+    local c = commands_of(e:apply(T.msg(0, "user", big(1000))), "submit-summary")[1]
+    local out, n = e:round(c, function(t)
+      if t.attempt.n == 2 then return T.failed(t, "retryable") end
+      return T.done(t, big(513))
+    end)
+    T.eq(n, 3)
     T.ok(T.has_decision(out, "job-blocked"), T.decision_names(out))
-    T.eq(e.C:stuck_jobs(e.state)[1].state, "blocked")
-    out = e:apply({ _ = "operator-retry", job = r.job })
-    local r3 = commands_of(out, "submit-summary")[1]
-    T.eq(r3.attempt.n, 3)
-    out = e:apply(T.done(r3, "recovered"))
-    T.eq(e:status().covered, 1)
+    T.eq(e.C:stuck_jobs(e.state)[1].detail, "no summary within the leaf cap in a round of tries")
+    T.eq(e:status().covered, 0)
+  end },
+
+  { "a permanent failure ends the round: best candidate so far commits, else the job blocks", function()
+    local e = T.engine()
+    local c = commands_of(e:apply(T.msg(0, "user", big(1000))), "submit-summary")[1]
+    local out = e:round(c, function(t)
+      if t.attempt.n == 2 then return T.failed(t, "permanent") end
+      return T.done(t, "fits")
+    end)
+    T.eq(T.has_decision(out, "node-committed").origin.attempt, 1)
+    local c1 = commands_of(e:apply(T.msg(1, "user", big(1000))), "submit-summary")[1]
+    out = e:apply(T.failed(c1, "permanent"))
+    T.ok(T.has_decision(out, "job-blocked"))
+    T.eq(e.C:stuck_jobs(e.state)[1].detail, "permanent summary failure")
+  end },
+
+  { "an uncertain leaf renders its raw text provisionally and memory keeps moving", function()
+    local e = T.engine { max_inflight = 1 }
+    local raw0 = big(1000)
+    local c0 = commands_of(e:apply(T.msg(0, "user", raw0)), "submit-summary")[1]
+    e:apply(T.msg(1, "user", big(1000)))
+    local out = e:apply(T.uncertain(c0, raw0))
+    T.eq(T.decision_names(out):match("^job%-uncertain,node%-committed"), "job-uncertain,node-committed")
+    T.eq(T.has_decision(out, "node-committed").origin._, "provisional")
+    local ev = commands_of(out, "emit-client-event")[1].event
+    T.eq(ev._, "effect-uncertain"); T.eq(ev.job, c0.job); T.eq(ev.cmd, c0.cmd)
+    local subs = commands_of(out, "submit-summary")
+    T.eq(#subs, 1); T.eq(subs[1].key.index, 1, "the freed slot goes to the next leaf")
+    local st = e:status()
+    T.eq(st.covered, 1, "the uncertain leaf is covered by its provisional line")
+    T.eq(st.provisional, 1); T.eq(st.uncertain, 1)
+    T.eq(e.C:render(e.state), "0+1|user: " .. raw0 .. "\n")
+    e:finish(subs[1], "summary one")
+    T.eq(e:status().covered, 2)
+    T.eq(e.C:ready(e.state), true, "a turn may start")
+    T.eq(e.C:render(e.state), "0+1|user: " .. raw0 .. "\n1+1|summary one\n")
+    T.eq(#commands_of(e.log[#e.log], "submit-summary"), 0, "no parent job: its left child is provisional")
+    for _, late in ipairs { T.done(c0, "late"), T.failed(c0, "retryable"), T.uncertain(c0, raw0) } do
+      out = e:apply(late)
+      T.eq(T.decision_names(out), "completion-ignored")
+      T.eq(#out.commands, 0)
+    end
+    local stuck = e.C:stuck_jobs(e.state)
+    T.eq(#stuck, 1); T.eq(stuck[1].state, "uncertain"); T.eq(stuck[1].detail, c0.cmd)
+    T.eq(#e:invariants(), 0)
+  end },
+
+  { "uncertain reports must carry the leaf's own message, and nothing for a merge", function()
+    local e = T.engine()
+    local c0 = commands_of(e:apply(T.msg(0, "user", big(1000))), "submit-summary")[1]
+    T.eq(e:apply(T.uncertain(c0, nil)).decisions[1].reason, "raw content does not match the job's source")
+    T.eq(e:apply(T.uncertain(c0, big(999))).decisions[1].reason, "raw content does not match the job's source")
+    T.eq(e:status().dispatched, 1)
+  end },
+
+  { "an uncertain leaf with a candidate renders that candidate, and the real summary replaces it", function()
+    local e = T.engine()
+    local raw = big(1000)
+    local c = commands_of(e:apply(T.msg(0, "user", raw)), "submit-summary")[1]
+    local out = e:apply(T.done(c, "early but fine"))
+    local c2 = commands_of(out, "submit-summary")[1]
+    out = e:apply(T.uncertain(c2, raw))
+    T.eq(e.C:render(e.state), "0+1|early but fine\n")
+    local rev = e:status().rev
+    out = e:apply({ _ = "operator-retry", job = c2.job })
+    local r = commands_of(out, "submit-summary")[1]
+    T.eq(r.attempt.n, 3); T.eq(r.attempt.retry._, "retry-by-operator")
+    out = e:finish(r, "much shorter")
+    T.ok(T.has_decision(out, "view-replaced"), T.decision_names(out))
+    T.eq(e.C:render(e.state), "0+1|much shorter\n")
+    T.ok(e:status().rev > rev, "replacing a line is a view revision")
+    T.eq(e:status().provisional, 0)
+    T.eq(#e:invariants(), 0)
+  end },
+
+  { "an uncertain merge job: children stay, merges proceed around it", function()
+    local e = T.engine { leaf_cap = 32, low = 40, high = 80, max_attempts = 1 }
+    for i = 0, 7 do e:apply(T.msg(i, "user", ("m%d-"):format(i) .. big(20))) end
+    -- every adjacent pair overflows 32 bytes, so each parent is a merge job
+    local parked
+    while #e.pending > 0 do
+      local c = e:take()
+      if not parked and c.key.level == 1 and c.key.index == 0 then
+        parked = c
+        e:apply(T.uncertain(c, nil))
+      else
+        e:apply(T.done(c, ("s%d/%d"):format(c.key.level, c.key.index)))
+      end
+    end
+    T.ok(parked, "the (1, 0) merge job ran")
+    local view = e.C:render(e.state)
+    T.ok(view:find("0+1|user: m0-", 1, true) and view:find("1+1|user: m1-", 1, true), view)
+    T.ok(view:find("2+2|s1/1\n4+4|", 1, true), "the rest merged around it:\n" .. view)
+    local st = e:status()
+    T.eq(st.covered, 8); T.eq(st.uncertain, 1); T.eq(st.provisional, 0)
+    T.eq(#e:invariants(), 0)
+  end },
+
+  { "operator retry grants one fresh round; if it all fails the job blocks again", function()
+    local e = T.engine { max_attempts = 2 }
+    local raw = big(1000)
+    local c0 = commands_of(e:apply(T.msg(0, "user", raw)), "submit-summary")[1]
+    local out = e:apply({ _ = "operator-retry", job = c0.job })
+    T.eq(out.decisions[1].reason, "operator retry: job is neither blocked nor uncertain")
+    e:apply(T.uncertain(c0, raw))
+    out = e:apply({ _ = "operator-retry", job = c0.job })
+    local r = commands_of(out, "submit-summary")[1]
+    T.eq(r.attempt.n, 2); T.eq(r.job, (c0.job:gsub("%-a1%-", "-a2-")))
+    local _, n = e:round(r, function(t) return T.failed(t, "retryable") end)
+    T.eq(n, 2, "a fresh round of max_attempts tries (attempts 2 and 3)")
+    local stuck = e.C:stuck_jobs(e.state)
+    T.eq(stuck[1].state, "blocked")
+    T.eq(e:status().provisional, 1, "the provisional line stays while the job is blocked")
+    out = e:apply({ _ = "operator-retry", job = stuck[1].job })
+    local r4 = commands_of(out, "submit-summary")[1]
+    T.eq(r4.attempt.n, 4)
+    e:finish(r4, "recovered")
+    T.eq(e.C:render(e.state), "0+1|recovered\n")
     T.eq(#e.C:stuck_jobs(e.state), 0)
-    out = e:apply({ _ = "operator-retry", job = r3.job })
-    T.eq(out.decisions[1].reason, "operator retry: unknown or already completed job")
     T.eq(#e:invariants(), 0)
   end },
 
   { "duplicate, stale and unknown completions publish nothing", function()
-    local e = T.engine()
+    local e = T.engine { max_attempts = 1 }
     local c = commands_of(e:apply(T.msg(0, "user", big(1000))), "submit-summary")[1]
     local out = e:apply(T.done(c, "first"))
     T.ok(T.has_decision(out, "node-committed"))
@@ -163,7 +259,7 @@ return {
   end },
 
   { "out-of-order completion: later leaf waits outside the view", function()
-    local e = T.engine()
+    local e = T.engine { max_attempts = 1 }
     local c0 = commands_of(e:apply(T.msg(0, "user", big(1000))), "submit-summary")[1]
     local c1 = commands_of(e:apply(T.msg(1, "user", big(1000))), "submit-summary")[1]
     e:apply(T.msg(2, "user", "short"))
@@ -185,7 +281,7 @@ return {
     end
     T.eq(dispatched, 3, "only the first lead-window leaves dispatch")
     T.eq(e:status().dispatched, 3)
-    local e2 = T.engine { lead_window = 64, max_inflight = 4 }
+    local e2 = T.engine { lead_window = 64, max_inflight = 4, max_attempts = 1 }
     dispatched = 0
     for i = 0, 9 do
       dispatched = dispatched + #commands_of(e2:apply(T.msg(i, "user", big(700))), "submit-summary")
