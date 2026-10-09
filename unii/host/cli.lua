@@ -93,9 +93,9 @@ end
 
 local function status_line(s)
   local st = s:status()
-  return ("rev %d | %d lines %d bytes | covered %d/%d | jobs q%d d%d b%d u%d%s"):format(
+  return ("rev %d | %d lines %d bytes | covered %d/%d | jobs q%d d%d b%d u%d | provisional %d%s"):format(
     st.rev, st.view_lines, st.view_bytes, st.covered, st.count,
-    st.queued, st.dispatched, st.blocked, st.uncertain, st.batch and " | BATCH" or "")
+    st.queued, st.dispatched, st.blocked, st.uncertain, st.provisional, st.batch and " | BATCH" or "")
 end
 
 local commands = {}
@@ -223,6 +223,7 @@ function commands.replay(opts)
       local what = ev._ == "message-appended" and ("message %d %s %dB"):format(ev.id, ev.kind, ev.content.bytes)
         or ev._ == "summary-completed" and ("completed %s %dB"):format(ev.job, ev.bytes)
         or ev._ == "summary-failed" and ("failed %s %s"):format(ev.job, ev.class)
+        or ev._ == "summary-uncertain" and ("uncertain %s"):format(ev.job)
         or ("operator retry %s"):format(ev.job)
       local ds = {}
       for _, d in ipairs(t.v.decisions.v) do ds[#ds + 1] = d.v[1].v end

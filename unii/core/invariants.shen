@@ -14,6 +14,7 @@
          (append (unii.live-errors S (unii.st-live S))
          (append (unii.frontier-errors S (unii.st-covered S))
          (append (unii.job-errors S (unii.st-jobs S) [])
+         (append (unii.provisional-errors S (unii.built-nodes S))
            (unii.collect-errors
              [(@p (<= (unii.st-covered S) (unii.st-count S)) "view covers past the message count")
               (@p (unii.nat? (unii.st-count S)) "message count outside [0, 2^31 - 1]")
@@ -26,7 +27,7 @@
                   "more dispatched jobs than the inflight cap")
               (@p (<= (unii.count-jobs (/. J (unii.leaf-job? J)) (unii.st-jobs S))
                       (unii.cf-max-frontier Cf))
-                  "unresolved leaves exceed the frontier bound")])))))))))
+                  "unresolved leaves exceed the frontier bound")]))))))))))
 
 \\ The view is an exact, aligned, gap-free partition of [0, Covered).
 (define unii.partition-errors
@@ -43,7 +44,7 @@
   {unii.config --> (list unii.node) --> (list string)}
   _ [] -> []
   Cf [N | Ns] -> ["node text exceeds the leaf cap"]
-    where (> (unii.node-bytes N) (unii.cf-cap Cf))
+    where (and (> (unii.node-bytes N) (unii.cf-cap Cf)) (not (unii.provisional? N)))
   Cf [N | Ns] -> ["node line is not the canonical rendering of its text"]
     where (not (= [line (unii.node-line N) (unii.node-line-bytes N)]
                   (unii.make-line (unii.node-key N) (unii.node-text N) (unii.node-bytes N))))
@@ -55,7 +56,8 @@
   {unii.origin --> unii.key --> boolean}
   [exact-leaf] [key L _] -> (= L 0)
   [joined] [key L _] -> (> L 0)
-  [summarized _ _] _ -> true)
+  [summarized _ _] _ -> true
+  [provisional _] [key L _] -> (= L 0))
 
 \\ Live nodes are built, unique, distinct from the view, and inside the chat.
 (define unii.live-errors
@@ -83,19 +85,27 @@
     where (> (unii.leaf-states S M) 1)
   S M -> (unii.frontier-errors S (+ M 1)))
 
+\\ A leaf job that has a provisional stand-in counts as built, not pending.
 (define unii.leaf-states
   {unii.state --> number --> number}
-  S M -> (+ (if (unii.has-job-for-key? (unii.leaf-key M) (unii.st-jobs S)) 1 0)
-            (if (unii.has-node? (unii.leaf-key M) (unii.st-live S)) 1 0)))
+  S M -> (let K (unii.leaf-key M)
+           (+ (if (and (unii.has-job-for-key? K (unii.st-jobs S))
+                       (not (unii.has-provisional? K (unii.st-live S)))) 1 0)
+              (if (unii.has-node? K (unii.st-live S)) 1 0))))
 
 (define unii.job-errors
   {unii.state --> (list unii.job) --> (list string) --> (list string)}
   _ [] _ -> []
   _ [J | _] Seen -> ["duplicate job id"] where (element? (unii.job-id J) Seen)
   S [J | _] _ -> ["a job targets an already built node"]
-    where (unii.has-node? (unii.job-key J) (unii.built-nodes S))
+    where (unii.has-real-node? (unii.job-key J) (unii.built-nodes S))
+  S [J | _] _ -> ["a job's attempt lies outside its round"]
+    where (not (and (unii.pos-nat? (unii.job-attempt J)) (<= (unii.job-attempt J) (unii.job-round-end J))))
+  S [J | _] _ -> ["a job keeps a candidate over the leaf cap"]
+    where (and (cons? (unii.job-best J))
+               (> (unii.cand-bytes (head (unii.job-best J))) (unii.cf-cap (unii.st-config S))))
   S [J | _] _ -> ["a leaf job targets a covered or future message"]
-    where (and (unii.leaf-job? J)
+    where (and (and (unii.leaf-job? J) (not (unii.has-provisional? (unii.job-key J) (unii.built-nodes S))))
                (or (< (unii.key-first (unii.job-key J)) (unii.st-covered S))
                    (>= (unii.key-first (unii.job-key J)) (unii.st-count S))))
   S [J | _] _ -> ["a merge job is missing a built child"]
@@ -110,3 +120,11 @@
   {(list unii.key) --> (list unii.node) --> boolean}
   [] _ -> true
   [K | Ks] Ns -> (and (unii.has-node? K Ns) (unii.all-built? Ks Ns)))
+
+\\ Every provisional node stands in for a leaf that still has a job.
+(define unii.provisional-errors
+  {unii.state --> (list unii.node) --> (list string)}
+  _ [] -> []
+  S [N | _] -> ["a provisional node has no job for its leaf"]
+    where (and (unii.provisional? N) (not (unii.has-job-for-key? (unii.node-key N) (unii.st-jobs S))))
+  S [_ | Ns] -> (unii.provisional-errors S Ns))

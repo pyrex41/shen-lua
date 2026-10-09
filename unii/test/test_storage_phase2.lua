@@ -134,6 +134,61 @@ return {
     T.rm(dir)
   end },
 
+  { "uncertain leaf round state and provisional line restore from checkpoint", function()
+    local dir = T.tmpdir("phase2-provisional-checkpoint")
+    local raw = "raw provisional source " .. ("r"):rep(700)
+    local first = mock.new {
+      cap = 512,
+      fixture = { ["0/0"] = {
+        [1] = { text = "short candidate from try one" },
+        [2] = { uncertain = true },
+      } },
+    }
+    local sup = supervisor.open(dir, {
+      core = T.core(), provider = first, checkpoint_interval = 0,
+    })
+    sup:submit(T.msg(0, "user", raw))
+    sup:pump()
+    T.eq(first.calls, 2)
+    T.eq(sup:status().uncertain, 1)
+    T.eq(sup:status().provisional, 1)
+    local state_hash, view, view_hash = sup:state_hash(), sup:view()
+    T.ok(view:find("short candidate from try one", 1, true), view)
+    local last = sup.store.next_seq - 1
+    sup:checkpoint(last)
+    sup:close()
+
+    local shard = read(dir .. "/journals/2026-10-09.uj")
+    T.ok(not shard:find(raw, 1, true), "uncertain raw text leaked into journal")
+    local saw_uncertain = false
+    for _, record in ipairs(storage.parse(shard, 2)) do
+      local txn = codec.decode(record.payload)
+      local ev = txn.v.event and txn.v.event.v
+      if ev and ev[1].v == "summary-uncertain" then
+        saw_uncertain = true
+        T.eq(#ev[4].v, 1)
+        T.eq(#ev[4].v[1].v, 3, "raw content is a hash-only blob reference")
+      end
+    end
+    T.ok(saw_uncertain)
+
+    local second = mock.new { cap = 512 }
+    sup = supervisor.open(dir, {
+      core = T.core(), provider = second, checkpoint_interval = 0,
+    })
+    T.eq(sup.info.checkpoint_seq, last)
+    T.eq(sup.info.replayed_records, 0)
+    T.eq(sup:state_hash(), state_hash)
+    local restored, restored_hash = sup:view()
+    T.eq(restored, view)
+    T.eq(restored_hash, view_hash)
+    T.eq(sup:status().uncertain, 1)
+    T.eq(sup:status().provisional, 1)
+    T.eq(second.calls, 0, "checkpointed uncertain job was not resent")
+    sup:close()
+    T.rm(dir)
+  end },
+
   { "stale checkpoint is set aside and an older valid checkpoint is used", function()
     local dir = T.tmpdir("phase2-stale")
     local sup = open_sup(dir, { checkpoint_interval = 4 })

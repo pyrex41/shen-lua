@@ -96,7 +96,7 @@ return {
   { "adapter results classify as success, retryable, permanent or uncertain", function()
     local function cl(r, done) return (models.classify(r, done)) end
     T.eq(cl({ outcome = "succeeded", status = 200 }, true), nil)
-    T.eq(cl({ outcome = "succeeded", status = 200 }, false), "retryable", "stream cut before [DONE]")
+    T.eq(cl({ outcome = "succeeded", status = 200 }, false), "uncertain", "stream cut before [DONE]")
     T.eq(cl { outcome = "succeeded", status = 429 }, "retryable")
     T.eq(cl { outcome = "succeeded", status = 503 }, "retryable")
     T.eq(cl { outcome = "succeeded", status = 400 }, "permanent")
@@ -127,7 +127,7 @@ return {
     T.eq(got.ok, true); T.eq(got.text, a, "streamed through SSE and reassembled")
   end },
 
-  { "through the supervisor: oversize and transport failures retry, others block, all journaled", function()
+  { "through the supervisor: rounds of tries, failures block, all journaled", function()
     local dir = T.tmpdir("net")
     local events = {}
     local provider = mock.new { cap = 512, fixture = {
@@ -140,11 +140,11 @@ return {
     sup:submit(T.msg(1, "user", ("b"):rep(800)))
     sup:pump()
     local st = sup:status()
-    T.eq(st.covered, 1, "leaf 0 summarized on attempt 3; leaf 1 blocked")
+    T.eq(st.covered, 1, "leaf 0 summarized from its round; leaf 1 blocked")
     T.eq(st.blocked, 1)
     T.eq(sup:outstanding_count(), 0)
     T.ok(find_event(events, "memory-blocked"), "memory-blocked client event emitted")
-    T.eq(provider.calls, 5)
+    T.eq(provider.calls, 7, "leaf 0: a full round of 5; leaf 1: retryable then permanent")
     local h = sup:state_hash()
     sup:close()
     local again = supervisor.open(dir, { core = T.core(), provider = mock.new {} })
@@ -165,7 +165,10 @@ return {
     T.eq(provider.calls, 1)
     T.eq(#provider.network.hits, 1)
     local st = sup:status()
-    T.eq(st.uncertain, 1); T.eq(st.covered, 0); T.eq(sup:outstanding_count(), 0)
+    T.eq(st.uncertain, 1); T.eq(sup:outstanding_count(), 0)
+    T.eq(st.covered, 1, "memory moves on: the raw leaf renders provisionally")
+    T.eq(st.provisional, 1)
+    T.eq(sup:view(), "0+1|user: " .. ("a"):rep(800) .. "\n")
     local ev = find_event(events, "effect-uncertain")
     T.ok(ev, "effect-uncertain client event emitted")
     for _ = 1, 5 do sup:pump() end
@@ -178,11 +181,24 @@ return {
     T.eq(#stuck, 1); T.eq(stuck[1].state, "uncertain"); T.eq(stuck[1].job, ev.job)
     sup:operator_retry(ev.job)
     sup:pump()
-    T.eq(provider.calls, 2)
-    T.eq(sup:status().covered, 1); T.eq(sup:status().uncertain, 0)
+    T.eq(provider.calls, 6, "the operator retry ran one fresh round of 5 tries")
+    T.eq(sup:status().covered, 1); T.eq(sup:status().uncertain, 0); T.eq(sup:status().provisional, 0)
+    T.ok(sup:view():find("^0%+1|%[mock 0/0 a2%]"), sup:view())
     T.eq(#sup:invariant_errors(), 0)
     sup:close()
     T.rm(dir)
+  end },
+
+  { "a 200 stream that ends without [DONE] is uncertain, not retried", function()
+    local p = mock.new { fixture = { ["0/0"] = { [1] = { no_done = true } } } }
+    local job = { cmd = "c1", job = "j", key = { level = 0, index = 0 },
+                  attempt = { n = 1, retry = { _ = "first-attempt" } },
+                  input = { _ = "leaf-input", message = 0, kind = "user" }, source = "hello" }
+    local got
+    p:start(job, function(o) got = o end)
+    while p:pending() > 0 do p:step() end
+    T.eq(got.ok, false); T.eq(got.class, "uncertain"); T.eq(got.error, "stream ended without [DONE]")
+    T.eq(#p.network.hits, 1)
   end },
 
   { "restart with a command in flight: recovered as uncertain, not resent; undispatched work still runs", function()
@@ -201,13 +217,17 @@ return {
     local events = {}
     sup = supervisor.open(dir, { core = T.core(), provider = p2,
       on_client_event = function(ev) events[#events + 1] = ev end })
-    T.eq(#sup:orphans(), 1)
+    local orphan = sup:orphans()[1]
+    T.ok(orphan and orphan.key.index == 0, "leaf 0's command is the orphan")
     T.eq(sup:status().uncertain, 0, "opening alone writes nothing")
     sup:pump()
-    T.eq(#p2.network.hits, 1, "only leaf 1 was sent by the new process")
+    T.eq(#p2.network.hits, 5, "the new process ran leaf 1's round only")
+    for _, id in ipairs(p2.network.hits) do T.ok(id ~= orphan.cmd, "the orphaned command was resent") end
     T.ok(find_event(events, "effect-uncertain"))
     local st = sup:status()
-    T.eq(st.uncertain, 1); T.eq(st.covered, 0); T.eq(sup:outstanding_count(), 0)
+    T.eq(st.uncertain, 1); T.eq(sup:outstanding_count(), 0)
+    T.eq(st.covered, 2, "leaf 0 renders provisionally, leaf 1 is summarized")
+    T.eq(st.provisional, 1)
     local h = sup:state_hash()
     sup:close()
     sup = supervisor.open(dir, { core = T.core(), provider = mock.new {} })
@@ -215,5 +235,16 @@ return {
     T.eq(#sup:orphans(), 0)
     sup:close()
     T.rm(dir)
+  end },
+
+  { "the provisional prompt passes each round hint to the model", function()
+    local cc = require("unii.host.providers.chat_completions")
+    local function system(retry)
+      local job = { attempt = { n = 2, retry = retry }, input = { _ = "leaf-input", kind = "user" }, source = "x" }
+      return cc.messages(job, 512)[1].content
+    end
+    T.ok(not system({ _ = "first-attempt" }):find("previous", 1, true))
+    T.ok(system({ _ = "retry-too-long", bytes = 600 }):find("was 600 bytes, over the limit", 1, true))
+    T.ok(system({ _ = "retry-seek-shorter", bytes = 300 }):find("best attempt so far is 300 bytes", 1, true))
   end },
 }

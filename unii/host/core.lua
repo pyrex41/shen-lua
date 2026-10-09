@@ -161,6 +161,7 @@ function Core:status(state)
   return {
     count = s[1], covered = s[2], view_bytes = s[3], view_lines = s[4], rev = s[5],
     batch = s[6] == 1, queued = s[7], dispatched = s[8], blocked = s[9], uncertain = s[10],
+    provisional = s[11],
   }
 end
 

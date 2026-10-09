@@ -184,7 +184,7 @@ return {
 
   { "tampered records, foreign bundles and changed config are refused", function()
     local dir = T.tmpdir("sup")
-    local sup = open_sup(dir)
+    local sup = open_sup(dir, { checkpoint_interval = 0 })
     feed(sup, 0, 6)
     sup:close()
     local path = dir .. "/" .. storage.JOURNAL

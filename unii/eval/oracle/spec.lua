@@ -268,6 +268,31 @@ test("byte hysteresis triggers strictly above high and reaches low", function()
   assert(entries >= 2)
 end)
 
+test("summary rounds keep the shortest fit, earliest on ties, and never an over-cap one", function()
+  local function d(n) return { kind = "done", bytes = n } end
+  local r = oracle.summary_rounds({ d(300), d(600), d(120), d(120), d(200) }, 512, 5)
+  equal(r.status, "committed"); equal(r.attempt, 3); equal(r.bytes, 120)
+  r = oracle.summary_rounds({ d(513), { kind = "retryable" }, d(900) }, 512, 3)
+  equal(r.status, "blocked")
+  r = oracle.summary_rounds({ d(100), { kind = "permanent" } }, 512, 5)
+  equal(r.status, "committed"); equal(r.attempt, 1)
+  r = oracle.summary_rounds({ d(100), d(90) }, 512, 5)
+  equal(r.status, "running"); equal(r.attempt, 3); equal(r.best.bytes, 90)
+end)
+
+test("uncertain parks the job; an operator retry grants one fresh round", function()
+  local function d(n) return { kind = "done", bytes = n } end
+  local u, op, rt = { kind = "uncertain" }, { kind = "operator" }, { kind = "retryable" }
+  local r = oracle.summary_rounds({ d(50), u, d(10), rt }, 512, 2)
+  equal(r.status, "uncertain"); equal(r.attempt, 2); equal(r.best.bytes, 50)
+  r = oracle.summary_rounds({ u, op, rt, rt }, 512, 2)
+  equal(r.status, "blocked"); equal(r.attempt, 3)
+  r = oracle.summary_rounds({ u, op, rt, rt, op, d(70), rt }, 512, 2)
+  equal(r.status, "committed"); equal(r.attempt, 4); equal(r.bytes, 70)
+  r = oracle.summary_rounds({ d(40), u, op, d(40), d(30) }, 512, 2)
+  equal(r.status, "committed"); equal(r.attempt, 4); equal(r.bytes, 30)
+end)
+
 test("checked-in fixtures have complete terminal records", function()
   local function inspect(name, prefix, final_T)
     local file = assert(io.open(root .. "unii/eval/fixtures/" .. name, "rb"))

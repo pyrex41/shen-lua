@@ -77,8 +77,31 @@ local function event_of(txn)
   return txn.t == "map" and txn.v.event and txn.v.event.t == "list" and txn.v.event.v or nil
 end
 
--- Journal transactions omit the text field from message and summary events.
--- Their existing byte count and SHA-256 fields are the durable blob reference.
+local function physicalize_content(content, blobs, refs, what)
+  if content and #content == 4 then
+    local hash, bytes, text = content[3].v, int(content[2]), content[4].v
+    if #text ~= bytes or sha256.hex(text) ~= hash then error(what .. " blob declaration mismatch", 0) end
+    blobs:put(text, hash)
+    content[4] = nil
+    refs[#refs + 1] = { hash = hash, bytes = bytes }
+  end
+end
+
+local function hydrate_content(content, blobs)
+  if content and #content == 3 then
+    content[4] = codec.text(blobs:get(content[3].v, int(content[2])))
+  end
+end
+
+local function reference_content(content, refs)
+  if content and #content == 3 then
+    refs[#refs + 1] = { hash = content[3].v, bytes = int(content[2]) }
+  end
+end
+
+-- Journal transactions omit the text field from message, summary and raw
+-- uncertain-leaf content records. Their byte count and SHA-256 fields are
+-- the durable blob reference.
 local function physicalize(payload, blobs)
   local decoded, txn = pcall(codec.decode, payload)
   if not decoded then return payload, {}, nil end
@@ -87,13 +110,7 @@ local function physicalize(payload, blobs)
   if ev and ev[1] and ev[1].t == "sym" then
     if ev[1].v == "message-appended" then
       local content = ev[5] and ev[5].v
-      if content and #content == 4 then
-        local hash, bytes, text = content[3].v, int(content[2]), content[4].v
-        if #text ~= bytes or sha256.hex(text) ~= hash then error("message blob declaration mismatch", 0) end
-        blobs:put(text, hash)
-        content[4] = nil
-        refs[#refs + 1] = { hash = hash, bytes = bytes }
-      end
+      physicalize_content(content, blobs, refs, "message")
       local date = ev[4] and ev[4].v
       day = date and date:match("^(%d%d%d%d%-%d%d%-%d%d)") or nil
     elseif ev[1].v == "summary-completed" and #ev == 6 then
@@ -102,6 +119,10 @@ local function physicalize(payload, blobs)
       blobs:put(text, hash)
       ev[6] = nil
       refs[#refs + 1] = { hash = hash, bytes = bytes }
+    elseif ev[1].v == "summary-uncertain" and ev[4] and ev[4].t == "list" then
+      for _, tagged in ipairs(ev[4].v) do
+        physicalize_content(tagged.v, blobs, refs, "uncertain raw")
+      end
     end
   end
   return codec.encode(txn), refs, day
@@ -114,11 +135,11 @@ local function hydrate(physical, blobs)
   if ev and ev[1] and ev[1].t == "sym" then
     if ev[1].v == "message-appended" then
       local content = ev[5] and ev[5].v
-      if content and #content == 3 then
-        content[4] = codec.text(blobs:get(content[3].v, int(content[2])))
-      end
+      hydrate_content(content, blobs)
     elseif ev[1].v == "summary-completed" and #ev == 5 then
       ev[6] = codec.text(blobs:get(ev[5].v, int(ev[4])))
+    elseif ev[1].v == "summary-uncertain" and ev[4] and ev[4].t == "list" then
+      for _, tagged in ipairs(ev[4].v) do hydrate_content(tagged.v, blobs) end
     end
   end
   return codec.encode(txn), txn
@@ -132,9 +153,11 @@ local function refs_of(physical)
   if ev and ev[1] and ev[1].t == "sym" then
     if ev[1].v == "message-appended" then
       local content = ev[5] and ev[5].v
-      if content and #content == 3 then refs[1] = { hash = content[3].v, bytes = int(content[2]) } end
+      reference_content(content, refs)
     elseif ev[1].v == "summary-completed" and #ev == 5 then
-      refs[1] = { hash = ev[5].v, bytes = int(ev[4]) }
+      refs[#refs + 1] = { hash = ev[5].v, bytes = int(ev[4]) }
+    elseif ev[1].v == "summary-uncertain" and ev[4] and ev[4].t == "list" then
+      for _, tagged in ipairs(ev[4].v) do reference_content(tagged.v, refs) end
     end
   end
   return txn, refs
@@ -168,6 +191,8 @@ local function index_txn(idx, txn, seq, refs)
     }
   elseif ev and (ev[1].v == "summary-completed" or ev[1].v == "summary-failed") then
     idx.jobs[ev[2].v] = { status = ev[1].v == "summary-completed" and "completed" or "failed", seq = seq }
+  elseif ev and ev[1].v == "summary-uncertain" then
+    idx.jobs[ev[2].v] = { status = "uncertain", seq = seq }
   end
   if txn.v.kind and txn.v.kind.t == "sym" and txn.v.kind.v == "dispatch"
       and txn.v.job and txn.v.job.t == "text" then

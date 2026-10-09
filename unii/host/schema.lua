@@ -30,7 +30,7 @@ M.T = { nat = nat, text = text, hex64 = hex64, sym = sym, bool = bool,
 
 local KINDS = { user = true, assistant = true, ["tool-call"] = true,
                 ["tool-result"] = true, report = true, ["imported-note"] = true }
-local CLASSES = { retryable = true, permanent = true, uncertain = true }
+local CLASSES = { retryable = true, permanent = true }
 M.KINDS, M.CLASSES = KINDS, CLASSES
 
 -- name -> ordered list of {field, type}
@@ -51,15 +51,18 @@ rec("message-appended", { { "id", nat() }, { "kind", enum(KINDS) }, { "date", te
 rec("summary-completed", { { "job", text() }, { "attempt", nat() }, { "bytes", nat() },
                            { "sha256", hex64() }, { "text", text() } })
 rec("summary-failed", { { "job", text() }, { "attempt", nat() }, { "class", enum(CLASSES) } })
+rec("summary-uncertain", { { "job", text() }, { "attempt", nat() }, { "raw", list(one("content")) } })
 rec("exact-leaf", {})
 rec("joined", {})
 rec("summarized", { { "job", text() }, { "attempt", nat() } })
+rec("provisional", { { "job", text() } })
 rec("first-attempt", {})
 rec("retry-too-long", { { "bytes", nat() } })
 rec("retry-after-failure", { { "class", sym() } })
+rec("retry-seek-shorter", { { "bytes", nat() } })
 rec("retry-by-operator", {})
 rec("attempt", { { "n", nat() }, { "retry", one("first-attempt", "retry-too-long", "retry-after-failure",
-                                                "retry-by-operator") } })
+                                                "retry-seek-shorter", "retry-by-operator") } })
 rec("operator-retry", { { "job", text() } })
 rec("leaf-input", { { "message", nat() }, { "kind", enum(KINDS) }, { "sha256", hex64() } })
 rec("merge-input", { { "left", one("key") }, { "left_text", text() },
@@ -73,7 +76,7 @@ rec("submit-summary", { { "cmd", text() }, { "job", text() }, { "key", one("key"
 rec("emit-client-event", { { "cmd", text() },
                            { "event", one("view-changed", "memory-blocked", "input-rejected",
                                           "effect-uncertain") } })
-rec("node-committed", { { "key", one("key") }, { "origin", one("exact-leaf", "joined", "summarized") },
+rec("node-committed", { { "key", one("key") }, { "origin", one("exact-leaf", "joined", "summarized", "provisional") },
                         { "bytes", nat() } })
 rec("view-extended", { { "key", one("key") } })
 rec("view-merged", { { "key", one("key") } })
@@ -83,15 +86,17 @@ rec("job-created", { { "job", text() } })
 rec("job-retried", { { "job", text() }, { "previous", text() } })
 rec("job-blocked", { { "job", text() }, { "reason", text() } })
 rec("job-uncertain", { { "job", text() }, { "cmd", text() } })
+rec("candidate-kept", { { "job", text() }, { "attempt", nat() }, { "bytes", nat() } })
+rec("view-replaced", { { "key", one("key") } })
 rec("event-rejected", { { "reason", text() } })
 rec("completion-ignored", { { "job", text() }, { "reason", text() } })
 
 M.unions = {
-  event = { "message-appended", "summary-completed", "summary-failed", "operator-retry" },
+  event = { "message-appended", "summary-completed", "summary-failed", "summary-uncertain", "operator-retry" },
   command = { "submit-summary", "emit-client-event" },
   decision = { "node-committed", "view-extended", "view-merged", "batch-mode", "view-revision",
-               "job-created", "job-retried", "job-blocked", "job-uncertain", "event-rejected",
-               "completion-ignored" },
+               "job-created", "job-retried", "job-blocked", "job-uncertain", "candidate-kept",
+               "view-replaced", "event-rejected", "completion-ignored" },
 }
 
 -- ---------------------------------------------------------------- encode

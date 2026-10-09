@@ -53,11 +53,11 @@ When the journal is opened:
 
 * **Complete frames:** stream in manifest order. Only one bounded frame is
   resident. Global sequence continuity and every frame checksum are checked.
-* **Blob references:** message and summary event text is absent from physical
-  frames. The existing byte count and SHA-256 fields name the blob. Every
-  committed reference is size- and hash-verified before replay. Missing or
-  corrupted blobs refuse open with `repair required`; journal and blob bytes
-  are not changed.
+* **Blob references:** message text, summary output and the raw leaf carried
+  by `summary-uncertain` are absent from physical frames. Their byte count
+  and SHA-256 fields name the blob. Every committed reference is size- and
+  hash-verified before replay. Missing or corrupted blobs refuse open with
+  `repair required`; journal and blob bytes are not changed.
 * **Incomplete final frame:** treated as an uncommitted crash tail. This
   covers a partial header shorter than 64 bytes and a frame that ends before
   its checksum line. The tail bytes are written to a `journal.tail-*` file
@@ -145,8 +145,9 @@ When the store is opened:
   unsupported format version, or a configuration different from the one
   passed in. Changing the policy epoch needs an epoch event that does not
   exist yet.
-* The latest valid checkpoint restores exact core state, view, pending
-  commands and journal position. Only later transactions are replayed.
+* The latest valid checkpoint restores exact core state (including summary
+  round candidates and provisional lines), view, pending commands, dispatch
+  intents and journal position. Only later transactions are replayed.
 * Every replayed transaction runs through the same transition, and the
   commands, decisions, view hash and state hash must match exactly.
   Otherwise the open fails with `replay divergence at seq N: <what>`.

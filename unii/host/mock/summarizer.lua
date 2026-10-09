@@ -12,6 +12,7 @@
 --   fail = "retryable"  HTTP 503;  fail = "permanent"  HTTP 400
 --   transport = REASON  failed before send (e.g. "connect", "tls")
 --   uncertain = true    request sent, connection dropped mid-stream
+--   no_done = true      HTTP 200 completes but the stream never sends [DONE]
 --   stall = true        request sent, no answer until the timeout
 local codec = require("unii.host.codec")
 local json = require("unii.host.network.json")
@@ -49,12 +50,12 @@ local function pieces(s, n)
   return out
 end
 
-local function sse_events(text, n)
+local function sse_events(text, n, done)
   local out = {}
   for _, p in ipairs(pieces(text, n)) do
     out[#out + 1] = json.encode { choices = { { index = 0, delta = { content = p } } } }
   end
-  out[#out + 1] = "[DONE]"
+  if done then out[#out + 1] = "[DONE]" end
   return out
 end
 
@@ -87,7 +88,7 @@ function M.new(opts)
     else
       text = s.text or M.fake_text(job, cap)
     end
-    return { status = 200, sse = sse_events(text, chunk), drop_after = s.uncertain and 1 or nil }
+    return { status = 200, sse = sse_events(text, chunk, not s.no_done), drop_after = s.uncertain and 1 or nil }
   end
 
   local client = mocknet.client { server = server, max_inflight = 64, timeout_ms = opts.timeout_ms }

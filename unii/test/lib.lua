@@ -68,7 +68,23 @@ end
 function M.failed(cmd, class)
   return { _ = "summary-failed", job = cmd.job, attempt = cmd.attempt.n, class = class }
 end
+-- raw_text: the leaf's message text (leaf jobs); nil for merge jobs.
+function M.uncertain(cmd, raw_text)
+  local raw = {}
+  if raw_text then
+    raw[1] = { _ = "content", bytes = #raw_text, sha256 = sha256.hex(raw_text), text = raw_text }
+  end
+  return { _ = "summary-uncertain", job = cmd.job, attempt = cmd.attempt.n, raw = raw }
+end
 function M.tag(ev) return schema.encode("event", ev) end
+
+local function next_try(out, cmd)
+  for _, c in ipairs(out.commands) do
+    if c._ == "submit-summary" and c.key.level == cmd.key.level and c.key.index == cmd.key.index then
+      return c
+    end
+  end
+end
 
 -- Drive a Core directly (no journal): returns a small harness object.
 function M.engine(cfg)
@@ -86,6 +102,22 @@ function M.engine(cfg)
   function e:status() return C:status(self.state) end
   function e:invariants() return C:invariant_errors(self.state) end
   function e:take(i) return table.remove(self.pending, i or 1) end
+  -- Answer cmd and every following try of the same job in its round:
+  -- answer(c) returns the event for try c. Returns the last output and the
+  -- number of tries answered.
+  function e:round(cmd, answer)
+    local n = 0
+    while true do
+      for i, p in ipairs(self.pending) do if p.cmd == cmd.cmd then table.remove(self.pending, i); break end end
+      local out = self:apply(answer(cmd))
+      n = n + 1
+      local nxt = next_try(out, cmd)
+      if not nxt then return out, n end
+      cmd = nxt
+    end
+  end
+  -- Complete every try of cmd's round with the same text.
+  function e:finish(cmd, text) return self:round(cmd, function(c) return M.done(c, text) end) end
   return e
 end
 

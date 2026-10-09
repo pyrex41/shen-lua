@@ -37,23 +37,56 @@
   [leaf-source M _ _] -> (unii.leaf-key M)
   [merge-source A _ _] -> (unii.parent A))
 
+\\ A job is created for its first round: tries 1..MaxAttempts.
 (define unii.new-job
-  {unii.config --> unii.source --> number --> unii.retry --> unii.job}
-  Cf Src A Rt -> (let K (unii.source-key Src)
-                   [job (unii.make-job-id (unii.cf-epoch Cf) K A (unii.source-token Src))
-                        K A [queued Rt] Src]))
+  {unii.config --> unii.source --> unii.job}
+  Cf Src -> (unii.make-job Cf Src [progress 1 (unii.cf-max-attempts Cf) []] [first-attempt]))
 
-(define unii.retry-job
-  {unii.config --> unii.job --> unii.retry --> unii.job}
-  Cf J Rt -> (unii.new-job Cf (unii.job-source J) (+ 1 (unii.job-attempt J)) Rt))
+(define unii.make-job
+  {unii.config --> unii.source --> unii.progress --> unii.retry --> unii.job}
+  Cf Src [progress A E Bs] Rt ->
+    (let K (unii.source-key Src)
+      [job (unii.make-job-id (unii.cf-epoch Cf) K A (unii.source-token Src))
+           K [progress A E Bs] [queued Rt] Src]))
+
+\\ The next try in the same round, carrying the best candidate so far.
+(define unii.next-try
+  {unii.config --> unii.job --> (list unii.candidate) --> unii.retry --> unii.job}
+  Cf J Bs Rt -> (unii.make-job Cf (unii.job-source J)
+                  [progress (+ 1 (unii.job-attempt J)) (unii.job-round-end J) Bs] Rt))
+
+\\ An operator retry: a fresh round of MaxAttempts tries; the best candidate
+\\ found so far stays eligible.
+(define unii.fresh-round
+  {unii.config --> unii.job --> unii.job}
+  Cf J -> (let A (unii.job-attempt J)
+            (unii.make-job Cf (unii.job-source J)
+              [progress (+ A 1) (+ A (unii.cf-max-attempts Cf)) (unii.job-best J)]
+              [retry-by-operator])))
+
+(define unii.cand-job {unii.candidate --> string} [candidate X _ _ _] -> X)
+(define unii.cand-attempt {unii.candidate --> number} [candidate _ X _ _] -> X)
+(define unii.cand-bytes {unii.candidate --> number} [candidate _ _ X _] -> X)
+
+(define unii.source-kind
+  {unii.source --> symbol}
+  [leaf-source _ Kd _] -> Kd
+  _ -> (error "unii.source-kind: not a leaf source"))
+
+\\ Shortest wins; on equal length the incumbent (the earlier try) stays.
+(define unii.better-candidate
+  {(list unii.candidate) --> unii.candidate --> (list unii.candidate)}
+  [] C -> [C]
+  [[candidate J A B T]] [candidate _ _ B2 _] -> [[candidate J A B T]] where (<= B B2)
+  _ C -> [C])
 
 (define unii.block-job
   {unii.job --> string --> unii.job}
-  [job Id K A _ Src] R -> [job Id K A [blocked R] Src])
+  [job Id K P _ Src] R -> [job Id K P [blocked R] Src])
 
 (define unii.uncertain-job
   {unii.job --> string --> unii.job}
-  [job Id K A _ Src] C -> [job Id K A [uncertain C] Src])
+  [job Id K P _ Src] C -> [job Id K P [uncertain C] Src])
 
 \\ ------------------------------------------------------------ ordering
 
@@ -146,7 +179,7 @@
 
 (define unii.start-job
   {unii.job --> string --> (list unii.node) --> (unii.job * unii.command)}
-  [job Id K A [queued Rt] Src] C Nodes ->
-    (@p [job Id K A [dispatched C] Src]
+  [job Id K [progress A E Bs] [queued Rt] Src] C Nodes ->
+    (@p [job Id K [progress A E Bs] [dispatched C] Src]
         [submit-summary C Id K [attempt A Rt] (unii.summary-input Src Nodes)])
   J _ _ -> (error "unii.start-job: job ~A is not queued" (unii.job-id J)))

@@ -139,7 +139,85 @@ local function side_by_side(opts, steps, label)
   end
 end
 
+-- One 1,000-byte leaf job driven through an outcome sequence by the engine,
+-- with the same applicability rules as oracle.summary_rounds: try outcomes
+-- only while a try is in flight, operator retries only when blocked or
+-- uncertain.
+local function rounds_engine(outcomes, cap, round_size)
+  local e = T.engine { leaf_cap = cap, max_attempts = round_size }
+  local raw = ("r"):rep(1000)
+  local function first(out)
+    for _, c in ipairs(out.commands) do if c._ == "submit-summary" then return c end end
+  end
+  local cmd = first(e:apply(T.msg(0, "user", raw)))
+  local texts, committed = {}, nil
+  for _, o in ipairs(outcomes) do
+    local out
+    if cmd and o.kind ~= "operator" then
+      if o.kind == "done" then
+        local text = string.char(96 + cmd.attempt.n % 26 + 1):rep(o.bytes)
+        texts[cmd.attempt.n] = text
+        out = e:apply(T.done(cmd, text))
+      elseif o.kind == "uncertain" then
+        out = e:apply(T.uncertain(cmd, raw))
+      else
+        out = e:apply(T.failed(cmd, o.kind))
+      end
+      local d = T.has_decision(out, "node-committed")
+      if d and d.origin._ == "summarized" then committed = d end
+      cmd = first(out)
+    elseif not cmd and o.kind == "operator" and not committed then
+      cmd = first(e:apply({ _ = "operator-retry", job = e.C:stuck_jobs(e.state)[1].job }))
+    end
+  end
+  local r = { texts = texts, raw = raw, render = e.C:render(e.state), errors = #e:invariants() }
+  if committed then
+    r.status, r.attempt, r.bytes = "committed", committed.origin.attempt, committed.bytes
+  elseif cmd then
+    r.status, r.attempt = "running", cmd.attempt.n
+  else
+    r.status = e.C:stuck_jobs(e.state)[1].state
+  end
+  return r
+end
+
 return {
+  { "summary rounds side by side: 2,000 random outcome sequences (shortest fit, ties, uncertain, operator)", function()
+    local seed = 512
+    local function rnd(n) seed = (seed * 48271) % 2147483647; return seed % n end
+    local KINDS = { "done", "done", "done", "done", "retryable", "permanent", "uncertain", "operator", "operator" }
+    local seen = {}
+    for case = 1, 2000 do
+      local cap, size = 512, 1 + rnd(5)
+      local outcomes = {}
+      for i = 1, 1 + rnd(16) do
+        local k = KINDS[rnd(#KINDS) + 1]
+        -- a small byte alphabet straddling the cap makes ties and over-cap results common
+        local b = ({ 1, 120, 120, 300, 511, 512, 512, 513, 600 })[rnd(9) + 1]
+        outcomes[i] = { kind = k, bytes = b }
+      end
+      local o = oracle.summary_rounds(outcomes, cap, size)
+      local e = rounds_engine(outcomes, cap, size)
+      local where = "case " .. case
+      T.eq(e.status, o.status, where .. " status")
+      seen[o.status] = (seen[o.status] or 0) + 1
+      T.eq(e.errors, 0, where .. " invariants")
+      if o.status == "committed" or o.status == "running" then T.eq(e.attempt, o.attempt, where .. " attempt") end
+      if o.status == "committed" then
+        T.eq(e.bytes, o.bytes, where .. " bytes")
+        T.eq(e.render, "0+1|" .. e.texts[o.attempt] .. "\n", where .. " rendered summary")
+      elseif o.status == "uncertain" or o.status == "blocked" then
+        local provisional = o.best and e.texts[o.best.attempt] or ("user: " .. e.raw)
+        if o.status == "uncertain" or e.render ~= "" then
+          T.eq(e.render, "0+1|" .. provisional .. "\n", where .. " provisional line")
+        end
+      end
+    end
+    for _, s in ipairs { "committed", "running", "blocked", "uncertain" } do
+      T.ok((seen[s] or 0) > 50, "sequences ending " .. s .. ": " .. tostring(seen[s]))
+    end
+  end },
+
   { "rollback-20001.trace: engine merges and views equal the oracle at every step", function()
     local C = T.core()
     local rows = lines_of(FIX .. "rollback-20001.trace", "R")
