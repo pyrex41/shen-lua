@@ -78,7 +78,7 @@ The outcome rules, which the mock follows:
 | Adapter result | Class |
 |---|---|
 | `succeeded`, 2xx, stream reached `[DONE]` | success |
-| `succeeded`, 2xx, stream ended without `[DONE]` | `retryable` |
+| `succeeded`, 2xx, stream ended without `[DONE]` | `uncertain` (decision R5) |
 | `succeeded`, 429 or 5xx | `retryable` |
 | `succeeded`, any other status | `permanent` |
 | `failed`: `connect`, `dns`, `timeout` (before send), `curl` | `retryable` |
@@ -90,8 +90,11 @@ The outcome rules, which the mock follows:
 A successful stream whose text is empty or not valid UTF-8 is reported as
 `permanent`.
 
-`uncertain` maps onto the job state `[uncertain CmdId]` (`commands.md`,
-"Effect states"). The job is never re-sent automatically. Three things hold
+For an `uncertain` class the supervisor sends `summary-uncertain` instead of
+`summary-failed`, with the leaf's message as raw content for a leaf job
+(`events.md`). It maps onto the job state `[uncertain CmdId]` and, for a
+leaf, a provisional line (`commands.md`, "Effect states"). The job is never
+re-sent automatically. Three things hold
 that line:
 
 * the adapter makes exactly one attempt;
@@ -119,7 +122,8 @@ The request carries `X-Unii-Job: <job id>`.
 
 The prompt is **provisional** (`PROMPT_VERSION = "provisional-0"`). It has a
 system message that states the byte cap, plus a "be shorter" hint after
-`retry-too-long`. For a leaf, the user message is `kind: text`. For a merge,
+`retry-too-long` and a "best so far is N bytes" hint after
+`retry-seek-shorter`. For a leaf, the user message is `kind: text`. For a merge,
 it is the two child texts. `max_tokens` is set to the cap. The plan's
 summarization prompt (§6, §8) is not specified yet.
 
@@ -127,7 +131,8 @@ summarization prompt (§6, §8) is not specified yet.
 
 * **Mock transport and MOCK summarizer** (`test_network_mock.lua`):
   * outcome rules and classification;
-  * retries, blocking and uncertain parking through the supervisor;
+  * rounds of tries, blocking and uncertain parking through the
+    supervisor, including a 2xx stream without `[DONE]`;
   * restart recovery.
 * **Real adapter through the provider, supervisor and CLI**
   (`test_network_real.lua`):

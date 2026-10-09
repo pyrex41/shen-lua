@@ -16,6 +16,7 @@ provenance are documented in `unii/eval/oracle/README.md`.
 | Side by side | The oracle's `hysteresis_append` / `hysteresis_resume` against the engine policy at every step: threshold-equality cases, stalled batches resumed when parents are published, and 40 random configurations with hostile text and partial parent availability. |
 | Addresses and keys | Zoom and key validity at and around the 2^31 − 1 ceiling |
 | Due ordering | 6,000 pairs, including T near 2^31 and levels up to 30, against the oracle's exact cross-products |
+| Summary rounds | 2,000 random outcome sequences (round sizes 1 to 5, result lengths straddling the 512-byte cap, retryable, permanent and uncertain outcomes, operator retries) drive one 1,000-byte leaf job through the engine and through `oracle.summary_rounds`. The final state must match: committed (same try and bytes, and the rendered line is that try's text), still running (same try), blocked or uncertain (the provisional line is the best result, else the raw message). |
 | Canonical text | 3,000 texts containing every line-break form, controls, `\|`, `%`, multibyte characters and long ranges (the engine splits long text into halves when rendering), against `oracle.render_line` |
 
 `luajit unii/eval/oracle/spec.lua` runs the oracle's own checks, and

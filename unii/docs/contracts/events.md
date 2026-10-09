@@ -60,13 +60,16 @@ The core handles it as follows:
   covers duplicate, stale and replayed deliveries.
 * `bytes` must be a positive natural and `sha256` must be hex64. Otherwise
   the event is rejected.
-* If `bytes <= leaf_cap`, the node is committed with origin
-  `[summarized JobId Attempt]`. The job is removed, and the parent is built
-  if the node's sibling is already built.
-* If `bytes > leaf_cap`, the job is retried as attempt + 1 with
-  `[retry-too-long Bytes]`. Once `max_attempts` (5) attempts are used, the
-  job is blocked and a `memory-blocked` client event is emitted. The core
-  never truncates a summary.
+* If `bytes <= leaf_cap` and the result is strictly shorter than the
+  job's current candidate (or there is none), it becomes the candidate
+  (`candidate-kept`).
+* A result with `bytes > leaf_cap` is never accepted. The core never
+  truncates a summary.
+* If the round has more tries, the next one is queued with its hint
+  (`commands.md`, "Rounds of tries"). After the last try, the candidate is
+  committed with origin `[summarized JobId Attempt]` of the winning try and
+  the parent is built if its sibling is already built. With no candidate,
+  the job is blocked and a `memory-blocked` client event is emitted.
 
 ## summary-failed
 
@@ -74,14 +77,29 @@ The core handles it as follows:
 [summary-failed JobId Attempt Class]
 ```
 
-`class` is `retryable`, `permanent` or `uncertain`. The same ignore rules
-apply as for completions. A `retryable` failure retries with
-`[retry-after-failure retryable]` until `max_attempts` is used up, then
-blocks the job. A `permanent` failure blocks the job immediately. An
-`uncertain` failure parks the job as `[uncertain CmdId]` and emits
-`effect-uncertain`; it is never retried automatically (`commands.md`,
-"Effect states"). `host/models.lua` maps adapter results to these classes
-(`network.md`).
+`class` is `retryable` or `permanent`. The same ignore rules apply as for
+completions. A `retryable` failure moves on to the next try of the round,
+hinted `[retry-after-failure retryable]`. A
+`permanent` failure ends the round at once: the candidate is committed if
+there is one, otherwise the job blocks. `host/models.lua` maps adapter
+results to these classes (`network.md`). An uncertain outcome is not a
+failure class; it has its own event.
+
+## summary-uncertain
+
+```
+[summary-uncertain JobId Attempt Raw]
+Raw = [] | [[content Bytes Sha256 Text]]
+```
+
+The host sends this when it cannot know whether the provider received the
+request (`commands.md`, "Effect states"). The same ignore rules apply as
+for completions. For a leaf job, `Raw` must be exactly the leaf's message,
+matched by bytes and SHA-256 and at most `chunk_max` bytes; for a merge job
+it must be empty. Otherwise the event is rejected with
+`raw content does not match the job's source`. The job is parked as
+`[uncertain CmdId]`, a leaf gets a provisional line, and the job is never
+retried automatically.
 
 ## operator-retry
 
@@ -89,11 +107,13 @@ blocks the job. A `permanent` failure blocks the job immediately. An
 [operator-retry JobId]
 ```
 
-An operator grants one more attempt to a job that is blocked or uncertain.
-The job is requeued as attempt + 1 with `[retry-by-operator]`, regardless
-of `max_attempts`. The event is rejected when the job is unknown or already
-completed, when it is neither blocked nor uncertain, and when its attempt
-number has reached 2^31 − 1.
+An operator grants one fresh round of `max_attempts` tries to a job that
+is blocked or uncertain (decision R4). The job is requeued as attempt + 1
+with `[retry-by-operator]`, and its round ends at attempt + `max_attempts`.
+If that round ends with no result within the cap, the job blocks again. The
+event is rejected when the job is unknown or already completed, when it is
+neither blocked nor uncertain, and when the new round would pass attempt
+2^31 − 1.
 
 ## Rejection
 

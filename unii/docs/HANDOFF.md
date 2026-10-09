@@ -96,14 +96,14 @@ test both enforce this against the pinned commit.
 
 | Document | Covers |
 |---|---|
-| `contracts/events.md` | `message-appended`, `summary-completed`, `summary-failed`, `operator-retry`, rejection, the settle order |
-| `contracts/commands.md` | identifiers, `submit-summary`, effect states (including uncertain), client events, decisions, dispatch order |
+| `contracts/events.md` | `message-appended`, `summary-completed`, `summary-failed`, `summary-uncertain`, `operator-retry`, rejection, the settle order |
+| `contracts/commands.md` | identifiers, `submit-summary`, rounds of tries, effect states (including uncertain and provisional lines), client events, decisions, dispatch order |
 | `contracts/numeric.md` | bounds, exact due-score comparison, line-count policy and byte-hysteresis policy |
 | `contracts/codec.md` | tagged values, records, storage encoding, state hash |
 | `contracts/storage.md` | journal frame, recovery, transaction payloads, dispatch records, commit order, replay |
 | `contracts/network.md` | client interface shared by the real adapter and the mock, outcome classification, provider interface |
 | `contracts/oracle.md` | the oracle's layout and how `test_oracle` diffs against it |
-| `contracts/decisions.md` | engine/oracle reconciliation, network integration decisions, open questions for Reuben |
+| `contracts/decisions.md` | engine/oracle reconciliation, Reuben's decisions R1–R6, network integration decisions |
 
 ## Integration status
 
@@ -112,9 +112,10 @@ unchanged, except that it now exports `IS_MOCK = false`.
 
 * `host/providers/chat_completions.lua` drives it.
 * `host/models.lua` maps its outcomes to failure classes.
-* The adapter's `uncertain` outcome becomes the core's `[uncertain CmdId]`
-  job state, which is never re-sent automatically (`commands.md`, "Effect
-  states").
+* The adapter's `uncertain` outcome, and a 2xx stream without `[DONE]`,
+  become a `summary-uncertain` event: the job is parked as
+  `[uncertain CmdId]`, never re-sent automatically, and a leaf renders a
+  provisional line meanwhile (`commands.md`, "Effect states").
 * The supervisor journals a dispatch record before each send, so a restart
   turns in-flight commands into `uncertain` instead of resending them.
 * The mock transport implements the same interface over a simulated clock.
@@ -123,7 +124,8 @@ unchanged, except that it now exports `IS_MOCK = false`.
 
 * the 20,001-step rollback trace;
 * the byte-hysteresis trace;
-* the oracle module, side by side.
+* the oracle module, side by side, including `oracle.summary_rounds` on
+  2,000 random outcome sequences for Reuben's round rules.
 
 Three disagreements were found and resolved; see `contracts/decisions.md`.
 The oracle's canonical-text function and the byte-hysteresis fixture were
@@ -137,7 +139,7 @@ ordinary payload, so a new backend needs nothing extra.
 ## Acceptance gates and how each was verified
 
 Every row is an automated test in `luajit unii/test/run.lua`. The last run
-passed 84 tests, with 0 failed and 0 skipped. `--with-upstream` adds the
+passed 93 tests, with 0 failed and 0 skipped. `--with-upstream` adds the
 pinned port specs (1,088 checks across 22 specs) and the kernel suite
 (134 of 134).
 
@@ -145,7 +147,9 @@ Separately:
 
 * `luajit unii/test/network/run.lua` (the adapter suite) passes 18 and
   skips 1, its real-provider smoke test, because no API key is set.
-* `luajit unii/eval/oracle/spec.lua` passes 13 of 13.
+* `luajit unii/eval/oracle/spec.lua` passes 15 of 15.
+* `luajit unii/eval/oracle/generate_fixtures.lua --check` reports the
+  checked-in fixtures unchanged.
 
 ### Phase 0
 
@@ -171,7 +175,7 @@ Separately:
 | Gist small rollback examples | `test_view`: the t = 0..9 push table and the worked T = 10 example |
 | Merge order equals rollback push over 20,001 steps, with a defined line-count budget | `test_view`: with budget = length of the push list, equal at all 20,001 steps (the first-message due score matches only 481 of them). `test_oracle`: equal to the oracle's golden `rollback-20001.trace` at every row. |
 | Byte-budget hysteresis, tested separately | `test_hysteresis`: an independent model is checked on every transition, at 1,500/3,000 and at the default 64,000/128,000 (the trace crosses 128,000 and comes back down to at most 64,000); batch mode stalls while parents are missing. `test_oracle`: equal to the oracle's `byte-hysteresis.trace` at all 700 steps, and to the oracle module on 40 random configurations. |
-| Job dependencies, retries, deterministic ids | `test_transition`: lead window and inflight cap; parents only after both children; retry on over-cap output up to 5 attempts, then blocked with `memory-blocked`; permanent failure blocks; uncertain parks the job until an operator retry; duplicate, stale and unknown completions publish nothing |
+| Job dependencies, retries, deterministic ids | `test_transition`: lead window and inflight cap; parents only after both children; a round of 5 tries keeps the shortest summary within the cap (earliest try on ties) and never accepts an over-cap one; a round with none blocks with `memory-blocked`; a permanent failure ends the round; uncertain parks the job with a provisional line until an operator retry grants a fresh round; merges proceed around an uncertain merge job; duplicate, stale and unknown completions publish nothing |
 | Canonical LF rendering with byte accounting | `test_tree` and `test_oracle` (3,000 random lines equal the oracle's rendering; line bytes equal rendered bytes); `Core:render` checks rendered bytes against the core's count on every render |
 
 ### Milestone
@@ -210,7 +214,7 @@ transactions, foreign bundles and configuration changes.
   * nothing is escaped.
 
   This is reconciled with the oracle (`contracts/decisions.md`, items 5
-  and 7) and still open for Reuben.
+  and 7) and confirmed by Reuben (R3, R6).
 * **Two policies.** The line-count policy (`merge-keys-to-count`) exists
   only for comparison with the gist and oracle. The live view uses byte
   hysteresis.
@@ -219,13 +223,17 @@ transactions, foreign bundles and configuration changes.
   example, at the end of the milestone the view is 4 lines (`0+32`,
   `32+16`, `48+8`, `56+4`) and no two of them are siblings. This matches
   plan §7.
-* **Retries.** Retries are requeued immediately with the reason in
-  `attempt.retry`. The first summary that fits the cap is accepted. The
-  plan's "accept the shortest valid result" and timer backoff are not
-  implemented.
-* **Uncertain effects.** A request that may have reached the provider is
-  never re-sent automatically. Only `operator-retry` requeues it, and each
-  operator retry grants one attempt past `max_attempts`.
+* **Rounds (R1).** Every summary job runs a round of 5 tries and commits
+  the shortest result within the 512-byte cap, earliest try on ties. Over-
+  cap results are never accepted. Tries are requeued immediately with a
+  hint in `attempt.retry`; timer backoff is not implemented. This costs up
+  to 5 provider calls per summary.
+* **Uncertain effects (R2, R4, R5).** A request that may have reached the
+  provider is never re-sent automatically. A leaf meanwhile renders a
+  provisional line (its best candidate, else its raw message, which may be
+  over 512 bytes), so coverage and merges continue. Only `operator-retry`
+  requeues it, granting one fresh round of 5 tries; if none fits, the job
+  blocks again.
 * **Merge input.** A merge job receives the two children's exact texts. A
   leaf job receives the message. The plan's "bounded preceding context" is
   not supplied yet, so a job can never see a later message.

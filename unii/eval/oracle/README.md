@@ -36,6 +36,15 @@ luajit unii/eval/oracle/generate_fixtures.lua
   greater than 128,000 bytes and remains in it until rendering is at most
   64,000 bytes. If no built parent is eligible, batch mode remains active.
   `hysteresis_resume` continues the same batch when a parent is published.
+- `summary_rounds(outcomes, cap, round_size)` models one summary job's
+  rounds of tries. Outcomes are `done` (with `bytes`), `retryable`,
+  `permanent`, `uncertain` and `operator`. A round keeps the shortest `done`
+  result at or below `cap`, earliest try on ties, and never accepts one
+  above it. It ends after `round_size` tries or at a permanent failure,
+  committing the best result or blocking. `uncertain` parks the job;
+  `operator` on a blocked or uncertain job grants a fresh round and keeps
+  the best result. Outcomes that do not apply in the current state are
+  ignored.
 
 All accepted numeric values are integral Lua numbers bounded by
 `2^31-1`. Although a score cross-product can be as large as roughly `2^61`,
@@ -113,8 +122,8 @@ Taelin's UniiChat gist:
    stable node-key tie-break is lexicographic `(parent.level,parent.index)`.
 4. The plan does not define delimiter escaping. The policy above replaced
    this oracle's original percent-encoding when it was reconciled with the
-   engine. That choice is flagged for Reuben in
-   `unii/docs/contracts/decisions.md`.
+   engine. Reuben confirmed it (decision R3 in
+   `unii/docs/contracts/decisions.md`).
 5. The rollback comparison's “matching line-count budget” is the rollback
    list length after each push, not a byte estimate. Byte hysteresis has its
    own trace.
