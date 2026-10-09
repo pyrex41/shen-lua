@@ -169,6 +169,10 @@ local function index_txn(idx, txn, seq, refs)
   elseif ev and (ev[1].v == "summary-completed" or ev[1].v == "summary-failed") then
     idx.jobs[ev[2].v] = { status = ev[1].v == "summary-completed" and "completed" or "failed", seq = seq }
   end
+  if txn.v.kind and txn.v.kind.t == "sym" and txn.v.kind.v == "dispatch"
+      and txn.v.job and txn.v.job.t == "text" then
+    idx.jobs[txn.v.job.v] = { status = "dispatched", seq = seq }
+  end
   local decisions = txn.v.decisions
   if decisions and decisions.t == "list" then
     for _, d in ipairs(decisions.v) do
@@ -177,6 +181,8 @@ local function index_txn(idx, txn, seq, refs)
         idx.nodes[int(key[2]) .. "/" .. int(key[3])] = seq
       elseif d.t == "list" and d.v[1] and d.v[1].v == "job-blocked" then
         idx.jobs[d.v[2].v] = { status = "blocked", seq = seq }
+      elseif d.t == "list" and d.v[1] and d.v[1].v == "job-uncertain" then
+        idx.jobs[d.v[2].v] = { status = "uncertain", seq = seq }
       end
     end
   end

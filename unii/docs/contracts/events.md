@@ -13,7 +13,7 @@ them against `host/schema.lua`, encodes them as tagged values
 constructor symbol. Field order below is the positional order in Shen. The
 Shen types are in `core/types.shen`; the two files must agree.
 
-Phase 1 implements three events. The plan's other events (turns, tools,
+Phase 1 implements four events. The plan's other events (turns, tools,
 timers, recovery, epoch changes) are not implemented.
 
 ## message-appended
@@ -74,10 +74,26 @@ The core handles it as follows:
 [summary-failed JobId Attempt Class]
 ```
 
-`class` is `retryable` or `permanent`. The same ignore rules apply as for
-completions. A `retryable` failure retries with `[retry-after-failure
-retryable]` until `max_attempts` is used up, then blocks the job. A
-`permanent` failure blocks the job immediately.
+`class` is `retryable`, `permanent` or `uncertain`. The same ignore rules
+apply as for completions. A `retryable` failure retries with
+`[retry-after-failure retryable]` until `max_attempts` is used up, then
+blocks the job. A `permanent` failure blocks the job immediately. An
+`uncertain` failure parks the job as `[uncertain CmdId]` and emits
+`effect-uncertain`; it is never retried automatically (`commands.md`,
+"Effect states"). `host/models.lua` maps adapter results to these classes
+(`network.md`).
+
+## operator-retry
+
+```
+[operator-retry JobId]
+```
+
+An operator grants one more attempt to a job that is blocked or uncertain.
+The job is requeued as attempt + 1 with `[retry-by-operator]`, regardless
+of `max_attempts`. The event is rejected when the job is unknown or already
+completed, when it is neither blocked nor uncertain, and when its attempt
+number has reached 2^31 − 1.
 
 ## Rejection
 

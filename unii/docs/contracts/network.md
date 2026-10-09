@@ -1,103 +1,149 @@
-# Network client contract (for `unii/host/network/`)
+# Network contract
 
-The real HTTP adapter (libcurl multi interface, TLS, streaming,
-cancellation) is being built separately in `unii/host/network/`. This
-branch does not contain it. This branch contains:
+Two transports share one Lua interface:
 
-* a MOCK transport, `host/mock/network.lua`, which implements the contract
-  below with a scripted in-process server and no sockets;
-* a MOCK summarizer provider, `host/mock/summarizer.lua`, which streams
-  fake summaries through the mock transport.
+* **Real:** `require("unii.host.network")` (`unii/host/network/`, from PR
+  #75). This is a libcurl multi binding through LuaJIT FFI. It has TLS
+  verification on by default, SSE streaming, cancellation, and redacted
+  logging. `IS_MOCK = false`. Its README covers TLS, logging, limits and
+  OpenResty.
+* **Mock:** `require("unii.host.mock.network")`, with `IS_MOCK = true`. It
+  has no sockets and no wall clock. A scripted in-process server answers
+  each request, and each `tick` advances a simulated clock. This is the
+  default for tests and for the CLI.
 
-`test_network_mock.lua` pins the semantics. Nothing in this branch has
-talked to a real endpoint.
+A summarizer provider (`host/providers/chat_completions.lua`) takes either
+client by injection. The MOCK summarizer (`host/mock/summarizer.lua`) is
+that same provider over the mock transport, with a fake model server that
+streams deterministic fake summaries.
 
-## Module shape
-
-`require("unii.host.network")` (that is, `unii/host/network/init.lua`)
-should return:
+## Client interface
 
 ```lua
-M.IS_MOCK = false
-M.new(opts) -> client
-  opts.max_buffer_bytes   default per-request response bound (default 1 MiB)
-  opts.ca_file / ca_path  TLS trust; verification on by default and never silently disabled
-  opts.user_agent         optional
+client = network.client(opts)       -- real: max_inflight (9), timeout_ms, connect_timeout_ms,
+                                    --       max_body_bytes, user_agent, log
+                                    -- mock: server, max_inflight (9), timeout_ms, max_body_bytes, tick_ms
+handle, err = client:request(spec)  -- nil, "inflight cap reached (N)" when full; never queues
+handle, err = client:chat_stream{ id, url, api_key, payload, timeout_ms, headers,
+                                  on_delta, on_event, on_done }
+client:tick(wait_ms)  -> inflight   -- the only place transfers progress; not re-entrant
+client:inflight()     -> n
+client:close()                      -- cancels everything still running
 
-client:request(spec) -> handle
-client:step(timeout_ms) -> number of callbacks fired   -- drive I/O (curl_multi_poll + perform)
-client:pending()        -> number of unfinished requests
-client:close()          -- cancels everything still running; later request() raises
-
-handle:cancel()         -- idempotent
+handle:cancel()   -- idempotent; takes effect on the next tick
+handle:done()     -- true once handle.result is set
+handle.result     -- see below
 ```
 
-The request spec:
+Request fields: `id` (the core's command id), `method`, `url`, `headers`,
+`body` (a string or a JSON table), `timeout_ms`, `max_body_bytes`,
+`on_chunk(bytes, handle)`, `on_event(sse_event, handle)`,
+`on_delta(text, decoded, handle)`, and `on_done(handle)`. `on_done` fires
+for the SSE `[DONE]` sentinel, not for the end of the transport. Callbacks
+run only inside `tick`. They may cancel handles, but they must not call
+`tick`.
+
+`chat_stream` posts `payload` with `stream = true`,
+`Content-Type: application/json` and `Accept: text/event-stream`. When
+`api_key` is set it adds `Authorization: Bearer`. The key lives only in the
+request's header list. The adapter never logs it, and the supervisor never
+journals it.
+
+## Result
 
 | Field | Meaning |
 |---|---|
-| `id` | string, the core's command id (`c<N>`). A second active request with the same id raises `duplicate active request id`. |
-| `method`, `url`, `headers` (array of `"Name: value"`), `body` | the request |
-| `deadline_ms` | wall-clock deadline for the whole request. The mock uses `deadline_steps` instead and counts `step()` calls. |
-| `max_response_bytes` | response bound for this request; overrides `opts.max_buffer_bytes` |
-| `on_headers(http_status, headers)` | at most once, before any chunk |
-| `on_chunk(bytes)` | body bytes in arrival order; never after `on_done` |
-| `on_done(result)` | exactly once per request |
+| `outcome` | `succeeded`, `failed`, `uncertain` or `cancelled` |
+| `reason` | `complete`, `cancelled`, `timeout`, `tls`, `connect`, `dns`, `dropped`, `body_limit`, `sse_limit`, `callback`, `bad_url`, `protocol` or `curl` |
+| `status` | HTTP status, when a response line arrived |
+| `sent` | true once HTTP request bytes were handed to the socket. TLS handshake bytes do not count |
+| `attempts` | always 1. Nothing in either transport retries |
+| `bytes_received`, `headers`, `body`, `id`, `curl_code`, `curl_error` | details. `curl_error` is redacted |
 
-`result` has these fields:
+The outcome rules, which the mock follows:
 
-* `status`: one of `"ok"`, `"cancelled"`, `"timeout"`, `"error"` (transport
-  or TLS failure) or `"overflow"` (the next chunk would exceed the bound;
-  that chunk is not delivered).
-* `http_status`: when `status` is `"ok"`.
-* `bytes`: body bytes delivered so far.
-* `error`: a message, when there is one.
+* **`succeeded`:** a complete HTTP response. A 4xx or 5xx response is still
+  `succeeded`.
+* **`failed`:** the request was never transmitted (`connect`, `dns`,
+  `tls`, `bad_url`, `protocol`, or `timeout` with `sent == false`), or this
+  process aborted locally (`body_limit`, `sse_limit`, `callback`).
+* **`uncertain`:** the request was sent and the transfer did not finish
+  (`dropped`, or `timeout` with `sent == true`). The server may have acted
+  on it.
+* **`cancelled`:** the caller cancelled. `sent` tells whether the provider
+  may already have the request.
 
-## Required semantics
+## Classification (`host/models.lua`)
 
-The mock tests check these, and the real adapter should be held to the same
-scenarios against a local HTTP server:
-
-1. Chunks are delivered in order, followed by exactly one `on_done`.
-2. `cancel()` during streaming stops further chunks. `on_done` then fires
-   once with `"cancelled"`, and calling `cancel()` again, or after
-   completion, does nothing.
-3. Deadlines, transport errors and the response bound each produce exactly
-   one `on_done` with the matching status. No chunk past the bound is
-   delivered.
-4. Callbacks run only inside `step()` (or inside `cancel()` / `close()` for
-   their own `on_done`), on the caller's thread. The supervisor depends on
-   this: callbacks only push events into its inbox and never touch core
-   state.
-5. HTTP status is not a transport outcome. A 4xx or 5xx response with a body
-   completes as `"ok"` with `http_status` set, and the provider decides what
-   it means.
-
-## Failure classification (`host/models.lua`)
-
-| Transport result | Class |
+| Adapter result | Class |
 |---|---|
-| ok with 2xx | success |
-| ok with 429 or 5xx | `retryable` |
-| ok with another status | `permanent` |
-| timeout, error or cancelled | `retryable` |
-| overflow or anything unknown | `permanent` |
+| `succeeded`, 2xx, stream reached `[DONE]` | success |
+| `succeeded`, 2xx, stream ended without `[DONE]` | `retryable` |
+| `succeeded`, 429 or 5xx | `retryable` |
+| `succeeded`, any other status | `permanent` |
+| `failed`: `connect`, `dns`, `timeout` (before send), `curl` | `retryable` |
+| `failed`: `tls`, `bad_url`, `protocol`, `body_limit`, `sse_limit`, `callback` | `permanent` |
+| `uncertain` | `uncertain` |
+| `cancelled` with `sent` | `uncertain` |
+| `cancelled` without `sent` | `retryable` |
 
-## Providers
+A successful stream whose text is empty or not valid UTF-8 is reported as
+`permanent`.
 
-A provider turns a `submit-summary` command into one request and reports
-exactly one outcome:
+`uncertain` maps onto the job state `[uncertain CmdId]` (`commands.md`,
+"Effect states"). The job is never re-sent automatically. Three things hold
+that line:
+
+* the adapter makes exactly one attempt;
+* the provider reports one outcome per command;
+* the core requeues an uncertain job only on `operator-retry`.
+
+A crash between sending and journaling the outcome is covered by the
+supervisor's dispatch records (`storage.md`).
+
+## Provider interface
 
 ```lua
-provider:start(job, on_outcome) -> handle
--- job = { cmd, job, key, attempt, input, source }
+provider = chat_completions.new{ client, url, model, api_key, cap, timeout_ms, max_body_bytes, name, is_mock }
+provider:start(job, on_outcome)  -- job = { cmd, job, key, attempt, input, source }
+provider:step(wait_ms)           -- launches waiting requests, ticks the client, reports finished ones
+provider:pending()               -- started or waiting, not yet reported
 on_outcome{ ok = true, text = "..." }
-on_outcome{ ok = false, class = "retryable" | "permanent", error = "..." }
-provider:step()
-provider:pending()
-provider.is_mock  -- must be false for a real provider
+on_outcome{ ok = false, class = "retryable" | "permanent" | "uncertain", error = "..." }
 ```
 
-The supervisor turns outcomes into `summary-completed` and `summary-failed`
-events, measures UTF-8 bytes and SHA-256 itself, and journals them. Prompt
-construction for real summaries (plan §6, §8) is not specified yet.
+If the client refuses a request because the inflight cap is full, the
+provider holds it locally. It costs no attempt, and the provider launches
+it on a later `step`. Any other refusal, such as a bad URL, is `permanent`.
+The request carries `X-Unii-Job: <job id>`.
+
+The prompt is **provisional** (`PROMPT_VERSION = "provisional-0"`). It has a
+system message that states the byte cap, plus a "be shorter" hint after
+`retry-too-long`. For a leaf, the user message is `kind: text`. For a merge,
+it is the two child texts. `max_tokens` is set to the cap. The plan's
+summarization prompt (§6, §8) is not specified yet.
+
+## What has been exercised
+
+* **Mock transport and MOCK summarizer** (`test_network_mock.lua`):
+  * outcome rules and classification;
+  * retries, blocking and uncertain parking through the supervisor;
+  * restart recovery.
+* **Real adapter through the provider, supervisor and CLI**
+  (`test_network_real.lua`):
+  * runs against the adapter's local test server
+    (`unii/test/network/mock_server.py`, 127.0.0.1, plain HTTP);
+  * a streamed completion is committed as the summary;
+  * a connection dropped after send becomes `uncertain`, and the server
+    sees exactly one request;
+  * `unii retry` recovers the job;
+  * the API key is never printed or journaled;
+  * it skips when libcurl or python3 is missing.
+* **The adapter's own suite** (`luajit unii/test/network/run.lua`):
+  * TLS verification, cancellation, timeouts, the inflight cap and
+    redaction;
+  * its real-provider smoke test skips without an API key.
+
+No real model provider has been called from this branch. `--network real`
+with a provider URL and key is wired, but it is unverified against a live
+provider.

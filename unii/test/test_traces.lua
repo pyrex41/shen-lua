@@ -15,21 +15,19 @@ local function rng(seed)
   return function(n) x = (16807 * x) % 2147483647; return x % n end
 end
 
-local function collapse(s) return (s:gsub("[\r\n]", " ")) end
+local collapse = require("unii.eval.oracle.oracle").canonical_text
 local function kstr(k) return k.level .. "/" .. k.index end
 
 local function parse_view(text)
   local lines = {}
   for line in text:gmatch("[^\n]*\n") do
-    if line ~= "<chat>\n" and line ~= "</chat>\n" then
-      local first, count, body = line:match("^(%d+)%+(%d+)|(.*)\n$")
-      lines[#lines + 1] = { first = tonumber(first), count = tonumber(count), text = body }
-    end
+    local first, count, body = line:match("^(%d+)%+(%d+)|(.*)\n$")
+    lines[#lines + 1] = { first = tonumber(first), count = tonumber(count), text = body }
   end
   return lines
 end
 
-local WORDS = { "alpha", "beta", "日本", "naïve", "🙂", "x\ny", "id=42", "|", "end" }
+local WORDS = { "alpha", "beta", "日本", "naïve", "🙂", "x\ny", "a\r\nb", "\t", "id=42", "|", "%", "end" }
 
 local function run_trace(seed, steps, cfg)
   local r = rng(seed)
@@ -117,7 +115,7 @@ local function run_trace(seed, steps, cfg)
     return lines
   end
 
-  local lines, done_cmds = {}, {}
+  local lines, done_cmds, parked = {}, {}, {}
   for _ = 1, steps do
     local roll = r(100)
     local out
@@ -128,6 +126,10 @@ local function run_trace(seed, steps, cfg)
       msgs[count] = m
       out = e:apply(T.msg(count, m.kind, m.text))
       count = count + 1
+    elseif roll < 47 and #parked > 0 then
+      local job = table.remove(parked, r(#parked) + 1)  -- operator retry of a parked job
+      out = e:apply({ _ = "operator-retry", job = job })
+      T.ok(T.has_decision(out, "job-retried"), T.decision_names(out))
     elseif roll < 50 and #done_cmds > 0 then
       local c = done_cmds[r(#done_cmds) + 1]          -- stale / duplicate delivery
       out = e:apply(T.done(c, "late duplicate"))
@@ -135,7 +137,11 @@ local function run_trace(seed, steps, cfg)
     else
       local c = e:take(r(#e.pending) + 1)             -- out-of-order completion
       local o = r(100)
-      if o < 6 then
+      if o < 3 then
+        out = e:apply(T.failed(c, "uncertain"))
+        T.ok(T.has_decision(out, "job-uncertain"), T.decision_names(out))
+        parked[#parked + 1] = c.job
+      elseif o < 6 then
         out = e:apply(T.failed(c, "retryable"))
       elseif o < 10 then
         out = e:apply(T.done(c, ("z"):rep(cap + 1 + r(50))))
@@ -156,18 +162,20 @@ local CFG = { leaf_cap = 160, low = 900, high = 1800, lead_window = 4, max_infli
 
 return {
   { "6 seeded traces x 400 events keep coverage, alignment and exact merges", function()
-    local merges, batches = 0, 0
+    local merges, batches, parked = 0, 0, 0
     for seed = 1, 6 do
       local _, e = run_trace(seed, 400, CFG)
       for _, out in ipairs(e.log) do
         for _, d in ipairs(out.decisions) do
           if d._ == "view-merged" then merges = merges + 1 end
           if d._ == "batch-mode" and d.on then batches = batches + 1 end
+          if d._ == "job-uncertain" then parked = parked + 1 end
         end
       end
     end
     T.ok(merges > 50, "traces should exercise merges (" .. merges .. ")")
     T.ok(batches > 5, "traces should exercise batches (" .. batches .. ")")
+    T.ok(parked > 3, "traces should park uncertain jobs (" .. parked .. ")")
   end },
 
   { "replaying a seed reproduces every state hash", function()

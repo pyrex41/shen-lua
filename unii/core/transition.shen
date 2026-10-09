@@ -9,7 +9,7 @@
 
 (define unii.init
   {unii.config --> unii.state}
-  Cf -> (unii.mk-state Cf 0 0 [] (unii.wrapper-bytes) [] [] false 0 0)
+  Cf -> (unii.mk-state Cf 0 0 [] 0 [] [] false 0 0)
     where (empty? (unii.config-errors Cf))
   Cf -> (error "unii.init: invalid configuration: ~A" (head (unii.config-errors Cf))))
 
@@ -17,7 +17,8 @@
   {unii.state --> unii.event --> unii.result}
   S [message-appended M Kd D C] -> (unii.finish (unii.on-message S M Kd D C))
   S [summary-completed J A B H T] -> (unii.finish (unii.on-completed S J A B H T))
-  S [summary-failed J A C] -> (unii.finish (unii.on-failed S J A C)))
+  S [summary-failed J A C] -> (unii.finish (unii.on-failed S J A C))
+  S [operator-retry J] -> (unii.finish (unii.on-operator-retry S J)))
 
 (define unii.finish
   {unii.result --> unii.result}
@@ -193,18 +194,54 @@
   S _ _ _ C -> (unii.reject S "unknown failure class")
     where (not (element? C (unii.failure-classes)))
   S [Job] _ _ permanent -> (unii.settle S (unii.block S Job "permanent summary failure"))
+  S [Job] _ _ uncertain -> (unii.settle S (unii.mark-uncertain S Job))
   S [Job] _ _ C -> (unii.settle S (unii.retry-or-block S Job [retry-after-failure C]
                                      "summary failed on every attempt")))
 
 (define unii.retry-or-block
   {unii.state --> unii.job --> unii.retry --> string --> unii.result}
-  S Job Rt R ->
-    (let Cf (unii.st-config S)
-      (if (< (unii.job-attempt Job) (unii.cf-max-attempts Cf))
-          (let New (unii.retry-job Cf Job Rt)
-            [result (unii.with-jobs S (unii.insert-job New (unii.remove-job (unii.job-id Job) (unii.st-jobs S))))
-                    [] [[job-retried (unii.job-id New) (unii.job-id Job)]]])
-          (unii.block S Job R))))
+  S Job Rt R -> (unii.requeue S Job Rt)
+    where (< (unii.job-attempt Job) (unii.cf-max-attempts (unii.st-config S)))
+  S Job _ R -> (unii.block S Job R))
+
+(define unii.requeue
+  {unii.state --> unii.job --> unii.retry --> unii.result}
+  S Job Rt ->
+    (let New (unii.retry-job (unii.st-config S) Job Rt)
+      [result (unii.with-jobs S (unii.insert-job New (unii.remove-job (unii.job-id Job) (unii.st-jobs S))))
+              [] [[job-retried (unii.job-id New) (unii.job-id Job)]]]))
+
+\\ The request may have reached the provider, so a second dispatch could
+\\ duplicate a paid or side-effecting call. The job parks until an operator
+\\ retries it; only the host can see the outcome was ambiguous.
+(define unii.mark-uncertain
+  {unii.state --> unii.job --> unii.result}
+  S Job ->
+    (let Id (unii.job-id Job)
+         C (unii.job-command Job)
+      (unii.emit [effect-uncertain Id C]
+        [result (unii.with-jobs S (unii.replace-job Id (unii.uncertain-job Job C) (unii.st-jobs S)))
+                [] [[job-uncertain Id C]]])))
+
+(define unii.job-command
+  {unii.job --> string}
+  [job _ _ _ [dispatched C] _] -> C
+  J -> (error "unii.job-command: job ~A is not dispatched" (unii.job-id J)))
+
+\\ An operator retry grants one more attempt to a blocked or uncertain job,
+\\ past the automatic attempt limit.
+(define unii.on-operator-retry
+  {unii.state --> string --> unii.result}
+  S J -> (unii.operator-retry-job S (unii.find-job J (unii.st-jobs S))))
+
+(define unii.operator-retry-job
+  {unii.state --> (list unii.job) --> unii.result}
+  S [] -> (unii.reject S "operator retry: unknown or already completed job")
+  S [Job] -> (unii.reject S "operator retry: job is neither blocked nor uncertain")
+    where (not (or (unii.blocked? Job) (unii.uncertain? Job)))
+  S [Job] -> (unii.reject S "operator retry: attempt ceiling reached")
+    where (>= (unii.job-attempt Job) (unii.max-id))
+  S [Job] -> (unii.settle S (unii.requeue S Job [retry-by-operator])))
 
 (define unii.block
   {unii.state --> unii.job --> string --> unii.result}
@@ -290,7 +327,8 @@
   {unii.state --> boolean}
   S -> (= (unii.st-covered S) (unii.st-count S)))
 
-\\ [Count Covered ViewBytes ViewLines Rev Batch? Queued Dispatched Blocked]
+\\ [Count Covered ViewBytes ViewLines Rev Batch? Queued Dispatched Blocked
+\\  Uncertain]
 (define unii.status
   {unii.state --> (list number)}
   S -> (let Js (unii.st-jobs S)
@@ -298,4 +336,18 @@
           (length (unii.st-view S)) (unii.st-rev S) (if (unii.st-batch S) 1 0)
           (unii.count-jobs (/. J (unii.queued? J)) Js)
           (unii.count-jobs (/. J (unii.dispatched? J)) Js)
-          (unii.count-jobs (/. J (unii.blocked? J)) Js)]))
+          (unii.count-jobs (/. J (unii.blocked? J)) Js)
+          (unii.count-jobs (/. J (unii.uncertain? J)) Js)]))
+
+\\ Jobs that wait for an operator: [Id "blocked" Reason] or
+\\ [Id "uncertain" Command], in dispatch-priority order.
+(define unii.stuck-jobs
+  {unii.state --> (list (list string))}
+  S -> (unii.stuck-loop (unii.st-jobs S)))
+
+(define unii.stuck-loop
+  {(list unii.job) --> (list (list string))}
+  [] -> []
+  [[job Id _ _ [blocked R] _] | Js] -> [[Id "blocked" R] | (unii.stuck-loop Js)]
+  [[job Id _ _ [uncertain C] _] | Js] -> [[Id "uncertain" C] | (unii.stuck-loop Js)]
+  [_ | Js] -> (unii.stuck-loop Js))

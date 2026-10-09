@@ -6,9 +6,7 @@
 --   * deterministic tie-breaks.
 -- The push function below is a direct transcription of the gist's
 -- rollback_state_list.js push, used as the test-side reference. The
--- independent arithmetic oracle and recorded rollback fixtures are a
--- separate deliverable (unii/eval/oracle/, contract in
--- docs/contracts/oracle.md); when present they are run here as well.
+-- independent oracle's golden fixtures are diffed in test_oracle.lua.
 local T = require("unii.test.lib")
 
 local function push(new, st)
@@ -148,21 +146,4 @@ return {
     end
   end },
 
-  { "independent oracle fixtures (unii/eval/oracle/) when present", function()
-    local root = T.root()
-    local f = io.open(root .. "/unii/eval/oracle/fixtures/manifest.lua", "rb")
-    if not f then return "skip" end
-    f:close()
-    local cases = dofile(root .. "/unii/eval/oracle/fixtures/manifest.lua")
-    for _, c in ipairs(cases) do
-      local fx = dofile(root .. "/unii/eval/oracle/fixtures/" .. c.file)
-      for n, step in ipairs(fx.steps) do
-        local view, merged = T.core():merge_to_count(step.view, step.total, step.budget)
-        T.eq(fmt(as_lines(view)), fmt(as_lines(step.expect_view)), c.file .. " step " .. n)
-        if step.expect_merged then
-          T.eq(fmt(as_lines(merged)), fmt(as_lines(step.expect_merged)), c.file .. " merges " .. n)
-        end
-      end
-    end
-  end },
 }

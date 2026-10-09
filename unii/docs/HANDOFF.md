@@ -11,11 +11,21 @@ The work is split between two languages:
   exact leaves, lossless joins, summary jobs, view coverage, merge order,
   batch hysteresis and invariants.
 * **Lua does the mechanics.** LuaJIT hosts the codec, journal, locking,
-  supervisor, a mock network, a mock summarizer and the CLI.
+  supervisor, the network adapter, a chat-completions provider, mocks and
+  the CLI.
 
-No model, provider or real network is involved anywhere in this branch.
-Every summary is a deterministic fake produced by
-`host/mock/summarizer.lua`.
+This branch merges two parallel workstreams:
+
+* **PR #74:** the independent oracle and golden fixtures, in `eval/`.
+* **PR #75:** the libcurl HTTP adapter, in `host/network/`.
+
+The engine's tests diff against the oracle on every run
+(`contracts/decisions.md`).
+
+The real adapter is wired behind `contracts/network.md`, but the MOCK
+transport and MOCK summarizer stay the default for tests and the CLI. The
+real adapter has been exercised only against its local test server. No real
+model provider has been called.
 
 ## Quick start
 
@@ -31,9 +41,16 @@ Other CLI commands, all of which take `--dir D`:
 
 * `unii init [--low --high --cap --lead --inflight --attempts]`
 * `unii append --count N [--seed S] [--no-pump] [--quiet]`
-* `unii view`, `unii hash`, `unii status`
+* `unii view`, `unii hash`
+* `unii status`: counts, stuck (blocked or uncertain) jobs, and commands
+  orphaned by a previous process.
+* `unii retry --job J`: operator retry of a blocked or uncertain job.
 * `unii replay`: prints, for each transaction, the event, decisions, view
-  revision and hashes.
+  revision and hashes, plus dispatch records.
+* `--network real --url URL --model NAME` on any command that pumps
+  summaries. This uses the libcurl adapter and an OpenAI-compatible
+  endpoint. The key comes from `UNII_API_KEY` or `OPENAI_API_KEY` and is
+  never journaled. The default is `--network mock`.
 
 ## Layout
 
@@ -62,14 +79,17 @@ unii/
     storage_checkpoint.lua durable checkpoint framing and fallback
     storage_index.lua   rebuildable journal/message/blob/node/job indexes
     sha256.lua          pure-Lua SHA-256
-    models.lua          provider interface, failure classification
-    mock/network.lua    MOCK transport (contract in docs/contracts/network.md)
-    mock/summarizer.lua MOCK provider: fake "[mock L/I aN] ..." summaries
+    models.lua          provider interface, adapter-result classification
+    network/            REAL libcurl adapter (PR #75; its README covers TLS, logging, limits)
+    providers/chat_completions.lua  OpenAI-compatible summarizer over an injected client
+    mock/network.lua    MOCK transport with the adapter's interface (docs/contracts/network.md)
+    mock/summarizer.lua MOCK provider: chat_completions over the mock transport, fake summaries
     synthetic.lua       deterministic synthetic messages (multi-byte text included)
     cli.lua             milestone CLI
   test/                 run.lua (entrypoint), lib.lua, test_*.lua, fixtures/
+    network/            the adapter's own suite and local test server (PR #75)
   docs/                 HANDOFF.md, MANIFEST.md, contracts/*.md
-  eval/                 empty here; eval/oracle/ belongs to the oracle workstream
+  eval/oracle/          independent Lua oracle (PR #74); eval/fixtures/ golden traces
 ```
 
 The runtime and compiler outside `unii/` are untouched. `build.lua` and a
@@ -79,34 +99,58 @@ test both enforce this against the pinned commit.
 
 | Document | Covers |
 |---|---|
-| `contracts/events.md` | `message-appended`, `summary-completed`, `summary-failed`, rejection, the settle order |
-| `contracts/commands.md` | identifiers, `submit-summary`, client events, decisions, dispatch order |
+| `contracts/events.md` | `message-appended`, `summary-completed`, `summary-failed`, `operator-retry`, rejection, the settle order |
+| `contracts/commands.md` | identifiers, `submit-summary`, effect states (including uncertain), client events, decisions, dispatch order |
 | `contracts/numeric.md` | bounds, exact due-score comparison, line-count policy and byte-hysteresis policy |
 | `contracts/codec.md` | tagged values, records, storage encoding, state hash |
-| `contracts/storage.md` | journal frame, recovery, transaction payloads, commit order, replay |
-| `contracts/network.md` | the interface the real HTTP adapter in `unii/host/network/` must implement |
-| `contracts/oracle.md` | the fixture format for `unii/eval/oracle/` |
+| `contracts/storage.md` | journal frame, recovery, transaction payloads, dispatch records, commit order, replay |
+| `contracts/network.md` | client interface shared by the real adapter and the mock, outcome classification, provider interface |
+| `contracts/oracle.md` | the oracle's layout and how `test_oracle` diffs against it |
+| `contracts/decisions.md` | engine/oracle reconciliation, network integration decisions, open questions for Reuben |
 
-## Integration points for the parallel workstreams
+## Integration status
 
-**HTTP adapter (`unii/host/network/`).** Implement `contracts/network.md`.
-The mock transport has the same shape, except that it counts deadlines in
-steps rather than wall-clock time. A real summarizer provider would go in
-`host/providers/` with `is_mock = false` and would be passed to
-`supervisor.open(dir, {provider = ...})`. The CLI is hard-wired to the mock
-provider and says so in its output.
+**HTTP adapter (`host/network/`, PR #75).** The adapter is merged and
+unchanged, except that it now exports `IS_MOCK = false`.
 
-**Oracle (`unii/eval/oracle/`).** Add `fixtures/manifest.lua` in the format
-given in `contracts/oracle.md`. `test_view.lua` picks it up automatically
-and stops reporting SKIP.
+* `host/providers/chat_completions.lua` drives it.
+* `host/models.lua` maps its outcomes to failure classes.
+* The adapter's `uncertain` outcome becomes the core's `[uncertain CmdId]`
+  job state, which is never re-sent automatically (`commands.md`, "Effect
+  states").
+* The supervisor journals a dispatch record before each send, so a restart
+  turns in-flight commands into `uncertain` instead of resending them.
+* The mock transport implements the same interface over a simulated clock.
+
+**Oracle (`eval/`, PR #74).** `test_oracle` diffs the engine against:
+
+* the 20,001-step rollback trace;
+* the byte-hysteresis trace;
+* the oracle module, side by side.
+
+Three disagreements were found and resolved; see `contracts/decisions.md`.
+The oracle's canonical-text function and the byte-hysteresis fixture were
+changed to the reconciled policy. The oracle remains a separate
+implementation.
+
+**Phase 2 storage.** Content-addressed blobs, daily shards, checkpoints,
+indexes and streaming replay are integrated behind the unchanged
+`host/storage.lua` interface. Checkpoints preserve outstanding commands and
+their dispatch intents, so an in-flight command restored from a checkpoint
+becomes uncertain and is not resent.
 
 ## Acceptance gates and how each was verified
 
-Every row is an automated test in `luajit unii/test/run.lua`. The last full
-run passed 83 tests, failed 0 and skipped 1. The skip is the oracle
-fixtures, which do not exist yet. That count includes the upstream port
-specs (1,088 checks across 22 specs) and the kernel suite (134 of 134).
-The suite passes on both LuaJIT builds listed in `MANIFEST.md`.
+Every row is an automated test in `luajit unii/test/run.lua`. The last run
+passed 84 tests, with 0 failed and 0 skipped. `--with-upstream` adds the
+pinned port specs (1,088 checks across 22 specs) and the kernel suite
+(134 of 134).
+
+Separately:
+
+* `luajit unii/test/network/run.lua` (the adapter suite) passes 18 and
+  skips 1, its real-provider smoke test, because no API key is set.
+* `luajit unii/eval/oracle/spec.lua` passes 13 of 13.
 
 ### Phase 0
 
@@ -117,7 +161,7 @@ The suite passes on both LuaJIT builds listed in `MANIFEST.md`.
 | Call a typed transition from Lua | `test_boundary`: the signature is `(unii.state --> (unii.event --> unii.result))`, and a tagged event goes in while decoded commands and decisions come out |
 | Round-trip every domain value | `test_codec`: 13 cases, including symbol, text, `()`, vector, boolean and absent all staying distinct, both through Shen and through the storage bytes |
 | Reject rounded identifiers at the boundary | `test_boundary`: 2^53 + 1 is refused both as text and as a pre-rounded Lua number; values outside 2^31 − 1, negative values and non-canonical decimals are refused; the core rejects an out-of-sequence id even when the codec is bypassed |
-| Stream and cancel a mock HTTP response | `test_network_mock`: chunks arrive in order; cancelling twice yields one `on_done`; deadline, transport error and overflow are covered; requests are classified |
+| Stream and cancel an HTTP response | `test_network_mock`: SSE deltas arrive in order; cancel is idempotent and records whether the request was sent; drop, stall, pre-send failure and body cap match the adapter's outcomes. `test_network_real` and the adapter suite do the same over real sockets against a local server. |
 | Record the gist revision and checksum | `manifest.lua`; `test_boundary` downloads the pinned revision and checks its bytes, sha256 and git blob id |
 | Contracts written | `docs/contracts/*.md` |
 
@@ -130,10 +174,10 @@ The suite passes on both LuaJIT builds listed in `MANIFEST.md`.
 | Score ties are deterministic and stable | `test_view` (equal due selects the oldest pair); `test_tree` (due ordering agrees with exact int64 cross-multiplication); `test_traces` (re-running a seed reproduces every state hash) |
 | No unresolved content reaches a turn | `test_traces`: `covered` is always the first message without a built leaf. `test_transition`: a later leaf waits outside the view; a blocked leaf keeps `view-ready?` false. |
 | Gist small rollback examples | `test_view`: the t = 0..9 push table and the worked T = 10 example |
-| Merge order equals rollback push over 20,001 steps, with a defined line-count budget | `test_view`: with budget = length of the push list, equal at all 20,001 steps (the first-message due score matches only 481 of them) |
-| Byte-budget hysteresis, tested separately | `test_hysteresis`: an independent model is checked on every transition, at 1,500/3,000 and at the default 64,000/128,000 (the trace crosses 128,000 and comes back down to at most 64,000); batch mode stalls while parents are missing |
-| Job dependencies, retries, deterministic ids | `test_transition`: lead window and inflight cap; parents only after both children; retry on over-cap output up to 5 attempts, then blocked with `memory-blocked`; permanent failure blocks; duplicate, stale and unknown completions publish nothing |
-| Canonical LF rendering with byte accounting | `test_tree` (line bytes equal rendered bytes; CR and LF collapse byte-for-byte); `Core:render` checks rendered bytes against the core's count on every render |
+| Merge order equals rollback push over 20,001 steps, with a defined line-count budget | `test_view`: with budget = length of the push list, equal at all 20,001 steps (the first-message due score matches only 481 of them). `test_oracle`: equal to the oracle's golden `rollback-20001.trace` at every row. |
+| Byte-budget hysteresis, tested separately | `test_hysteresis`: an independent model is checked on every transition, at 1,500/3,000 and at the default 64,000/128,000 (the trace crosses 128,000 and comes back down to at most 64,000); batch mode stalls while parents are missing. `test_oracle`: equal to the oracle's `byte-hysteresis.trace` at all 700 steps, and to the oracle module on 40 random configurations. |
+| Job dependencies, retries, deterministic ids | `test_transition`: lead window and inflight cap; parents only after both children; retry on over-cap output up to 5 attempts, then blocked with `memory-blocked`; permanent failure blocks; uncertain parks the job until an operator retry; duplicate, stale and unknown completions publish nothing |
+| Canonical LF rendering with byte accounting | `test_tree` and `test_oracle` (3,000 random lines equal the oracle's rendering; line bytes equal rendered bytes); `Core:render` checks rendered bytes against the core's count on every render |
 
 ### Milestone
 
@@ -174,11 +218,16 @@ ENOSPC. See `docs/STORAGE_PHASE2.md` for the outcome matrix.
   message of 506 bytes is stored exactly; one of 507 bytes needs a summary.
   Address, `|` and LF bytes count toward the view budget, not toward the
   cap.
-* **Rendering.** The view is `<chat>` LF, then lines of the form
-  `first+count|text` LF, then `</chat>` LF. CR and LF in text each become
-  one space, so byte counts are unchanged. Nothing else is escaped: `|`
-  and `<chat>` inside text cannot be confused with structure, because every
-  line starts with the address and ends at the only LF.
+* **Rendering.** The view is lines of the form `first+count|text` LF.
+  View bytes count only these lines; the `<chat>` wrapper is prompt
+  framing. In text:
+  * every line break (CRLF counted once, CR, LF, NEL, LS, PS) becomes one
+    space;
+  * every other C0 control and DEL becomes one space;
+  * nothing is escaped.
+
+  This is reconciled with the oracle (`contracts/decisions.md`, items 5
+  and 7) and still open for Reuben.
 * **Two policies.** The line-count policy (`merge-keys-to-count`) exists
   only for comparison with the gist and oracle. The live view uses byte
   hysteresis.
@@ -191,6 +240,9 @@ ENOSPC. See `docs/STORAGE_PHASE2.md` for the outcome matrix.
   `attempt.retry`. The first summary that fits the cap is accepted. The
   plan's "accept the shortest valid result" and timer backoff are not
   implemented.
+* **Uncertain effects.** A request that may have reached the provider is
+  never re-sent automatically. Only `operator-retry` requeues it, and each
+  operator retry grants one attempt past `max_attempts`.
 * **Merge input.** A merge job receives the two children's exact texts. A
   leaf job receives the message. The plan's "bounded preceding context" is
   not supplied yet, so a job can never see a later message.
@@ -215,15 +267,18 @@ been reported upstream from this branch.
 
 ## Not done, and known limits
 
-* **Real integrations.** There is no real provider, HTTP or TLS. The mock
-  network and mock summarizer are labeled as mocks in code, CLI output and
-  docs.
-* **Unimplemented plan items:** turns, prompts, zoom and date tools,
-  `core/prompts.shen`, `core/tools.shen`, tool execution, uncertain
-  effects, `RecoveryObserved`, timers and backoff, operator retry and
-  raw-context recovery mode, policy epoch change, message chunking (events
-  longer than `chunk_max` are rejected), compaction context, and a search
-  fallback.
+* **Real integrations.** The libcurl adapter is real and wired in, but it
+  has been run only against its local test server. No real model provider
+  has been called. The summarization prompt is provisional
+  (`PROMPT_VERSION = "provisional-0"`). The mock network and mock
+  summarizer are labeled as mocks in code, CLI output and docs.
+* **Unimplemented plan items:**
+  * turns, prompts, zoom and date tools, `core/prompts.shen`,
+    `core/tools.shen`, and tool execution;
+  * `RecoveryObserved`, timers and backoff, and raw-context recovery mode;
+  * policy epoch change;
+  * message chunking (events longer than `chunk_max` are rejected);
+  * compaction context and a search fallback.
 * **Storage limits.** Backup/restore and blob garbage collection do not
   exist. Index metadata is proportional to history. Linux x86_64 is tested;
   macOS uses `F_FULLFSYNC` for regular files but is not exercised in CI.
@@ -233,16 +288,15 @@ been reported upstream from this branch.
   been attempted, and nothing has been measured beyond the test runtimes:
   2,400 trace events in about 3.4 s, and about 3.2 s for the cold
   typechecked build.
-* **Independence of checks.** The rollback comparison and the due-ordering
-  check are reference models written in this repository. They are not the
-  independent oracle, which is the separate workstream.
+* **Independence of checks.** `test_view`, `test_hysteresis` and the
+  due-ordering check use reference models written alongside the engine.
+  `test_oracle` is the independent cross-check.
 
 ## Suggested next steps
 
-1. Plug in the real network adapter and one real summarizer provider
-   (Phase 3), keeping the same tests running against the mock.
-2. Add timers as host events (`TimerObserved`) for retry backoff, and an
-   operator retry for blocked jobs.
+1. Run the chat-completions provider against a real endpoint with a key,
+   and replace the provisional prompt with the plan's (Phase 3).
+2. Add timers as host events (`TimerObserved`) for retry backoff.
 3. Add message chunking on UTF-8 boundaries, upstream of `message-appended`.
 4. Turns and prompts (Phase 4) on top of `unii.view-ready?` and the
    rendered view.

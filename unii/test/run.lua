@@ -31,8 +31,9 @@ end
 
 local files = {
   "test_codec", "test_boundary", "test_tree", "test_view", "test_transition",
-  "test_traces", "test_hysteresis", "test_storage", "test_storage_phase2",
-  "test_storage_faults", "test_network_mock", "test_milestone",
+  "test_traces", "test_hysteresis", "test_oracle", "test_storage",
+  "test_storage_phase2", "test_storage_faults", "test_network_mock",
+  "test_network_real", "test_milestone",
 }
 
 local passed, failed, skipped = 0, 0, 0

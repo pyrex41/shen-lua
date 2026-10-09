@@ -102,6 +102,38 @@ return {
     T.rm(dir)
   end },
 
+  { "dispatch intent restored from checkpoint becomes uncertain and is never resent", function()
+    local dir = T.tmpdir("phase2-dispatch-checkpoint")
+    local first = mock.new { cap = 512 }
+    local sup = supervisor.open(dir, {
+      core = T.core(), provider = first, checkpoint_interval = 3,
+      config = schema.config { max_inflight = 1 },
+    })
+    sup:submit(T.msg(0, "user", ("in flight "):rep(100)))
+    T.eq(sup:dispatch_pending(), 1)
+    T.eq(first.calls, 1)
+    T.eq(#first.network.hits, 0, "provider has not been stepped")
+    T.eq(sup.store.next_seq - 1, 3, "init, event, dispatch")
+    T.eq(sup.info.checkpoint_error, nil)
+    sup:close() -- crash after the dispatch record/checkpoint, before any outcome
+
+    local second = mock.new { cap = 512 }
+    sup = supervisor.open(dir, {
+      core = T.core(), provider = second, checkpoint_interval = 3,
+    })
+    T.eq(sup.info.checkpoint_seq, 3)
+    T.eq(sup.info.replayed_records, 0)
+    T.eq(#sup:orphans(), 1, "dispatch intent survived checkpoint restore")
+    sup:pump()
+    T.eq(second.calls, 0, "uncertain command was not sent to the provider")
+    T.eq(#second.network.hits, 0)
+    T.eq(sup:status().uncertain, 1)
+    T.eq(sup:outstanding_count(), 0)
+    sup:close()
+    T.ok(read(dir .. "/indexes/jobs.idx"):find("\tuncertain\t", 1, true))
+    T.rm(dir)
+  end },
+
   { "stale checkpoint is set aside and an older valid checkpoint is used", function()
     local dir = T.tmpdir("phase2-stale")
     local sup = open_sup(dir, { checkpoint_interval = 4 })

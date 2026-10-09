@@ -1,12 +1,15 @@
 -- unii/host/cli.lua -- milestone command line (Phase 1). Summaries come
--- from the MOCK summarizer; no model or network is contacted.
+-- from the MOCK summarizer unless --network real is given, which uses the
+-- libcurl adapter and an OpenAI-compatible endpoint (--url, --model; the key
+-- comes from UNII_API_KEY or OPENAI_API_KEY and is never journaled).
 --
 --   unii build                                 typecheck the bundle, write the stamp
 --   unii init    --dir D [--low N --high N --cap N --lead N --inflight N]
 --   unii append  --dir D --count N [--seed S] [--no-pump] [--quiet]
 --   unii view    --dir D                       replay, print the view and hashes
 --   unii hash    --dir D                       replay, print VIEW-HASH / STATE-HASH
---   unii status  --dir D
+--   unii status  --dir D                       counts, stuck jobs, orphaned commands
+--   unii retry   --dir D --job J               operator retry of a blocked/uncertain job
 --   unii replay  --dir D                       per-transaction replay inspector
 --   unii milestone --dir D [--count N]         multi-process restart demonstration
 local M = {}
@@ -15,8 +18,11 @@ local function usage(msg)
   if msg then io.stderr:write("unii: ", msg, "\n") end
   io.stderr:write([[
 usage: unii <command> [options]
-  build | init | append | view | hash | status | replay | milestone
+  build | init | append | view | hash | status | retry | replay | milestone
   common: --dir DIR (chat directory)
+          --network mock|real (default mock); real needs --url URL --model NAME
+          and UNII_API_KEY or OPENAI_API_KEY in the environment
+  retry:  --job JOB_ID
   init:   --low N --high N --cap N --lead N --inflight N --attempts N
   append: --count N --seed S --no-pump --quiet
 ]])
@@ -59,7 +65,21 @@ local function open_chat(opts, extra)
     config = extra.config,
     on_client_event = function(ev) events[#events + 1] = ev end,
   })
-  s.provider = mock.new { cap = s.config.leaf_cap }
+  local net = opts.network or "mock"
+  if net == "mock" then
+    s.provider = mock.new { cap = s.config.leaf_cap }
+  elseif net == "real" then
+    if not (opts.url and opts.model) then s:close(); usage("--network real needs --url and --model") end
+    local key = os.getenv("UNII_API_KEY") or os.getenv("OPENAI_API_KEY")
+    local network = require("unii.host.network")
+    s.provider = require("unii.host.providers.chat_completions").new {
+      client = network.client {}, url = opts.url, model = opts.model, api_key = key,
+      cap = s.config.leaf_cap,
+    }
+    s.step_ms = 50
+  else
+    s:close(); usage("--network must be mock or real")
+  end
   return s, events
 end
 
@@ -73,9 +93,9 @@ end
 
 local function status_line(s)
   local st = s:status()
-  return ("rev %d | %d lines %d bytes | covered %d/%d | jobs q%d d%d b%d%s"):format(
+  return ("rev %d | %d lines %d bytes | covered %d/%d | jobs q%d d%d b%d u%d%s"):format(
     st.rev, st.view_lines, st.view_bytes, st.covered, st.count,
-    st.queued, st.dispatched, st.blocked, st.batch and " | BATCH" or "")
+    st.queued, st.dispatched, st.blocked, st.uncertain, st.batch and " | BATCH" or "")
 end
 
 local commands = {}
@@ -125,6 +145,9 @@ function commands.append(opts)
   end
   for _, ev in ipairs(events) do
     if ev._ == "memory-blocked" then print("MEMORY BLOCKED: " .. ev.job .. ": " .. ev.reason) end
+    if ev._ == "effect-uncertain" then
+      print("EFFECT UNCERTAIN: " .. ev.job .. " (" .. ev.cmd .. "); not resent; `unii retry --job` to retry")
+    end
   end
   local text = s:view()
   if not opts.quiet then io.write(text) end
@@ -156,7 +179,30 @@ function commands.status(opts)
   print("journal records " .. #s.store:records())
   if s.info.tail_isolated then print("isolated crash tail: " .. s.info.tail_isolated) end
   print("outstanding summary commands " .. s:outstanding_count())
+  local orphans = s:orphans()
+  if #orphans > 0 then
+    print(#orphans .. " command(s) were in flight when the last process stopped; "
+      .. "the next append records them as uncertain")
+  end
+  for _, j in ipairs(s:stuck_jobs()) do print(("stuck %-9s %s  %s"):format(j.state, j.job, j.detail)) end
   print("ready for a turn: " .. tostring(s.core:ready(s.state)))
+  s:close()
+end
+
+function commands.retry(opts)
+  if not opts.job then usage("--job is required") end
+  local s, events = open_chat(opts)
+  local out = s:operator_retry(opts.job)
+  for _, d in ipairs(out.decisions) do
+    if d._ == "event-rejected" then s:close(); error(d.reason, 0) end
+    if d._ == "job-retried" then print("retrying " .. d.previous .. " as " .. d.job) end
+  end
+  s:pump()
+  for _, ev in ipairs(events) do
+    if ev._ == "memory-blocked" then print("MEMORY BLOCKED: " .. ev.job .. ": " .. ev.reason) end
+    if ev._ == "effect-uncertain" then print("EFFECT UNCERTAIN: " .. ev.job .. " (" .. ev.cmd .. ")") end
+  end
+  print(status_line(s))
   s:close()
 end
 
@@ -170,11 +216,14 @@ function commands.replay(opts)
     local t = codec.decode(r.payload)
     if t.v.kind.v == "init" then
       print(("%5d init bundle %s config %s"):format(r.seq, short(t.v.bundle.v), codec.show(t.v.config)))
+    elseif t.v.kind.v == "dispatch" then
+      print(("%5d dispatch %s %s"):format(r.seq, t.v.cmd.v, t.v.job.v))
     else
       local ev = schema.decode("event", t.v.event)
       local what = ev._ == "message-appended" and ("message %d %s %dB"):format(ev.id, ev.kind, ev.content.bytes)
         or ev._ == "summary-completed" and ("completed %s %dB"):format(ev.job, ev.bytes)
-        or ("failed %s %s"):format(ev.job, ev.class)
+        or ev._ == "summary-failed" and ("failed %s %s"):format(ev.job, ev.class)
+        or ("operator retry %s"):format(ev.job)
       local ds = {}
       for _, d in ipairs(t.v.decisions.v) do ds[#ds + 1] = d.v[1].v end
       print(("%5d %-44s rev %-4s view %s | %s"):format(r.seq, what, t.v.view_rev.v,

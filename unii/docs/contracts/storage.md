@@ -71,8 +71,9 @@ When the journal is opened:
   anywhere before the end. No history is discarded.
 * **Checkpoints:** newest to oldest, verify framing, journal sequence and
   physical-record anchor, bundle/configuration, serialized state hash,
-  rendered view hash/revision and pending commands. A bad or stale checkpoint
-  is renamed `.invalid-*`; recovery tries an older one, then record one.
+  rendered view hash/revision, pending commands and their dispatch intents.
+  A bad or stale checkpoint is renamed `.invalid-*`; recovery tries an older
+  one, then record one.
 
 ## Transaction payloads
 
@@ -99,6 +100,22 @@ Records 2 and later are `event` transactions:
 | `decisions` | as returned by the core |
 | `view_rev`, `view_hash` | sha256 of the rendered view |
 | `state_hash` | hash of the resulting state |
+
+### Dispatch records
+
+Immediately before a provider starts a `submit-summary` command, the
+supervisor appends and fsyncs a host-level record:
+
+| Field | Content |
+|---|---|
+| `kind` | `dispatch` |
+| `cmd` | the command id |
+| `job` | the job id |
+
+It is not a core event and changes no state. It exists so a restarted
+process can tell "never sent" from "maybe sent". Replay checks that the
+record names an outstanding command (otherwise `replay divergence`). The
+storage interface is unchanged: this is one more payload through `append`.
 
 ## Commit order (supervisor)
 
@@ -135,7 +152,14 @@ When the store is opened:
   Otherwise the open fails with `replay divergence at seq N: <what>`.
 * The view is never re-fitted from the current policy. It comes only from
   replaying the recorded events.
-* Summary commands without a journaled outcome are dispatched again.
+* A summary command without a journaled outcome and without a dispatch
+  record was never handed to a provider, and is dispatched normally.
+* A summary command with a dispatch record and no outcome was in flight
+  when the previous process stopped. It is never sent again automatically.
+  The next `dispatch_pending` (or `pump`) journals `summary-failed` with
+  class `uncertain` for each, in command order, and the job waits for an
+  operator. Opening a chat alone writes nothing, so `view`, `hash` and
+  `status` stay read-only.
 
 ## Durability and limits
 

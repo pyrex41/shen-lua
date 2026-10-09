@@ -84,9 +84,6 @@
 
 \\ ------------------------------------------------- byte-budget hysteresis
 
-\\ "<chat>" LF and "</chat>" LF.
-(define unii.wrapper-bytes {--> number} -> 15)
-
 (define unii.view-keys
   {(list unii.node) --> (list unii.key)}
   V -> (map (/. N (unii.node-key N)) V))
@@ -98,7 +95,7 @@
 
 (define unii.view-bytes-of
   {(list unii.node) --> number}
-  V -> (+ (unii.wrapper-bytes) (unii.sum-line-bytes V)))
+  V -> (unii.sum-line-bytes V))
 
 (datatype unii.vstep
   V : (list unii.node); VB : number; Lv : (list unii.node); Bt : boolean;
@@ -150,10 +147,10 @@
 
 \\ ---------------------------------------------------------------- render
 
-\\ The canonical rendering of a view as a list of LF-terminated strings; the
+\\ The canonical rendering of a view as a list of LF-terminated lines; the
 \\ host concatenates them and must obtain exactly unii.view-bytes-of bytes.
+\\ Prompt framing (the gist's <chat> tags) is added by prompt construction
+\\ and is not part of the view or its byte budget.
 (define unii.render-view
   {(list unii.node) --> (list string)}
-  V -> (append [(cn "<chat>" (unii.lf))]
-               (append (map (/. N (unii.node-line N)) V)
-                       [(cn "</chat>" (unii.lf))])))
+  V -> (map (/. N (unii.node-line N)) V))

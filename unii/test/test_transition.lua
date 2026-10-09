@@ -87,6 +87,66 @@ return {
     T.eq(e:status().blocked, 1)
   end },
 
+  { "an uncertain outcome parks the job: never dispatched again without an operator", function()
+    local e = T.engine { max_attempts = 5, max_inflight = 1 }
+    local c0 = commands_of(e:apply(T.msg(0, "user", big(1000))), "submit-summary")[1]
+    e:apply(T.msg(1, "user", big(1000)))
+    T.eq(e:status().dispatched, 1, "inflight cap holds the second leaf back")
+    local out = e:apply(T.failed(c0, "uncertain"))
+    T.eq(out.decisions[1]._, "job-uncertain")
+    T.eq(out.decisions[1].cmd, c0.cmd)
+    local evs = commands_of(out, "emit-client-event")
+    T.eq(evs[1].event._, "effect-uncertain")
+    T.eq(evs[1].event.job, c0.job)
+    T.eq(evs[1].event.cmd, c0.cmd)
+    local subs = commands_of(out, "submit-summary")
+    T.eq(#subs, 1, "the freed slot goes to the next leaf, not the uncertain job")
+    T.ok(subs[1].job ~= c0.job and subs[1].key.index == 1, subs[1].job)
+    local st = e:status()
+    T.eq(st.uncertain, 1); T.eq(st.dispatched, 1); T.eq(st.queued, 0)
+    -- Further events never re-dispatch it, and late outcomes for it are ignored.
+    out = e:apply(T.done(subs[1], "summary one"))
+    T.eq(#commands_of(out, "submit-summary"), 0)
+    for _, ev in ipairs { T.done(c0, "late"), T.failed(c0, "retryable"), T.failed(c0, "uncertain") } do
+      out = e:apply(ev)
+      T.eq(T.decision_names(out), "completion-ignored")
+      T.eq(#out.commands, 0)
+    end
+    T.eq(e:status().uncertain, 1)
+    T.eq(e:status().covered, 0)
+    local stuck = e.C:stuck_jobs(e.state)
+    T.eq(#stuck, 1)
+    T.eq(stuck[1].job, c0.job); T.eq(stuck[1].state, "uncertain"); T.eq(stuck[1].detail, c0.cmd)
+    T.eq(#e:invariants(), 0)
+  end },
+
+  { "operator retry requeues blocked or uncertain jobs past the attempt limit", function()
+    local e = T.engine { max_attempts = 1 }
+    local c0 = commands_of(e:apply(T.msg(0, "user", big(1000))), "submit-summary")[1]
+    local out = e:apply({ _ = "operator-retry", job = c0.job })
+    T.eq(out.decisions[1]._, "event-rejected", "a dispatched job is not stuck")
+    T.eq(out.decisions[1].reason, "operator retry: job is neither blocked nor uncertain")
+    e:apply(T.failed(c0, "uncertain"))
+    out = e:apply({ _ = "operator-retry", job = c0.job })
+    T.eq(T.decision_names(out), "job-retried")
+    local r = commands_of(out, "submit-summary")[1]
+    T.eq(r.attempt.n, 2); T.eq(r.attempt.retry._, "retry-by-operator")
+    T.eq(r.job, (c0.job:gsub("%-a1%-", "-a2-")))
+    -- attempt 2 > max_attempts 1: a retryable failure blocks instead of retrying
+    out = e:apply(T.failed(r, "retryable"))
+    T.ok(T.has_decision(out, "job-blocked"), T.decision_names(out))
+    T.eq(e.C:stuck_jobs(e.state)[1].state, "blocked")
+    out = e:apply({ _ = "operator-retry", job = r.job })
+    local r3 = commands_of(out, "submit-summary")[1]
+    T.eq(r3.attempt.n, 3)
+    out = e:apply(T.done(r3, "recovered"))
+    T.eq(e:status().covered, 1)
+    T.eq(#e.C:stuck_jobs(e.state), 0)
+    out = e:apply({ _ = "operator-retry", job = r3.job })
+    T.eq(out.decisions[1].reason, "operator retry: unknown or already completed job")
+    T.eq(#e:invariants(), 0)
+  end },
+
   { "duplicate, stale and unknown completions publish nothing", function()
     local e = T.engine()
     local c = commands_of(e:apply(T.msg(0, "user", big(1000))), "submit-summary")[1]
@@ -109,11 +169,11 @@ return {
     e:apply(T.msg(2, "user", "short"))
     local out = e:apply(T.done(c1, "summary one"))
     T.eq(e:status().covered, 0, "message 0 unresolved: nothing may enter the view")
-    T.eq(e.C:render(e.state), "<chat>\n</chat>\n")
+    T.eq(e.C:render(e.state), "")
     T.ok(not T.has_decision(out, "view-extended"))
     out = e:apply(T.done(c0, "summary zero"))
     T.eq(e:status().covered, 3)
-    T.eq(e.C:render(e.state), "<chat>\n0+1|summary zero\n1+1|summary one\n2+1|user: short\n</chat>\n")
+    T.eq(e.C:render(e.state), "0+1|summary zero\n1+1|summary one\n2+1|user: short\n")
     T.eq(#e:invariants(), 0)
   end },
 

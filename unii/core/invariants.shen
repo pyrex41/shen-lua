@@ -44,8 +44,9 @@
   _ [] -> []
   Cf [N | Ns] -> ["node text exceeds the leaf cap"]
     where (> (unii.node-bytes N) (unii.cf-cap Cf))
-  Cf [N | Ns] -> ["node line bytes disagree with its address and text bytes"]
-    where (not (= (unii.node-line-bytes N) (unii.line-bytes (unii.node-key N) (unii.node-bytes N))))
+  Cf [N | Ns] -> ["node line is not the canonical rendering of its text"]
+    where (not (= [line (unii.node-line N) (unii.node-line-bytes N)]
+                  (unii.make-line (unii.node-key N) (unii.node-text N) (unii.node-bytes N))))
   Cf [N | Ns] -> ["node origin inconsistent with its level"]
     where (not (unii.origin-fits? (unii.node-origin N) (unii.node-key N)))
   Cf [_ | Ns] -> (unii.node-errors Cf Ns))

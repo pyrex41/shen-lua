@@ -1,50 +1,30 @@
-# Merge-policy oracle fixtures (for `unii/eval/oracle/`)
+# Oracle contract
 
-The independent arithmetic oracle and the gist rollback fixtures are being
-built separately in `unii/eval/oracle/`. This branch does not contain them.
-`test_view.lua` already contains a case that loads them, and it reports SKIP
-until they exist.
+The independent oracle lives in `unii/eval/oracle/`. It is plain Lua 5.1 /
+LuaJIT with no Shen and no imports from the engine. Its golden traces live
+in `unii/eval/fixtures/`. The line formats, the generator and the fixture
+provenance are documented in `unii/eval/oracle/README.md`.
 
-## Layout
+## How the engine is held to it
 
-```
-unii/eval/oracle/fixtures/manifest.lua   -> return { { file = "rollback_t0_20000.lua" }, ... }
-unii/eval/oracle/fixtures/<file>         -> return { steps = { step, ... } }
-```
+`unii/test/test_oracle.lua` runs with the main suite and covers:
 
-Each step is checked against the Shen core's line-count policy
-(`Core:merge_to_count`, which calls `unii.merge-keys-to-count`):
+| Case | Diff |
+|---|---|
+| `rollback-20001.trace` | For each T = 1..20,001, append leaf T − 1, call `Core:merge_to_count(view, T, budget)` (the Shen `unii.merge-keys-to-count`), and require exactly the row's merged parents and view. |
+| `byte-hysteresis.trace` | For 700 appends with every parent available and the generator's node texts, run the Shen `unii.apply-byte-policy` over nodes built by `unii.make-node`. Compare bytes before and after, batch state, entry, merges and view at every row, and the rendered bytes every 100 rows. |
+| Side by side | The oracle's `hysteresis_append` / `hysteresis_resume` against the engine policy at every step: threshold-equality cases, stalled batches resumed when parents are published, and 40 random configurations with hostile text and partial parent availability. |
+| Addresses and keys | Zoom and key validity at and around the 2^31 − 1 ceiling |
+| Due ordering | 6,000 pairs, including T near 2^31 and levels up to 30, against the oracle's exact cross-products |
+| Canonical text | 3,000 texts containing every line-break form, controls, `\|`, `%`, multibyte characters and long ranges (the engine splits long text into halves when rendering), against `oracle.render_line` |
 
-```lua
-{
-  view   = { {level, index}, ... },   -- input view, oldest first, aligned, gap-free
-  total  = T,                         -- message count used for due scores
-  budget = B,                         -- merge until #view <= B
-  expect_view   = { {level, index}, ... },
-  expect_merged = { {level, index}, ... },   -- optional: parents in merge order
-}
-```
+`luajit unii/eval/oracle/spec.lua` runs the oracle's own checks, and
+`luajit unii/eval/oracle/generate_fixtures.lua --check` confirms the
+committed traces are current. If the oracle changes, regenerate the traces
+(`generate_fixtures.lua`) in the same commit.
 
-The line-count policy treats every parent as built. The due score for a
-pair whose left key is `{L, I}` is `(T - last) / 2^L`, with
-`last = (I + 2) * 2^L - 1`. The greatest score is merged first, and on a
-tie the oldest pair is merged first (see `numeric.md`). The oracle should
-compute these scores without trusting the core: exact rationals or int64
-cross-multiplication.
+## Disagreements
 
-Byte-budget hysteresis is a separate policy. If the oracle also models it,
-add a separate fixture kind and keep it apart from the line-count steps.
-Its rules are in `numeric.md`. `test_hysteresis.lua` already contains an
-in-tree reference model.
-
-## In-tree reference until the fixtures exist
-
-`test_view.lua` reimplements the gist's rollback `push` in Lua and checks
-three things against the Shen policy:
-
-1. The push table for t = 0..9 matches.
-2. The worked T = 10 example matches.
-3. The merge sequence equals the push list at all 20,001 steps.
-
-`test_tree.lua` checks the due ordering against int64 cross-multiplication.
-These checks live inside this repository and are not independent of it.
+Each disagreement is resolved by deciding which side is wrong, fixing that
+side and recording the decision in `decisions.md`. Neither side is
+special-cased in the tests.
