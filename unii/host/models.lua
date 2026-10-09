@@ -25,7 +25,7 @@ function M.classify(result, stream_done)
   if o == "succeeded" then
     local h = result.status or 0
     if h >= 200 and h < 300 then
-      if stream_done == false then return "retryable", "stream ended without [DONE]" end
+      if stream_done == false then return "uncertain", "stream ended without [DONE]" end
       return nil
     end
     if h == 429 or h >= 500 then return "retryable", "http " .. h end

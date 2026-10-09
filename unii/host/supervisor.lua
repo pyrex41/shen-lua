@@ -19,7 +19,7 @@
 -- "dispatch", cmd, job) is journaled. A command with a dispatch record and
 -- no journaled outcome was in flight when a previous process stopped: the
 -- provider may have received it, so it is never sent again automatically.
--- dispatch_pending() submits summary-failed with class "uncertain" for it
+-- dispatch_pending() submits summary-uncertain for it
 -- and the core parks the job until an operator retries it.
 local codec = require("unii.host.codec")
 local schema = require("unii.host.schema")
@@ -139,7 +139,7 @@ function Sup:_absorb(ev, out, replaying)
   if ev._ == "message-appended" and not rejected then
     self.messages[ev.id] = { kind = ev.kind, text = ev.content.text, date = ev.date }
   end
-  if ev._ == "summary-completed" or ev._ == "summary-failed" then
+  if ev._ == "summary-completed" or ev._ == "summary-failed" or ev._ == "summary-uncertain" then
     for cmd, c in pairs(self.outstanding) do
       if c.job == ev.job then self.outstanding[cmd] = nil; self.started[cmd] = nil; self.intent[cmd] = nil end
     end
@@ -192,13 +192,25 @@ function Sup:orphans()
   return out
 end
 
+-- summary-uncertain for a command; a leaf job's report carries the message
+-- so the core can render it provisionally.
+function Sup:_uncertain_event(c)
+  local raw = {}
+  if c.input._ == "leaf-input" then
+    local m = self.messages[c.input.message]
+    if not m then error("no stored source for message " .. c.input.message, 0) end
+    raw[1] = { _ = "content", bytes = #m.text, sha256 = sha256.hex(m.text), text = m.text }
+  end
+  return { _ = "summary-uncertain", job = c.job, attempt = c.attempt.n, raw = raw }
+end
+
 -- Settle orphans as uncertain, in command order. Each is an ordinary
 -- journaled event, so replay reproduces it.
 function Sup:recover()
   local n = 0
   for _, c in ipairs(self:orphans()) do
     if self.outstanding[c.cmd] then
-      self:submit { _ = "summary-failed", job = c.job, attempt = c.attempt.n, class = "uncertain" }
+      self:submit(self:_uncertain_event(c))
       n = n + 1
     end
   end
@@ -230,6 +242,8 @@ function Sup:dispatch_pending()
       if outcome.ok then
         self.inbox[#self.inbox + 1] = { _ = "summary-completed", job = c.job, attempt = c.attempt.n,
           bytes = #outcome.text, sha256 = sha256.hex(outcome.text), text = outcome.text }
+      elseif outcome.class == "uncertain" then
+        self.inbox[#self.inbox + 1] = self:_uncertain_event(c)
       else
         self.inbox[#self.inbox + 1] = { _ = "summary-failed", job = c.job, attempt = c.attempt.n,
           class = outcome.class }
