@@ -159,6 +159,24 @@ end
 -- add after the check (if-chains, fork, guard imports).
 local LET_SPLIT_LOCALS = 120
 
+-- The wide retry (see translate_core) is for predicates that still pass a
+-- Lua limit after splitting: a 40+ premise consume helper hands ~2N
+-- captures to one constructor call (250 registers), its lifted functions
+-- outgrow the chunk's locals, and one function can reference more than 60
+-- of them as upvalues. In wide mode:
+--   * a static with more than WIDE_CAPS parameters takes its free vars as
+--     one table T (read as T[i]), and splitting never refuses;
+--   * a continuation with more than WIDE_CAPS captures reads CAPREF(base, i)
+--     at each use instead of copying every capture into a local;
+--   * a handle with more than WIDE_NEWCONT captures is built by
+--     NEWCONTT(fn, {...}): same capbuf layout, no wide argument list;
+--   * lifted functions are fields of one chunk table LT;
+--   * a cons chain longer than WIDE_CONS is built by CONSL({...}, tail).
+local WIDE_SPLIT_LOCALS = 60
+local WIDE_CAPS = 24
+local WIDE_NEWCONT = 48
+local WIDE_CONS = 16
+
 local function indent(d) return string.rep("  ", d) end
 
 -- A let extends env with a child table that __index-chains to its parent.
@@ -301,6 +319,20 @@ compile_term = function(ctx, e, env, out, d)
   if is_cons(e) then
     local h = e[1]
     if h == SYM["cons"] and is_cons(e[2]) and is_cons(e[2][2]) then
+      if ctx.wide then
+        -- every pending CONS argument holds a register
+        local elems, t = {}, e
+        while is_cons(t) and t[1] == SYM["cons"] and is_cons(t[2]) and is_cons(t[2][2]) do
+          elems[#elems + 1] = t[2][1]
+          t = t[2][2][1]
+        end
+        if #elems > WIDE_CONS then
+          local parts = {}
+          for i, x in ipairs(elems) do parts[i] = compile_term(ctx, x, env, out, d) end
+          return "CONSL({" .. table.concat(parts, ", ") .. "}, "
+                 .. compile_term(ctx, t, env, out, d) .. ")"
+        end
+      end
       local a = compile_term(ctx, e[2][1], env, out, d)
       local b = compile_term(ctx, e[2][2][1], env, out, d)
       return "CONS(" .. a .. ", " .. b .. ")"
@@ -379,10 +411,11 @@ compile_value = function(ctx, e, env, out, d)
   -- (let V Expr Body) — including the kernel's multi-binding form
   -- (let V1 E1 V2 E2 ... Body), which the Shen macro pipeline would desugar
   if h == SYM["let"] and is_cons(args) and is_cons(args[2]) then
-    if ctx.split and ctx.fnloc >= LET_SPLIT_LOCALS then
-      -- a static this wide would split again on its first let
+    if ctx.split and ctx.fnloc >= (ctx.wide and WIDE_SPLIT_LOCALS or LET_SPLIT_LOCALS) then
+      -- a static this wide would split again on its first let (a wide
+      -- static takes them as one table)
       local fvs, implicit = static_fvs({}, e, env)
-      if #fvs < LET_SPLIT_LOCALS then
+      if ctx.wide or #fvs < LET_SPLIT_LOCALS then
         local st = ctx:lift_static(nil, {}, e, env, fvs, implicit)
         return ctx:callstatic(st, {}, env, out, d)
       end
@@ -708,10 +741,22 @@ local function newcont_ctor(k)
   return "NEWCONTV"
 end
 
+-- the handle construction for continuation function `fname` over the Lua
+-- expressions `caps`
+local function newcont_call(ctx, fname, caps)
+  if ctx.wide and #caps > WIDE_NEWCONT then
+    return "NEWCONTT(" .. fname .. ", {" .. table.concat(caps, ", ") .. "})"
+  end
+  local parts = { fname }
+  for _, c in ipairs(caps) do parts[#parts + 1] = c end
+  return newcont_ctor(#caps) .. "(" .. table.concat(parts, ", ") .. ")"
+end
+
 local function liftname(ctx, pfx)
   ctx.nlift = ctx.nlift + 1
   local fname = pfx .. ctx.nlift
   ctx.liftnames[#ctx.liftnames + 1] = fname
+  if ctx.wide then return "LT." .. fname end
   return fname
 end
 
@@ -760,9 +805,17 @@ function CtxMT.lift_static(ctx, name, params, body, env, fvs, implicit)
     sig[#sig + 1] = "p" .. i
     penv[p.name] = { lua = "p" .. i, kind = "term" }
   end
-  for i, vn in ipairs(fvs) do
-    sig[#sig + 1] = "fv" .. i
-    penv[vn] = { lua = "fv" .. i, kind = env[vn].kind }
+  if ctx.wide and #params + #fvs > WIDE_CAPS then
+    st.wide = true
+    sig[#sig + 1] = "T"
+    for i, vn in ipairs(fvs) do
+      penv[vn] = { lua = "T[" .. i .. "]", kind = env[vn].kind }
+    end
+  else
+    for i, vn in ipairs(fvs) do
+      sig[#sig + 1] = "fv" .. i
+      penv[vn] = { lua = "fv" .. i, kind = env[vn].kind }
+    end
   end
   local fbuf = {}
   local saved_loc = ctx.fnloc
@@ -779,12 +832,17 @@ end
 
 -- direct invocation of a static (thaw GoTo / (GoTo a b))
 function CtxMT.callstatic(ctx, st, call_args, env, out, d)
-  local parts = {}
+  local parts, fvp = {}, {}
   for _, a in ipairs(call_args) do parts[#parts + 1] = a end
   for _, vn in ipairs(st.fvs) do
     local b = env[vn]
     if not b then refuse(ctx, "static fv out of scope: " .. vn) end
-    parts[#parts + 1] = b.lua
+    fvp[#fvp + 1] = b.lua
+  end
+  if st.wide then
+    parts[#parts + 1] = "{" .. table.concat(fvp, ", ") .. "}"
+  else
+    for _, l in ipairs(fvp) do parts[#parts + 1] = l end
   end
   return st.fn .. "(" .. table.concat(parts, ", ") .. ")"
 end
@@ -826,13 +884,18 @@ function CtxMT.lift_cont(ctx, body, env, out, d)
   for vn, b in pairs(implicit) do penv[vn] = b end
   local fbuf = {}
   local decls = {}
+  local wide = ctx.wide and #capture > WIDE_CAPS
   for i, vn in ipairs(capture) do
-    local lv = "c" .. i
-    decls[#decls + 1] = "local " .. lv .. " = CAPREF(base, " .. (i - 1) .. ")"
-    penv[vn] = { lua = lv, kind = env[vn].kind }
+    if wide then
+      penv[vn] = { lua = "CAPREF(base, " .. (i - 1) .. ")", kind = env[vn].kind }
+    else
+      local lv = "c" .. i
+      decls[#decls + 1] = "local " .. lv .. " = CAPREF(base, " .. (i - 1) .. ")"
+      penv[vn] = { lua = lv, kind = env[vn].kind }
+    end
   end
   local saved_loc = ctx.fnloc
-  ctx.fnloc = #capture + 2
+  ctx.fnloc = (wide and 0 or #capture) + 2
   local fval = compile_value(ctx, body, penv, fbuf, 1)
   ctx.fnloc = saved_loc
   local def = { fname .. " = function(base, h)" }
@@ -842,9 +905,9 @@ function CtxMT.lift_cont(ctx, body, env, out, d)
   def[#def + 1] = "end"
   ctx.buf[#ctx.buf + 1] = table.concat(def, "\n")
 
-  local parts = { fname }
-  for _, vn in ipairs(capture) do parts[#parts + 1] = env[vn].lua end
-  return newcont_ctor(#capture) .. "(" .. table.concat(parts, ", ") .. ")"
+  local caps = {}
+  for _, vn in ipairs(capture) do caps[#caps + 1] = env[vn].lua end
+  return newcont_call(ctx, fname, caps)
 end
 
 -- a zero-param static used as a continuation value: wrap into a handle
@@ -855,19 +918,25 @@ function CtxMT.mkhandle(ctx, st, out, d)
   -- 17. The width must not be capped: refusing leaves NativePred[name]
   -- unset while the already-translated caller still calls it.
   local fname = liftname(ctx, "LH")
-  local decls, parts = {}, { fname }
+  local decls, caps = {}, {}
   local args = {}
   for i, vn in ipairs(st.fvs) do
-    decls[#decls + 1] = "  local c" .. i .. " = CAPREF(base, " .. (i - 1) .. ")"
-    args[#args + 1] = "c" .. i
-    parts[#parts + 1] = st.env[vn].lua
+    if st.wide then
+      args[#args + 1] = "CAPREF(base, " .. (i - 1) .. ")"
+    else
+      decls[#decls + 1] = "  local c" .. i .. " = CAPREF(base, " .. (i - 1) .. ")"
+      args[#args + 1] = "c" .. i
+    end
+    caps[#caps + 1] = st.env[vn].lua
   end
+  local call_args = table.concat(args, ", ")
+  if st.wide then call_args = "{" .. call_args .. "}" end
   local def = { fname .. " = function(base, h)" }
   for _, l in ipairs(decls) do def[#def + 1] = l end
-  def[#def + 1] = "  return " .. st.fn .. "(" .. table.concat(args, ", ") .. ")"
+  def[#def + 1] = "  return " .. st.fn .. "(" .. call_args .. ")"
   def[#def + 1] = "end"
   ctx.buf[#ctx.buf + 1] = table.concat(def, "\n")
-  return newcont_ctor(#st.fvs) .. "(" .. table.concat(parts, ", ") .. ")"
+  return newcont_call(ctx, fname, caps)
 end
 
 -- ---------------------------------------------------------------------------
@@ -897,7 +966,8 @@ local VAR_BASE, CONS_BASE = E.VAR_BASE, E.CONS_BASE
 -- translate_core: shared by defprolog define-forms and the t-star driver
 -- defuns. `allparams` is the full parameter list whose LAST FOUR entries are
 -- the Vec / Lock / Count / Cont gensyms (the uniform CPS goal ABI).
-local function translate_once(name, allparams, body, split)
+-- mode: false, "split" (LET_SPLIT_LOCALS), or "wide" (see WIDE_CAPS)
+local function translate_once(name, allparams, body, mode)
   local np = #allparams
   assert(np >= 4, "prolog fn must have at least the B L K C params")
   local nparams = np - 4
@@ -906,7 +976,7 @@ local function translate_once(name, allparams, body, split)
 
   local ctx = setmetatable({
     buf = {}, nlift = 0, nlocal = 0, fail = {}, liftnames = {},
-    fnloc = nparams + 2, split = split,
+    fnloc = nparams + 2, split = mode and true or false, wide = mode == "wide",
   }, CtxMT)
 
   local env = {}
@@ -932,12 +1002,17 @@ local function translate_once(name, allparams, body, split)
     return nil, tostring(val)
   end
 
-  if #ctx.liftnames > 150 then
-    return nil, "too many lifted functions (" .. #ctx.liftnames .. ")"
-  end
   local src = { CHUNK_PREAMBLE }
-  if #ctx.liftnames > 0 then
-    src[#src + 1] = "local " .. table.concat(ctx.liftnames, ", ")
+  if ctx.wide then
+    src[#src + 1] = "local NEWCONTT, CONSL = E.newcontT, E.cons_list\nlocal LT = {}"
+  else
+    if #ctx.liftnames > 150 then
+      return nil, "too many lifted functions (" .. #ctx.liftnames .. ")", nil,
+             "too many lifted functions"
+    end
+    if #ctx.liftnames > 0 then
+      src[#src + 1] = "local " .. table.concat(ctx.liftnames, ", ")
+    end
   end
   for _, def in ipairs(ctx.buf) do src[#src + 1] = def end
   src[#src + 1] = "return function(" .. table.concat(sig, ", ") .. ")"
@@ -956,10 +1031,24 @@ end
 
 -- Let-chain splitting (see compile_value) costs a call per split point, so
 -- it is only used when the unsplit chunk exceeds Lua's local-variable cap.
+-- The wide shape (see WIDE_CAPS) is the last resort, for what splitting
+-- alone cannot fit.
+local function width_error(lerr)
+  if not lerr then return false end
+  lerr = tostring(lerr)
+  return lerr:find("local variables", 1, true) ~= nil
+      or lerr:find("upvalues", 1, true) ~= nil
+      or lerr:find("too complex", 1, true) ~= nil
+      or lerr:find("too many lifted functions", 1, true) ~= nil
+end
+
 local function translate_core(name, allparams, body)
   local fn, err, src, lerr = translate_once(name, allparams, body, false)
   if lerr and tostring(lerr):find("local variables", 1, true) then
-    return translate_once(name, allparams, body, true)
+    fn, err, src, lerr = translate_once(name, allparams, body, "split")
+  end
+  if width_error(lerr) then
+    fn, err, src = translate_once(name, allparams, body, "wide")
   end
   return fn, err, src
 end

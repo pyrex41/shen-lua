@@ -188,6 +188,18 @@ do
   for _, k in ipairs({ 17, 41, 100 }) do
     check(readback(k, E.newcontV), "newcontV " .. k .. " captures read back and reclaim")
   end
+  -- the wide translation's table-fed constructor
+  local function newcontT(fn, ...) return E.newcontT(fn, { ... }) end
+  for _, k in ipairs({ 1, 16, 49, 261 }) do
+    check(readback(k, newcontT), "newcontT " .. k .. " captures read back and reclaim")
+  end
+
+  -- cons_list builds the same term as nested cons
+  local a, b, c = E.newvar(), E.newvar(), E.newvar()
+  local flat = E.cons_list({ a, b, c }, 0)
+  check(E.car(flat) == a and E.car(E.cdr(flat)) == b
+        and E.car(E.cdr(E.cdr(flat))) == c and E.cdr(E.cdr(E.cdr(flat))) == 0,
+        "cons_list matches nested cons")
 end
 
 -- ---------------------------------------------------------------------------
