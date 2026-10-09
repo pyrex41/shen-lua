@@ -1,0 +1,11 @@
+#!/usr/bin/env luajit
+-- unii launcher: resolves the repository root from this script's path so it
+-- runs from any working directory.
+local script = arg[0]
+local bin = script:match("^(.*)/[^/]+$") or "."
+local root = bin .. "/../.."
+local f = io.popen(("cd %q && pwd"):format(root))
+root = f:read("*l")
+f:close()
+package.path = root .. "/?.lua;" .. root .. "/?/init.lua;" .. package.path
+require("unii.host.cli").main(arg)
