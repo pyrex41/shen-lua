@@ -31,6 +31,7 @@ inputs give identical job ids, and a retry changes only the attempt.
 ```
 [submit-summary CmdId JobId [key Level Index] [attempt N Retry] Input]
 Retry = [first-attempt] | [retry-too-long Bytes] | [retry-after-failure Class]
+      | [retry-by-operator]
 Input = [leaf-input MessageId Kind Sha256]
       | [merge-input [key L 2I] LeftText [key L 2I+1] RightText]
 ```
@@ -41,10 +42,42 @@ contains the exact texts of the two children. Neither input contains any
 message after the node's interval.
 
 The supervisor reports the result as a `summary-completed` or
-`summary-failed` event. Summaries are read-only, so after a restart any
-command without a journaled outcome is dispatched again. A duplicate
-request costs spend but cannot publish twice, because a stale completion is
-ignored.
+`summary-failed` event. A stale or duplicate completion is ignored, so a
+summary can never publish twice. See "Effect states" for what happens to a
+request that may have reached the provider without a definite answer.
+
+### Effect states
+
+A summary job is in one of four states (`unii.job-status`):
+
+| State | Meaning | Leaves it by |
+|---|---|---|
+| `[queued Retry]` | waiting for a slot | dispatch |
+| `[dispatched CmdId]` | a `submit-summary` command is out | `summary-completed` or `summary-failed` |
+| `[blocked Reason]` | attempts used up, or a permanent failure | `operator-retry` |
+| `[uncertain CmdId]` | the request may have reached the provider and no definite outcome came back | `operator-retry` |
+
+The host reports `summary-failed` with class `uncertain` when:
+
+* the network adapter's outcome is `uncertain` (the request was sent, then
+  the connection dropped or the transfer timed out);
+* a request was cancelled after it was sent;
+* a previous process journaled the command's dispatch record and stopped
+  before journaling an outcome (`storage.md`, "Dispatch records").
+
+The core then marks the job `[uncertain CmdId]`, records
+`[job-uncertain Job CmdId]`, and emits `[effect-uncertain Job CmdId]`. The
+job is never dispatched again automatically, by the core, the supervisor or
+the adapter. It keeps its place in the queue order, so a leaf in this state
+holds coverage back, exactly like a blocked leaf. Late outcomes for its
+command are ignored (`completion-ignored`).
+
+`[operator-retry Job]` moves a blocked or uncertain job back to `queued` as
+attempt + 1 with `[retry-by-operator]`, past `max_attempts`. If that attempt
+fails retryably, the job blocks again instead of retrying, because the
+automatic budget is already spent. Each operator retry grants exactly one
+attempt. The CLI exposes it as `unii retry --dir D --job J`, and
+`unii status` lists stuck jobs with their reason or command id.
 
 Dispatch order:
 
@@ -63,6 +96,7 @@ Dispatch order:
 Event = [view-changed Rev Bytes Lines]
       | [memory-blocked JobId Reason]
       | [input-rejected Reason]
+      | [effect-uncertain JobId CmdId]
 ```
 
 During live operation, the supervisor passes client events to
@@ -77,7 +111,7 @@ During live operation, the supervisor passes client events to
 | `[view-merged ParentKey]` | two adjacent sibling lines were replaced by their parent |
 | `[batch-mode Bool]` | emitted only when the batch state changes |
 | `[view-revision Rev]` | the view revision was incremented |
-| `[job-created Job]`, `[job-retried New Previous]`, `[job-blocked Job Reason]` | job lifecycle |
+| `[job-created Job]`, `[job-retried New Previous]`, `[job-blocked Job Reason]`, `[job-uncertain Job CmdId]` | job lifecycle |
 | `[event-rejected Reason]`, `[completion-ignored Job Reason]` | input that was refused or ignored |
 
 Commands that the plan defines but this build does not implement:

@@ -67,4 +67,20 @@ whether tabs should survive. Either change is one function on each side,
 * **Uncertain summaries.** Whether a summary whose outcome is uncertain may
   ever be retried automatically, given that summaries are read-only. As
   instructed, it is never retried automatically, and only an operator
-  retry re-dispatches it (`commands.md`, "Effect states").
+  retry re-dispatches it (`commands.md`, "Effect states"). An uncertain
+  leaf holds coverage back until someone acts, so a flaky network can stall
+  the memory. That is the cost of this rule.
+
+## Network integration decisions
+
+These are implemented and pinned by tests. The ones marked **Reuben** are
+policy choices that the instruction did not settle.
+
+| # | Question | Decision | Reuben? |
+|---|---|---|---|
+| N1 | How a restart tells "maybe sent" from "never sent" | The supervisor journals a `dispatch` record before the provider starts a command. With the record and no outcome, the command becomes `uncertain`. Without the record, it is dispatched normally. | No |
+| N2 | Cancelled after send | Classified `uncertain`, like a drop | No |
+| N3 | 2xx stream that ends without `[DONE]` | `retryable`. The response was complete at the HTTP level, so the request is known to have been received and answered. | **Reuben** (low stakes) |
+| N4 | What an operator retry grants | One attempt past `max_attempts`. A retryable failure after it blocks the job instead of retrying. | **Reuben** |
+| N5 | TLS failure | `permanent`. A certificate problem does not fix itself, so it blocks the job for an operator instead of spending attempts. | No |
+| N6 | Inflight cap refusal from the client | Held in the provider and not charged as an attempt. The adapter caps at 9 (8 summaries + 1 turn); the core's default `max_inflight` is 8. | No |
