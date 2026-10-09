@@ -186,9 +186,7 @@ transactions, foreign bundles and configuration changes.
 
 Under the native Prolog engine, a file that defines a double-line datatype
 rule with six or more premises over other user datatypes fails at load
-with `shen.consume<N> is undefined`. Five premises work. In this repository
-the failure surfaced as a type error when such a record was used, which is
-how it was first found.
+with `shen.consume<N> is undefined`. Five premises work.
 
 Reproducer: `unii/test/fixtures/upstream/{six,five}_premises.shen`. Run it
 with `luajit unii/test/fixtures/upstream/probe.lua <file> <expr>`.
