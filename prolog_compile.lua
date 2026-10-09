@@ -775,11 +775,15 @@ end
 
 -- a zero-param static used as a continuation value: wrap into a handle
 function CtxMT.mkhandle(ctx, st, out, d)
-  -- captures = the static's free vars (numbers)
-  if #st.fvs > 16 then refuse(ctx, "handle captures > 16") end
+  -- captures = the static's free vars (numbers). NEWCONT0..16 stay
+  -- monomorphic so LuaJIT traces them. A consume helper for a sequent
+  -- premise closes over two locals per premise variable plus the
+  -- assumption and the engine temps (2*N+5): five premises fit in 16,
+  -- six need 17. Wider handles take NEWCONTV, the same varargs path
+  -- lift_cont uses. Refusing left NativePred[shen.consumeN] unset, and
+  -- the compiled caller then died with "shen.consumeN is undefined".
   local fname = liftname(ctx, "LH")
   local decls, parts = {}, { fname }
-  local penv = setmetatable({}, { __index = st.env })
   local args = {}
   for i, vn in ipairs(st.fvs) do
     decls[#decls + 1] = "  local c" .. i .. " = CAPREF(base, " .. (i - 1) .. ")"
@@ -791,7 +795,9 @@ function CtxMT.mkhandle(ctx, st, out, d)
   def[#def + 1] = "  return " .. st.fn .. "(" .. table.concat(args, ", ") .. ")"
   def[#def + 1] = "end"
   ctx.buf[#ctx.buf + 1] = table.concat(def, "\n")
-  return "NEWCONT" .. #st.fvs .. "(" .. table.concat(parts, ", ") .. ")"
+  local ncap = #st.fvs
+  local mk = (ncap <= 16) and ("NEWCONT" .. ncap) or "NEWCONTV"
+  return mk .. "(" .. table.concat(parts, ", ") .. ")"
 end
 
 -- ---------------------------------------------------------------------------
