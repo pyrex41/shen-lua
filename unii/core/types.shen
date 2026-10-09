@@ -6,7 +6,8 @@
 
    No datatype rule has more than five premises: at the pinned shen-lua
    revision the native Prolog engine fails (undefined shen.consume<N>) when a
-   double-line rule with six or more premises is used to typecheck a pattern.
+   file defines a double-line rule with six or more premises over other user
+   datatypes (probe: test/fixtures/upstream/, run by test_boundary.lua).
    Wider records are therefore nested; code goes through the accessor and
    constructor functions below rather than matching the nesting directly. *\
 
