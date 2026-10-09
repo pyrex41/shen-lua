@@ -161,6 +161,33 @@ do
     return E.spill(hh)[1] == sym
   end, { sym })
   check(E.thawH(hs) == true, "spill captures")
+
+  -- wide handles (the translator emits newcontV past 16 captures): same
+  -- capbuf layout as newcont16, and reclaimed by undo
+  local function readback(k, mk)
+    local vals = {}
+    for i = 1, k do vals[i] = i * 3 + k end
+    local seen
+    local kfn = function(b)
+      seen = {}
+      for i = 1, k do seen[i] = E.capref(b, i - 1) end
+      return true
+    end
+    local tm2, vm2, hm2, bm2, cm2 = E.marks()
+    local hh = mk(kfn, unpack(vals))
+    local _, _, _, top = E.tops()
+    E.thawH(hh)
+    local ok = #seen == k and top == bm2 + k
+    for i = 1, k do ok = ok and seen[i] == vals[i] end
+    E.undo(tm2, vm2, hm2, bm2, cm2)
+    local _, _, _, top2, ch2 = E.tops()
+    return ok and top2 == bm2 and ch2 == hm2
+  end
+  check(readback(16, E.newcont16) and readback(16, E.newcontV),
+        "newcontV matches newcont16 layout")
+  for _, k in ipairs({ 17, 41, 100 }) do
+    check(readback(k, E.newcontV), "newcontV " .. k .. " captures read back and reclaim")
+  end
 end
 
 -- ---------------------------------------------------------------------------

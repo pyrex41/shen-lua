@@ -145,15 +145,56 @@ local function refuse(ctx, why)
   error(ctx.fail, 0)
 end
 
+-- ctx.fnloc counts the locals (params included) declared so far in the Lua
+-- function being emitted, across all branches: an upper bound on what Lua
+-- checks against its 200-locals-per-function cap.
 local function newlocal(ctx, pfx)
   ctx.nlocal = ctx.nlocal + 1
+  ctx.fnloc = ctx.fnloc + 1
   return (pfx or "v") .. ctx.nlocal
 end
 
+-- On the split retry (see translate_core), past this many locals a let chain
+-- continues in a lifted static. The margin covers locals a single let can
+-- add after the check (if-chains, fork, guard imports).
+local LET_SPLIT_LOCALS = 120
+
 local function indent(d) return string.rep("  ", d) end
+
+-- A let extends env with a child table that __index-chains to its parent.
+-- LuaJIT gives up on __index chains of 100 tables ("loop in gettable"), and
+-- a wide sequent rule's consume helper nests that many lets. Every
+-- ENV_FLATTEN levels the chain is collapsed into one table (inner bindings
+-- win) whose __index is the chain's root lookup (nil, or a lift_static /
+-- lift_cont penv function), so lookups see exactly the same bindings.
+-- Parents are never written after a child is created, so the copy is safe.
+local ENV_FLATTEN = 32
+
+local function extend_env(env)
+  local mt = getmetatable(env)
+  local depth = (mt and mt.depth or 0) + 1
+  if depth < ENV_FLATTEN then
+    return setmetatable({}, { __index = env, depth = depth })
+  end
+  local flat, t, root = {}, env, nil
+  while t do
+    for k, v in pairs(t) do
+      if flat[k] == nil then flat[k] = v end
+    end
+    local tmt = getmetatable(t)
+    local idx = tmt and tmt.__index
+    if type(idx) == "table" then
+      t = idx
+    else
+      root = idx; t = nil
+    end
+  end
+  return setmetatable({}, { __index = setmetatable(flat, { __index = root, depth = 1 }), depth = 2 })
+end
 
 local compile_value  -- fwd: control/result position
 local compile_term   -- fwd: term-construction position
+local static_fvs     -- fwd: free vars of a static about to be lifted
 
 -- atom constant: interned at translate time, inlined as a number literal
 local function atomconst(x)
@@ -338,6 +379,14 @@ compile_value = function(ctx, e, env, out, d)
   -- (let V Expr Body) — including the kernel's multi-binding form
   -- (let V1 E1 V2 E2 ... Body), which the Shen macro pipeline would desugar
   if h == SYM["let"] and is_cons(args) and is_cons(args[2]) then
+    if ctx.split and ctx.fnloc >= LET_SPLIT_LOCALS then
+      -- a static this wide would split again on its first let
+      local fvs, implicit = static_fvs({}, e, env)
+      if #fvs < LET_SPLIT_LOCALS then
+        local st = ctx:lift_static(nil, {}, e, env, fvs, implicit)
+        return ctx:callstatic(st, {}, env, out, d)
+      end
+    end
     local v, ex = args[1], args[2][1]
     local rest = args[2][2]
     local body
@@ -347,7 +396,7 @@ compile_value = function(ctx, e, env, out, d)
       -- more bindings follow: re-wrap as a nested let
       body = R.cons(SYM["let"], rest)
     end
-    local nenv = setmetatable({}, { __index = env })
+    local nenv = extend_env(env)
     if is_cons(ex) and (ex[1] == SYM["freeze"] or ex[1] == SYM["lambda"]) then
       -- closure-convert: a let-bound freeze/lambda-chain becomes a static
       -- chunk-level function with its free vars as trailing parameters
@@ -650,6 +699,15 @@ end
 local CtxMT = {}
 CtxMT.__index = CtxMT
 
+-- Handle constructor for k captures. NEWCONT0..16 and the varargs NEWCONTV
+-- share one layout (k contiguous capbuf slots at contBase[h]). Generated
+-- fixed-width constructors past 16 win in isolation but measured ~25% slower
+-- on einsteins-riddle, whose wide continuations take NEWCONTV.
+local function newcont_ctor(k)
+  if k <= 16 then return "NEWCONT" .. k end
+  return "NEWCONTV"
+end
+
 local function liftname(ctx, pfx)
   ctx.nlift = ctx.nlift + 1
   local fname = pfx .. ctx.nlift
@@ -661,11 +719,10 @@ end
 -- A static referencing another static is fine (both are chunk-level fns):
 -- the inner static's free vars are folded into THIS static's free vars so
 -- they are in scope at the inner call sites.
-function CtxMT.lift_static(ctx, name, params, body, env)
-  local fname = liftname(ctx, "LF")
+static_fvs = function(params, body, env)
   local bound = {}
   for _, p in ipairs(params) do bound[p.name] = true end
-  local fvs, fvseen = {}, {}
+  local fvs, fvseen, implicit = {}, {}, {}
   local function addfv(vn)
     if bound[vn] or fvseen[vn] then return end
     fvseen[vn] = true
@@ -675,19 +732,29 @@ function CtxMT.lift_static(ctx, name, params, body, env)
       for _, f in ipairs(outer.fvs) do addfv(f) end
     elseif outer.kind == "vec" or outer.kind == "lock" then
       -- engine-implicit, dropped at use sites
+      implicit[vn] = outer
     else
       fvs[#fvs + 1] = vn
     end
   end
   for _, vn in ipairs(freevars(body)) do addfv(vn) end
+  return fvs, implicit
+end
+
+function CtxMT.lift_static(ctx, name, params, body, env, fvs, implicit)
+  if not fvs then fvs, implicit = static_fvs(params, body, env) end
+  local fname = liftname(ctx, "LF")
   local st = { kind = "static", fn = fname, params = params, fvs = fvs,
                body = body, env = env }
-  -- emit the lifted definition; statics resolve through to chunk scope
+  -- emit the lifted definition; statics resolve through to chunk scope.
+  -- The vec/lock params keep their kinds so a misuse refuses exactly as it
+  -- would have in the enclosing env.
   local penv = setmetatable({}, { __index = function(_, k)
     local b = env[k]
     if b and b.kind == "static" then return b end
     return nil
   end })
+  for vn, b in pairs(implicit) do penv[vn] = b end
   local sig = {}
   for i, p in ipairs(params) do
     sig[#sig + 1] = "p" .. i
@@ -698,7 +765,10 @@ function CtxMT.lift_static(ctx, name, params, body, env)
     penv[vn] = { lua = "fv" .. i, kind = env[vn].kind }
   end
   local fbuf = {}
+  local saved_loc = ctx.fnloc
+  ctx.fnloc = #sig
   local fval = compile_value(ctx, body, penv, fbuf, 1)
+  ctx.fnloc = saved_loc
   local def = { fname .. " = function(" .. table.concat(sig, ", ") .. ")" }
   for _, l in ipairs(fbuf) do def[#def + 1] = l end
   def[#def + 1] = "  return " .. fval
@@ -729,7 +799,7 @@ function CtxMT.lift_cont(ctx, body, env, out, d)
   end
   -- statics referenced from the cont body are chunk-level fns whose OWN free
   -- vars must also be captured
-  local capture, statics, seen = {}, {}, {}
+  local capture, statics, seen, implicit = {}, {}, {}, {}
   local function addcap(vn)
     if seen[vn] then return end
     seen[vn] = true
@@ -740,6 +810,7 @@ function CtxMT.lift_cont(ctx, body, env, out, d)
     elseif b.kind == "vec" or b.kind == "lock" then
       -- the prolog vector / lock vector are engine-implicit: dropped at
       -- every use site, so never captured
+      implicit[vn] = b
     else
       capture[#capture + 1] = vn
     end
@@ -752,6 +823,7 @@ function CtxMT.lift_cont(ctx, body, env, out, d)
     if b and b.kind == "static" then return b end
     return nil
   end })
+  for vn, b in pairs(implicit) do penv[vn] = b end
   local fbuf = {}
   local decls = {}
   for i, vn in ipairs(capture) do
@@ -759,7 +831,10 @@ function CtxMT.lift_cont(ctx, body, env, out, d)
     decls[#decls + 1] = "local " .. lv .. " = CAPREF(base, " .. (i - 1) .. ")"
     penv[vn] = { lua = lv, kind = env[vn].kind }
   end
+  local saved_loc = ctx.fnloc
+  ctx.fnloc = #capture + 2
   local fval = compile_value(ctx, body, penv, fbuf, 1)
+  ctx.fnloc = saved_loc
   local def = { fname .. " = function(base, h)" }
   for _, l in ipairs(decls) do def[#def + 1] = "  " .. l end
   for _, l in ipairs(fbuf) do def[#def + 1] = l end
@@ -769,19 +844,16 @@ function CtxMT.lift_cont(ctx, body, env, out, d)
 
   local parts = { fname }
   for _, vn in ipairs(capture) do parts[#parts + 1] = env[vn].lua end
-  local mk = (#capture <= 16) and ("NEWCONT" .. #capture) or "NEWCONTV"
-  return mk .. "(" .. table.concat(parts, ", ") .. ")"
+  return newcont_ctor(#capture) .. "(" .. table.concat(parts, ", ") .. ")"
 end
 
 -- a zero-param static used as a continuation value: wrap into a handle
 function CtxMT.mkhandle(ctx, st, out, d)
-  -- captures = the static's free vars (numbers). NEWCONT0..16 stay
-  -- monomorphic so LuaJIT traces them. A consume helper for a sequent
-  -- premise closes over two locals per premise variable plus the
-  -- assumption and the engine temps (2*N+5): five premises fit in 16,
-  -- six need 17. Wider handles take NEWCONTV, the same varargs path
-  -- lift_cont uses. Refusing left NativePred[shen.consumeN] unset, and
-  -- the compiled caller then died with "shen.consumeN is undefined".
+  -- captures = the static's free vars (numbers). A consume helper for a
+  -- sequent premise closes over two locals per premise variable plus the
+  -- assumption and the engine temps (2*N+5), so six premises already need
+  -- 17. The width must not be capped: refusing leaves NativePred[name]
+  -- unset while the already-translated caller still calls it.
   local fname = liftname(ctx, "LH")
   local decls, parts = {}, { fname }
   local args = {}
@@ -795,9 +867,7 @@ function CtxMT.mkhandle(ctx, st, out, d)
   def[#def + 1] = "  return " .. st.fn .. "(" .. table.concat(args, ", ") .. ")"
   def[#def + 1] = "end"
   ctx.buf[#ctx.buf + 1] = table.concat(def, "\n")
-  local ncap = #st.fvs
-  local mk = (ncap <= 16) and ("NEWCONT" .. ncap) or "NEWCONTV"
-  return mk .. "(" .. table.concat(parts, ", ") .. ")"
+  return newcont_ctor(#st.fvs) .. "(" .. table.concat(parts, ", ") .. ")"
 end
 
 -- ---------------------------------------------------------------------------
@@ -827,7 +897,7 @@ local VAR_BASE, CONS_BASE = E.VAR_BASE, E.CONS_BASE
 -- translate_core: shared by defprolog define-forms and the t-star driver
 -- defuns. `allparams` is the full parameter list whose LAST FOUR entries are
 -- the Vec / Lock / Count / Cont gensyms (the uniform CPS goal ABI).
-local function translate_core(name, allparams, body)
+local function translate_once(name, allparams, body, split)
   local np = #allparams
   assert(np >= 4, "prolog fn must have at least the B L K C params")
   local nparams = np - 4
@@ -836,6 +906,7 @@ local function translate_core(name, allparams, body)
 
   local ctx = setmetatable({
     buf = {}, nlift = 0, nlocal = 0, fail = {}, liftnames = {},
+    fnloc = nparams + 2, split = split,
   }, CtxMT)
 
   local env = {}
@@ -877,10 +948,20 @@ local function translate_core(name, allparams, body)
 
   local chunk, err = loadstring(source, "@prolog:" .. name)
   if not chunk then
-    return nil, "luagen: " .. tostring(err) .. "\n" .. source
+    return nil, "luagen: " .. tostring(err) .. "\n" .. source, nil, err
   end
   local fn = chunk(E, NP, F, E.materialize, E.import_cached)
   return fn, nil, source
+end
+
+-- Let-chain splitting (see compile_value) costs a call per split point, so
+-- it is only used when the unsplit chunk exceeds Lua's local-variable cap.
+local function translate_core(name, allparams, body)
+  local fn, err, src, lerr = translate_once(name, allparams, body, false)
+  if lerr and tostring(lerr):find("local variables", 1, true) then
+    return translate_once(name, allparams, body, true)
+  end
+  return fn, err, src
 end
 M.translate_core = translate_core
 

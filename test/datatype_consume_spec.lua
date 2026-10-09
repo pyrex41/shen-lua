@@ -23,6 +23,7 @@ shen.boot{ quiet = true }
 local R = require("runtime")
 local P = shen.prims
 local E = require("prolog_engine")
+local PC = require("prolog_compile")
 
 local pass, fail = 0, 0
 local function check(desc, got, want)
@@ -84,7 +85,7 @@ local function run_rule(name, goal, assum)
   return res
 end
 
-local function varname(i) return string.char(64 + i) end
+local function varname(i) return "V" .. i end
 
 local function define_row(n)
   local vars, jud = {}, {}
@@ -111,10 +112,30 @@ shen.eval([[
 ]])
 
 -- Five is the last width that fit the old 16-capture helper. Six is the
--- first that used to be missing. Eight and twelve sit past that threshold
--- and under the later metatable-chain limit on very deep clauses.
-for _, n in ipairs({ 5, 6, 8, 12 }) do
-  local name = define_row(n)
+-- first that used to be missing. From sixteen the native consume helper
+-- nested past LuaJIT's 100-table __index chain ("loop in gettable") and then
+-- past Lua's 200 locals per function; from about thirty the legacy KL defun
+-- did too, and the datatype failed to load at all. Thirty-seven is the
+-- widest that loads today (see the note at the end of this file).
+local WIDTHS = { 5, 6, 8, 12, 15, 16, 20, 24, 30, 32, 37 }
+
+local function check_width(n)
+  local before = {}
+  for k in pairs(PC.registry) do before[k] = true end
+  local loaded, name = pcall(define_row, n)
+  check(n .. " premises: datatype loads", loaded or errmsg(name), true)
+  if not loaded then return end
+  local helpers, native = 0, 0
+  for k in pairs(PC.registry) do
+    if not before[k] and k:match("^shen%.consume") then
+      helpers = helpers + 1
+      if E.NativePred[k] ~= nil then native = native + 1 end
+    end
+  end
+  check(n .. " premises: every consume helper translates natively",
+        helpers > 0 and native == helpers, true)
+  check(n .. " premises: rule predicate translates natively",
+        E.NativePred[name .. "#type"] ~= nil, true)
   local ty, err = typecheck("0", "piece")
   check(n .. " premises: 0 : piece still holds",
         err or R.to_str(ty), "piece")
@@ -140,11 +161,31 @@ for _, n in ipairs({ 5, 6, 8, 12 }) do
   local wrong, werr = run_rule(name, goal, bad)
   check(n .. " premises: short hypothesis misses", werr or wrong, false)
 
+  -- the LAST premise is still unpacked: on wide rules it runs in code that
+  -- a let-chain split moved into a separate function. Only the assumption
+  -- 7 : piece taken from the last element proves 7 : piece.
+  local tail = {}
+  for i = 1, n do tail[i] = elems[i] end
+  tail[n] = 7
+  local tailhyp = R.cons(judgement(list_form(tail), R.intern(name)), R.NIL)
+  local seven = judgement(7, PIECE)
+  local thit, therr = run_rule(name, seven, tailhyp)
+  check(n .. " premises: last element is unpacked", therr or thit, true)
+  local tmiss, tmerr = run_rule(name, seven, hyp)
+  check(n .. " premises: 7 : piece needs the last element", tmerr or tmiss, false)
+
   local nope = judgement(2, PIECE)
   local no, nerr = run_rule(name, nope, hyp)
   check(n .. " premises: unpacked rule does not prove 2 : piece",
         nerr or no, false)
 end
+
+for _, n in ipairs(WIDTHS) do check_width(n) end
+
+-- Thirty-eight premises still fail to load: the legacy KL compiler hoists
+-- each premise's freeze continuation into a function taking all ~3N
+-- captures as parameters and passes them on in a nested call, which passes
+-- LuaJIT's 250-slot frame limit ("function or expression too complex").
 
 print(string.format("datatype_consume_spec: %d pass, %d fail", pass, fail))
 os.exit(fail == 0 and 0 or 1)
