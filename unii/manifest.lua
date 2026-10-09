@@ -40,7 +40,10 @@ return {
   },
 
   toolchain = {
-    luajit = "LuaJIT 2.1 (verified: 2.1.1703358377, Ubuntu 24.04 package 2.1.0+git20231223.c525bcb+dfsg-1ubuntu0.1; nixpkgs pin in unii/flake.lock)",
+    luajit = "LuaJIT 2.1; full suite verified on 2.1.1774638290 (nix develop ./unii, "
+          .. "/nix/store/damwm6hccy1ryvjsjizfjrxf8rmcraia-luajit-2.1.1774638290) and on "
+          .. "2.1.1703358377 (Ubuntu 24.04 package 2.1.0+git20231223.c525bcb+dfsg-1ubuntu0.1)",
+    dev_shell = "nix develop ./unii (unii/flake.nix + unii/flake.lock: luajit, git, curl, gnumake, coreutils)",
     nixpkgs = "a5cc6f2c37bf518436dc8d1c288ccd0c43c2f4c4", -- same pin as the repo root flake.lock
     platform = "Linux x86_64 verified; Linux aarch64 and macOS supported by host/posix.lua flag tables but unverified",
     external_libraries = "none (SHA-256, codec and POSIX bindings are in-tree; LuaJIT FFI only)",
