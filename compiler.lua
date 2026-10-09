@@ -548,10 +548,16 @@ end
 local CSE_MAX_LOCALS = 100
 local CCACHE = {}   -- chain key -> Lua local/slot name, block-scoped via __index
 local HOIST = nil   -- nil, or { out = {stmt strings}, pure = bool } at a flush site
-local FNL = { np = 0, npt = 0, pt = false, can_pt = false }  -- per-Lua-function
+-- nloc: every Lua local this function has declared so far (params, let
+-- locals, hoisted chain steps, fN callee refs), summed across branches, so it
+-- over-approximates the live count Lua checks against its 200 cap.
+local FNL = { np = 0, npt = 0, pt = false, can_pt = false, nloc = 0 }  -- per-Lua-function
 
-local function new_fnl(can_pt)
-  return { np = 0, npt = 0, pt = false, can_pt = can_pt }
+local WIDE = false  -- wide mode (see capture_plan)
+local WIDE_ARGS = 100
+
+local function new_fnl(can_pt, nparams)
+  return { np = 0, npt = 0, pt = false, can_pt = can_pt, nloc = nparams or 0 }
 end
 
 local function child_cache()
@@ -583,6 +589,7 @@ end
 local function chain_slot(expr)
   if FNL.np < CSE_MAX_LOCALS then
     FNL.np = FNL.np + 1
+    FNL.nloc = FNL.nloc + 1
     local ln = gen("p")
     HOIST.out[#HOIST.out+1] = "local " .. ln .. " = " .. expr .. "; "
     return ln
@@ -780,8 +787,13 @@ local function try_flatten_call_chain(form, env)
       call_str = ar and ("APP(" .. symlit(hname) .. ", " .. arg_list .. ")")
                  or unknown_call(hname, arg_list, #prev_strs + 1)
     end
-    stmts[#stmts+1] = "local " .. next_name .. " = " .. call_str .. ";"
-    inner_name = next_name
+    if WIDE then
+      -- one local for the whole chain: each step reads only the previous one
+      stmts[#stmts+1] = inner_name .. " = " .. call_str .. ";"
+    else
+      stmts[#stmts+1] = "local " .. next_name .. " = " .. call_str .. ";"
+      inner_name = next_name
+    end
   end
   -- outermost: emit as return statement
   local frame = frames[1]
@@ -867,6 +879,10 @@ local function ccall(form, env)
   local cargs = {}
   for i=1,#args do cargs[i] = cexpr(args[i], env) end
   local argstr = table.concat(cargs, ", ")
+  if WIDE and #cargs > WIDE_ARGS then
+    -- each argument would hold a register until the call
+    argstr = "UNPACK({" .. argstr .. "}, 1, " .. #cargs .. ")"
+  end
   -- Chain-hoist purity: this application runs after its args; anything the
   -- statement evaluates after it may no longer be hoisted ahead of it unless
   -- the head is known effect-free and non-raising.
@@ -1522,6 +1538,7 @@ local function snapshot_env(eform, env)
     local ln = env[kname]
     if type(ln) == "string" and params[ln] then
       local cap = gen("c")
+      FNL.nloc = FNL.nloc + 1
       stmts[#stmts + 1] = "local " .. cap .. " = " .. ln .. ";"
       newenv[kname] = cap
     end
@@ -1565,7 +1582,7 @@ local function try_lower_freeze_let(var, val, body, env)
     CONT[#CONT] = nil
     return (snap ~= "" and (snap .. " ") or "") .. s
   end
-  if nontail > 0 or not HAS_GOTO then return nil end
+  if nontail > 0 or not HAS_GOTO or WIDE then return nil end
   local rec = {
     name = var.name, kind = "goto", expr = eform, env = freeze_env,
     label = gen("fail"),
@@ -1588,6 +1605,143 @@ local function push_inline_cont()
   end
   CONT = f
   return saved
+end
+
+-- Wide mode (C.compile_top(form, true)): the code shape for a defun whose
+-- ordinary Lua exceeded a Lua limit (200 locals, 60 upvalues, 250 registers).
+-- prims.lua recompiles only such defuns this way, so everything that loads
+-- today keeps its exact code. In wide mode:
+--   * a hoisted body (KC function) with more than WIDE_CAPS captures takes
+--     ONE table T and reads T[i]; narrower ones whose captures are not plain
+--     names (T[i] from an enclosing wide body) get fresh parameter names;
+--   * a lambda closing over more than WIDE_UPVALS outer names is hoisted the
+--     same way and built by LAMW(KC[i], {captures});
+--   * let chains split at WIDE_SPLIT_LOCALS, passing a wide live set as T;
+--   * multi-thaw failure continuations stay BIND/THAW closures instead of a
+--     goto label, so no label pins a let chain to one function.
+-- Captured values are immutable KL bindings, so copying them into T at the
+-- use site observes exactly what the parameter form did.
+local WIDE_CAPS = 24
+local WIDE_UPVALS = 40
+local WIDE_SPLIT_LOCALS = 80
+
+-- see the lambda case of cexpr; deeper than any curried chain in the kernel
+local CURRY_DEPTH = 32
+
+local function is_ident(s)
+  return type(s) == "string" and s:match("^[%a_][%w_]*$") ~= nil
+end
+
+-- How a hoisted body receives `lnames` (sorted Lua expressions): returns the
+-- body's parameter list, the call-site argument list, an expr -> expr remap
+-- for the body's env (nil = identity), and the number of parameter slots.
+local function capture_plan(lnames)
+  local joined = table.concat(lnames, ", ")
+  if not WIDE then return joined, joined, nil, #lnames end
+  local remap = {}
+  if #lnames > WIDE_CAPS then
+    local t = gen("T")
+    for i, ln in ipairs(lnames) do remap[ln] = t .. "[" .. i .. "]" end
+    return t, "{" .. joined .. "}", remap, 1
+  end
+  local plain = true
+  for _, ln in ipairs(lnames) do
+    if not is_ident(ln) then plain = false; break end
+  end
+  if plain then return joined, joined, nil, #lnames end
+  local ps = {}
+  for i, ln in ipairs(lnames) do ps[i] = gen("q"); remap[ln] = ps[i] end
+  return table.concat(ps, ", "), joined, remap, #lnames
+end
+
+local function remap_env(env, remap)
+  if not remap then return env end
+  local e = {}
+  for k, v in pairs(env) do e[k] = remap[v] or v end
+  return e
+end
+
+-- after push_inline_cont: inline records expand inside the hoisted body, so
+-- their envs must see the body's names too
+local function remap_cont(remap)
+  if not remap then return end
+  for i = 1, #CONT do
+    local r = CONT[i]
+    CONT[i] = { name = r.name, kind = r.kind, expr = r.expr, env = remap_env(r.env, remap) }
+  end
+end
+
+-- Lua names a hoisted KC body must take as parameters. Beyond the form's own
+-- free variables, an inline freeze-let thawed inside the form is expanded
+-- there with ITS env, so the freeze body's free variables must be passed in
+-- too (they are locals of the enclosing function, not visible from KC).
+local function kc_lnames(form, env)
+  local set = {}
+  local fv = {}
+  collect_free(form, env, {}, fv)
+  for k in pairs(fv) do set[env[k]] = true end
+  local pending, seen = { form }, {}
+  while #pending > 0 do
+    local f = table.remove(pending)
+    for i = 1, #CONT do
+      local rec = CONT[i]
+      if rec.kind == "inline" and not seen[rec] and mentions_name(f, rec.name, {}) then
+        seen[rec] = true
+        local rfv = {}
+        collect_free(rec.expr, rec.env, {}, rfv)
+        for k in pairs(rfv) do set[rec.env[k]] = true end
+        pending[#pending + 1] = rec.expr
+      end
+    end
+  end
+  local lnames = {}
+  for ln in pairs(set) do lnames[#lnames + 1] = ln end
+  table.sort(lnames)
+  return lnames
+end
+
+-- Compile `form` (tail-compiled) as a constant chunk-scope KC function taking
+-- its free variables as parameters; returns the `KC[i](params)` call. The
+-- body is a SEPARATE Lua function: no `goto tco` (SELF cleared), no goto-kind
+-- failure continuations, no impl-local fN refs, and its own local budget.
+local function hoist_kc(form, env, lnames)
+  lnames = lnames or kc_lnames(form, env)
+  local params, args, remap, nslots = capture_plan(lnames)
+  local saved_self = SELF
+  local saved_h, saved_cc, saved_fnl = HOIST, CCACHE, FNL
+  local saved_cont = push_inline_cont()
+  remap_cont(remap)
+  local saved_impl = IN_IMPL
+  SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true, nslots); IN_IMPL = false
+  local body_stmts = ctail(form, remap_env(env, remap))
+  if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
+  SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
+  CONT = saved_cont; IN_IMPL = saved_impl
+  local idx = #CTX.cbodies + 1
+  CTX.cbodies[idx] = "function(" .. params .. ") " .. body_stmts .. " end"
+  return "KC[" .. idx .. "](" .. args .. ")"
+end
+
+-- A long let chain in one Lua function (the kernel's pattern-matching KL for
+-- a sequent rule with ~30 premises spends ~6 lets per premise) would exceed
+-- Lua's 200-locals-per-function cap. Past this budget the rest of the chain
+-- continues in a fresh KC function via a proper tail call. The margin covers
+-- locals the budget does not see ahead of time (call-chain flattening).
+local LET_SPLIT_LOCALS = 120
+
+local function try_split_let(form, env)
+  if not CTX or FNL.nosplit then return nil end
+  local used = FNL.nloc + (IN_IMPL and #FREF_LIST or 0)
+  if used < (WIDE and WIDE_SPLIT_LOCALS or LET_SPLIT_LOCALS) then return nil end
+  -- a goto-kind failure continuation's label lives in this function
+  for i = 1, #CONT do
+    if CONT[i].kind == "goto" then return nil end
+  end
+  -- a body that needs this many parameters would split again on its first
+  -- let (wide mode passes them as one table instead)
+  local lnames = kc_lnames(form, env)
+  if not WIDE and #lnames >= LET_SPLIT_LOCALS then FNL.nosplit = true; return nil end
+  return "return " .. hoist_kc(form, env, lnames)
 end
 
 -- ------------------------------------------------------------------
@@ -1649,12 +1803,6 @@ function cexpr(form, env)
       -- the body FIRST so any nested freezes/control-forms claim lower KB
       -- indices before we take ours.
       if CTX then
-        local fv = {}
-        collect_free(form, env, {}, fv)
-        local lnames = {}
-        for kname in pairs(fv) do lnames[#lnames+1] = env[kname] end
-        table.sort(lnames)
-        local params = table.concat(lnames, ", ")
         -- Compile the body FIRST so nested freezes/control-forms claim their KC
         -- indices before we take ours. The body references only its param free
         -- vars, globals, and KC (a load-time upvalue) -- never an impl local --
@@ -1664,21 +1812,11 @@ function cexpr(form, env)
         -- would illegally cross the function boundary. Likewise reset the
         -- chain-hoist state: KC[i] has its own local budget, and locals cached
         -- in the enclosing function are not in scope here.
-        local saved_self = SELF
-        local saved_h, saved_cc, saved_fnl = HOIST, CCACHE, FNL
-        local saved_cont = push_inline_cont()
-        local saved_impl = IN_IMPL
-        SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true); IN_IMPL = false
-        local body_stmts = ctail(form, env)
-        if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
-        SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
-        CONT = saved_cont; IN_IMPL = saved_impl
-        local idx = #CTX.cbodies + 1
-        CTX.cbodies[idx] = "function(" .. params .. ") " .. body_stmts .. " end"
+        local call = hoist_kc(form, env)
         -- The KC call itself may raise or side-effect: later siblings in the
         -- enclosing statement must not hoist chains ahead of it.
         if HOIST then HOIST.pure = false end
-        return "KC[" .. idx .. "](" .. params .. ")"
+        return call
       end
       -- No per-defun context (top-level eval chunk): fall back to the IIFE.
       -- (Clear SELF here too: the IIFE is a separate function.)
@@ -1701,7 +1839,54 @@ function cexpr(form, env)
     if op == "lambda" then
       local v = car(cdr(form))
       local body = car(cdr(cdr(form)))
+      -- A curried chain this deep (the kernel's lambda entry for an
+      -- N+6-ary consume helper) nests one Lua function per lambda, past
+      -- LuaJIT's 200 syntax levels. CURRY(n, f) builds the same curried
+      -- closures at runtime and calls f with the n arguments as one table.
+      local depth, inner, vars = 0, form, {}
+      while is_cons(inner) and car(inner) == form[1] and is_symbol(car(cdr(inner)))
+            and not is_cons(cdr(cdr(cdr(inner)))) do
+        depth = depth + 1
+        vars[depth] = car(cdr(inner))
+        inner = car(cdr(cdr(inner)))
+      end
+      if depth > CURRY_DEPTH then
+        local t = gen("T")
+        local e2 = env
+        for i = 1, depth do e2 = extend(e2, vars[i].name, t .. "[" .. i .. "]") end
+        local saved_h, saved_impl = HOIST, IN_IMPL
+        HOIST = nil; IN_IMPL = false
+        local bodyc = cexpr(inner, e2)
+        HOIST = saved_h; IN_IMPL = saved_impl
+        return "CURRY(" .. depth .. ", function(" .. t .. ") return " .. bodyc .. " end)"
+      end
       local ln = gen("v")
+      if WIDE and CTX then
+        -- each distinct outer name the closure reads is one upvalue
+        local fv = {}
+        collect_free(form, env, {}, fv)
+        local lnames, roots, nroots = {}, {}, 0
+        for kname in pairs(fv) do
+          local e = env[kname]
+          lnames[#lnames + 1] = e
+          local r = type(e) == "string" and e:match("^[%a_][%w_]*") or e
+          if not roots[r] then roots[r] = true; nroots = nroots + 1 end
+        end
+        if nroots > WIDE_UPVALS then
+          table.sort(lnames)
+          local t = gen("T")
+          local remap = {}
+          for i, e in ipairs(lnames) do remap[e] = t .. "[" .. i .. "]" end
+          local saved_h, saved_impl, saved_cont = HOIST, IN_IMPL, CONT
+          push_inline_cont(); remap_cont(remap)
+          HOIST = nil; IN_IMPL = false
+          local bodyc = cexpr(body, extend(remap_env(env, remap), v.name, ln))
+          HOIST = saved_h; IN_IMPL = saved_impl; CONT = saved_cont
+          local idx = #CTX.cbodies + 1
+          CTX.cbodies[idx] = "function(" .. ln .. ", " .. t .. ") return " .. bodyc .. " end"
+          return "LAMW(KC[" .. idx .. "], {" .. table.concat(lnames, ", ") .. "})"
+        end
+      end
       local e2 = extend(env, v.name, ln)
       -- Deferred body: nothing inside may be hoisted to the creation site.
       -- Not impl-scope: `fN` locals live in impl, not this nested function.
@@ -1724,15 +1909,18 @@ function cexpr(form, env)
         local lnames = {}
         for kname in pairs(fv) do lnames[#lnames+1] = env[kname] end
         table.sort(lnames)  -- stable order for caller / body
+        local params, args, remap = capture_plan(lnames)
         -- Deferred body: nothing inside may be hoisted to the creation site.
         local saved_h, saved_impl = HOIST, IN_IMPL
+        local saved_cont = CONT
+        if remap then push_inline_cont(); remap_cont(remap) end
         HOIST = nil; IN_IMPL = false
-        local body_str = cexpr(body, env)
-        HOIST = saved_h; IN_IMPL = saved_impl
+        local body_str = cexpr(body, remap_env(env, remap))
+        HOIST = saved_h; IN_IMPL = saved_impl; CONT = saved_cont
         local idx = #CTX.cbodies + 1
-        CTX.cbodies[idx] = "function(" .. table.concat(lnames, ", ") .. ") return "
+        CTX.cbodies[idx] = "function(" .. params .. ") return "
                            .. body_str .. " end"
-        local call_args = (#lnames == 0) and "" or (", " .. table.concat(lnames, ", "))
+        local call_args = (#lnames == 0) and "" or (", " .. args)
         return "BIND(KC[" .. idx .. "]" .. call_args .. ")"
       end
       local saved_h, saved_impl = HOIST, IN_IMPL
@@ -1876,8 +2064,11 @@ function ctail(form, env)
       local v   = car(cdr(form))
       local val = car(cdr(cdr(form)))
       local body= car(cdr(cdr(cdr(form))))
+      local split = try_split_let(form, env)
+      if split then return split end
       local lowered = try_lower_freeze_let(v, val, body, env)
       if lowered then return lowered end
+      FNL.nloc = FNL.nloc + 1
       local ln = gen("v")
       local pre, valc = cstmt_expr(val, env)
       local e2 = extend(env, v.name, ln)
@@ -1992,7 +2183,7 @@ local function cdefun(form)
   CTX = new_ctx()
   -- fresh chain-hoist state for the impl function (see CSE block above ccall)
   local saved_fnl, saved_cc = FNL, CCACHE
-  FNL = new_fnl(true)
+  FNL = new_fnl(true, #params)
   CCACHE = {}
   -- Self-tail-call -> loop lowering. Eligible unless:
   --   * the function is not PURELY tail-recursive -- some self-reference is a
@@ -2113,7 +2304,17 @@ local function cdefun(form)
   end
   return src
 end
-C.cdefun = cdefun
+-- wide: compile in wide mode (see WIDE above)
+local function cdefun_mode(form, wide)
+  if not wide then return cdefun(form) end
+  local saved = WIDE
+  WIDE = true
+  local ok, res = pcall(cdefun, form)
+  WIDE = saved
+  if not ok then error(res, 0) end
+  return res
+end
+C.cdefun = cdefun_mode
 
 -- Pre-scan a list of forms to register arities of all defuns (so mutual /
 -- forward references compile as direct exact-arity calls).
@@ -2135,9 +2336,9 @@ function C.compile_expr_chunk(form)
 end
 
 -- compile any top-level form to a Lua statement string
-function C.compile_top(form)
+function C.compile_top(form, wide)
   if is_cons(form) and is_symbol(car(form)) and car(form).name == "defun" then
-    return cdefun(form)
+    return cdefun_mode(form, wide)
   else
     -- a top-level expression: evaluate for side effects. Wrapped in do..end
     -- so a whole kernel file can be concatenated into ONE chunk (boot.lua's

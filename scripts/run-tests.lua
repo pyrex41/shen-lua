@@ -32,6 +32,7 @@ local specs = {
   "test/boot_cache_spec.lua",
   "test/cli_spec.lua",
   "test/checked_integer_spec.lua",
+  "test/datatype_consume_spec.lua",
   "test/engine_spec.lua",
   "test/error_robustness_spec.lua",
   "test/eval_order_spec.lua",
@@ -51,6 +52,7 @@ local specs = {
   "test/tailcall_spec.lua",
   "test/typecheck_api_spec.lua",
   "test/typecheck_lazy_spec.lua",
+  "test/wide_compile_spec.lua",
 }
 
 local function sh_quote(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
