@@ -109,6 +109,18 @@ return {
     T.eq(S.call("unii.nat?", 1.5), false)
   end },
 
+  { "declared byte lengths and hashes must match the text they describe", function()
+    local m = T.msg(0, "user", "héllo")
+    m.content.bytes = 5
+    T.raises(function() schema.encode("event", m) end, "content.bytes: does not equal")
+    m = T.msg(0, "user", "héllo")
+    m.content.sha256 = ("0"):rep(64)
+    T.raises(function() schema.encode("event", m) end, "content.sha256: does not match")
+    local d = { _ = "summary-completed", job = "j", attempt = 1, bytes = 4,
+                sha256 = require("unii.host.sha256").hex("abc"), text = "abc" }
+    T.raises(function() schema.encode("event", d) end, "does not equal")
+  end },
+
   { "core rejects an out-of-sequence id even when the codec is bypassed", function()
     local C = T.core()
     local st = C:init(schema.config {})

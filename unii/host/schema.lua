@@ -11,6 +11,7 @@
 -- opt(T) encodes as [none] or [some X] so absent stays distinct from (),
 -- false and "" in Shen.
 local codec = require("unii.host.codec")
+local sha256 = require("unii.host.sha256")
 
 local M = {}
 M.MAX_ID = 2147483647
@@ -163,6 +164,12 @@ encode_record = function(x, path)
       for _, f in ipairs(fields) do if f[1] == k then known = true end end
       if not known then fail(path, "unexpected field " .. tostring(k)) end
     end
+  end
+  -- The core counts bytes from the declared length and cannot hash, so the
+  -- boundary binds both declarations to the text they describe.
+  if x._ == "content" or x._ == "summary-completed" then
+    if tonumber(x.bytes) ~= #x.text then fail(path .. ".bytes", "does not equal the text's byte length") end
+    if x.sha256 ~= sha256.hex(x.text) then fail(path .. ".sha256", "does not match the text") end
   end
   return codec.list(out)
 end
