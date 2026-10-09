@@ -142,7 +142,7 @@ becomes uncertain and is not resent.
 ## Acceptance gates and how each was verified
 
 Every row is an automated test in `luajit unii/test/run.lua`. The last run
-passed 84 tests, with 0 failed and 0 skipped. `--with-upstream` adds the
+passed 98 tests, with 0 failed and 0 skipped. `--with-upstream` adds the
 pinned port specs (1,088 checks across 22 specs) and the kernel suite
 (134 of 134).
 
