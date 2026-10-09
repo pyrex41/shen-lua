@@ -45,18 +45,21 @@ checks the inverse scaling before using each product.
 
 ## Canonical text policy
 
-The plan requires deterministic line-break collapse and stable encoding of
-delimiter-sensitive text but does not prescribe that encoding. This oracle
-uses the following byte-level policy after rejecting invalid UTF-8:
+The plan requires deterministic line-break collapse and a documented policy
+for delimiter-sensitive text. After rejecting invalid UTF-8, this oracle
+applies the policy reconciled with the engine (decision 5 in
+`unii/docs/contracts/decisions.md`):
 
-1. CRLF, lone CR, and lone LF each become one ASCII space. Existing spaces
-   are not coalesced.
-2. `%`, `|`, C0 controls, and DEL are percent-encoded as uppercase `%XX`.
-3. All other valid UTF-8 bytes are preserved.
+1. CRLF (as one break), lone CR, lone LF, NEL (U+0085), LS (U+2028) and PS
+   (U+2029) each become one ASCII space.
+2. Every other C0 control and DEL becomes one ASCII space.
+3. All other bytes are preserved, including `|` and `%`. Spaces are not
+   coalesced.
 
-This keeps addresses and line boundaries unambiguous. Summary text bytes are
-measured before rendering for the separate 512-byte summary cap; address,
-separator, escaping, and LF overhead are included in view bytes.
+The address ends at the first `|` and the line at its only LF, so no
+escaping is needed. Summary text bytes are measured before rendering for
+the separate 512-byte summary cap. Address, separator and LF overhead are
+included in view bytes. Prompt framing such as `<chat>` tags is not.
 
 ## Golden fixture format
 
@@ -86,6 +89,7 @@ B|T|batch-active|entered-batch|bytes-before|bytes-after|merged-parents-or--|olde
 It runs 700 appends with every parent available and deterministic node text of
 420 through 499 bytes. The text includes `%`, `|`, CRLF, precomposed UTF-8,
 and a combining mark, exercising canonical rendering and byte accounting.
+`unii/test/test_oracle.lua` diffs the Shen engine against both traces.
 The rollback and hysteresis fixtures are intentionally separate policies.
 
 ## Rollback provenance
@@ -107,8 +111,10 @@ Taelin's UniiChat gist:
    count, so those steps are represented as `T=1..20001`.
 3. “Oldest pair” on equal scores means the smaller final message ID. The final
    stable node-key tie-break is lexicographic `(parent.level,parent.index)`.
-4. The plan does not define delimiter escaping. The percent policy above is
-   the oracle's frozen interpretation.
+4. The plan does not define delimiter escaping. The policy above replaced
+   this oracle's original percent-encoding when it was reconciled with the
+   engine. That choice is flagged for Reuben in
+   `unii/docs/contracts/decisions.md`.
 5. The rollback comparison's “matching line-count budget” is the rollback
    list length after each push, not a byte estimate. Byte hysteresis has its
    own trace.

@@ -277,19 +277,14 @@ function M.canonical_text(text)
   if type(text) ~= "string" then error("summary text must be a string", 2) end
   if not valid_utf8(text) then error("summary text is not valid UTF-8", 2) end
 
-  -- A CRLF pair and each lone CR/LF become one ASCII space. Percent is
-  -- escaped first conceptually; all delimiter/control escapes use uppercase.
-  text = text:gsub("\r\n", "\n"):gsub("\r", "\n"):gsub("\n", " ")
-  local out = {}
-  for i = 1, #text do
-    local byte = text:byte(i)
-    if byte == 0x25 or byte == 0x7c or byte < 0x20 or byte == 0x7f then
-      out[#out + 1] = string.format("%%%02X", byte)
-    else
-      out[#out + 1] = string.char(byte)
-    end
-  end
-  return table.concat(out)
+  -- Each line break becomes one ASCII space: CRLF as a pair, then NEL
+  -- (U+0085), LS (U+2028) and PS (U+2029); then every remaining C0 control
+  -- (lone CR and LF included) and DEL. Nothing is escaped: "|" and "%" stay
+  -- verbatim because the address ends at the first "|" and the line at LF.
+  text = text:gsub("\r\n", " ")
+  text = text:gsub("\194\133", " "):gsub("\226\128\168", " "):gsub("\226\128\169", " ")
+  text = text:gsub("[%z\1-\31\127]", " ")
+  return text
 end
 
 function M.render_line(value, text)

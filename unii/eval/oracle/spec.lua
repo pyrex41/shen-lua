@@ -115,11 +115,11 @@ test("due comparison uses exact cross-products and tie breaks", function()
   equal(oracle.compare_due(huge, tiny), 1, "61-bit exact product")
 end)
 
-test("canonical rendering is UTF-8, escaped, and LF-only", function()
+test("canonical rendering is UTF-8, one line per node, LF-only", function()
   local rendered, bytes = oracle.render_view(
     { oracle.node(0, 0) },
-    function() return "a\r\nb\rc|d%\t\195\169" end)
-  equal(rendered, "0+1|a b c%7Cd%25%09\195\169\n")
+    function() return "a\r\nb\rc|d%\t\195\169\n\r\0\127x\194\133y\226\128\168z\226\128\169" end)
+  equal(rendered, "0+1|a b c|d% \195\169    x y z \n")
   equal(bytes, #rendered)
   rejects(function()
     oracle.render_line(oracle.node(0, 0), "\192\175")
