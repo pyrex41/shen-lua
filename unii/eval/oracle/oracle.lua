@@ -386,4 +386,51 @@ function M.hysteresis_resume(state)
   return continue_hysteresis(state, false)
 end
 
+-- Summary rounds for one node (Reuben's decisions of 2026-10-09).
+-- `outcomes` is the sequence of reports for the job's tries, in order:
+--   { kind = "done", bytes = n }  a summary of n bytes
+--   { kind = "retryable" } | { kind = "permanent" } | { kind = "uncertain" }
+--   { kind = "operator" }          an operator retry
+-- A round is `round_size` tries. A summary fits when bytes <= cap; the
+-- best fit is the shortest, the earliest try on equal length. Every try of
+-- a round runs. At the end of a round, or on a permanent failure, the best
+-- fit is committed, else the job blocks. An uncertain report parks the job
+-- and is never retried automatically. An operator retry of a blocked or
+-- uncertain job starts one fresh round; the best fit so far stays eligible.
+-- Reports that do not apply to the job's state are ignored.
+-- Returns { status = "running"|"committed"|"blocked"|"uncertain",
+--           attempt = current or committed try, bytes = committed bytes,
+--           best = { attempt, bytes } or nil }.
+function M.summary_rounds(outcomes, cap, round_size)
+  integer("cap", cap, 1, M.MAX_MESSAGES)
+  integer("round_size", round_size, 1, 16)
+  local s = { status = "running", attempt = 1, round_end = round_size }
+  local function end_round()
+    if s.best then
+      s.status, s.attempt, s.bytes = "committed", s.best.attempt, s.best.bytes
+    else
+      s.status = "blocked"
+    end
+  end
+  for _, o in ipairs(outcomes) do
+    if s.status == "running" then
+      if o.kind == "done" or o.kind == "retryable" then
+        if o.kind == "done" and o.bytes <= cap and (not s.best or o.bytes < s.best.bytes) then
+          s.best = { attempt = s.attempt, bytes = o.bytes }
+        end
+        if s.attempt < s.round_end then s.attempt = s.attempt + 1 else end_round() end
+      elseif o.kind == "permanent" then
+        end_round()
+      elseif o.kind == "uncertain" then
+        s.status = "uncertain"
+      end
+    elseif (s.status == "blocked" or s.status == "uncertain") and o.kind == "operator" then
+      s.status = "running"
+      s.round_end = s.attempt + round_size
+      s.attempt = s.attempt + 1
+    end
+  end
+  return { status = s.status, attempt = s.attempt, bytes = s.bytes, best = s.best }
+end
+
 return M
