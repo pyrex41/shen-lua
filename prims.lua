@@ -1871,6 +1871,26 @@ local ENV = {
     end
     return setmetatable({ fn, ... }, Thunk)
   end,
+  -- A wide-mode lambda (compiler.lua, WIDE): its body is the constant
+  -- function fn(x, T) with the captures in the table T.
+  UNPACK = unpack,
+  LAMW = function(fn, t)
+    return MKFUN(1, function(x) return fn(x, t) end)
+  end,
+  -- A curried lambda chain n deep (compiler.lua, CURRY_DEPTH): each
+  -- application returns a fresh closure over its own copy of the arguments
+  -- so far, exactly like the nested closures; the last calls fn(args).
+  CURRY = function(n, fn)
+    local function step(args, i)
+      return MKFUN(1, function(x)
+        local a = { unpack(args, 1, i - 1) }
+        a[i] = x
+        if i == n then return fn(a) end
+        return step(a, i + 1)
+      end)
+    end
+    return step({}, 1)
+  end,
   -- MKTREE consumes a flat blueprint produced by the compiler for deep
   -- cons-trees. See compile_cons_tree in compiler.lua. ops is a sequence of
   -- 'v' followed by a leaf value (push), or 'c' (pop two, push cons).
@@ -2117,8 +2137,30 @@ end
 -- WHILE one of those chunks executes (nested eval-kl, e.g. compile-prolog
 -- inside process-datatype) are not recorded — replaying the outer chunk
 -- regenerates them naturally.
-local function compile_and_load(luasrc, chunkname)
-  local fn = load_chunk(luasrc, chunkname)
+-- Lua limits the wide code shape avoids (compiler.lua, WIDE)
+local function is_width_error(msg)
+  msg = tostring(msg)
+  return msg:find("has more than %d+ local variables") ~= nil
+      or msg:find("has more than %d+ upvalues") ~= nil
+      or msg:find("function or expression too complex", 1, true) ~= nil
+end
+
+-- defun_form: when the ordinary code for this defun exceeds a Lua limit,
+-- recompile it in wide mode (loads that succeed never pay for this)
+local function compile_and_load(luasrc, chunkname, defun_form)
+  local fn
+  if defun_form then
+    local ok, res = pcall(load_chunk, luasrc, chunkname)
+    if ok then
+      fn = res
+    elseif is_width_error(res) then
+      fn = load_chunk(require("compiler").compile_top(defun_form, true), chunkname)
+    else
+      error(res, 0)
+    end
+  else
+    fn = load_chunk(luasrc, chunkname)
+  end
   local rec = P.FASL_REC
   if rec and not rec.in_chunk then
     rec.n = rec.n + 1
@@ -2172,7 +2214,7 @@ function P.eval(form)
     -- error positions and debug.traceback frames identify the Shen function
     -- (the REPL's Shen-level backtrace filters on this prefix; repl.lua).
     local nm = is_cons(form[2]) and is_symbol(form[2][1]) and form[2][1].name or "defun"
-    compile_and_load(C.compile_top(form), "shen:" .. nm)
+    compile_and_load(C.compile_top(form), "shen:" .. nm, form)
     return form[2][1]   -- the function NAME symbol (car of cdr), as shen-c returns
   end
   return compile_and_load(C.compile_expr_chunk(form), "eval")
