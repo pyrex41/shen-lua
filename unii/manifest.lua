@@ -13,7 +13,7 @@ return {
     "jobs.shen", "transition.shen", "invariants.shen",
   },
 
-  storage_format = 1, -- docs/contracts/storage.md
+  storage_format = 2, -- docs/contracts/storage.md
   codec_version = 1,  -- docs/contracts/codec.md
 
   shen_lua = {

@@ -40,17 +40,19 @@ end
 
 -- Rewrite record `seq` of a journal through `edit(decoded_payload)`.
 local function tamper(dir, seq, edit)
-  local path = dir .. "/" .. storage.JOURNAL
-  local recs = storage.parse(read(path))
+  local first = seq == 1 and 1 or 2
+  local path = seq == 1 and (dir .. "/" .. storage.JOURNAL)
+    or (dir .. "/journals/2026-10-09.uj")
+  local recs = storage.parse(read(path), first)
   local out = {}
-  for i, r in ipairs(recs) do
+  for _, r in ipairs(recs) do
     local payload = r.payload
-    if i == seq then
+    if r.seq == seq then
       local v = codec.decode(payload)
       edit(v)
       payload = codec.encode(v)
     end
-    out[#out + 1] = storage.frame(i, payload)
+    out[#out + 1] = storage.frame(r.seq, payload)
   end
   write(path, table.concat(out))
 end
@@ -182,20 +184,23 @@ return {
     feed(sup, 0, 6)
     sup:close()
     local path = dir .. "/" .. storage.JOURNAL
-    local clean = read(path)
-    local n = #storage.parse(clean)
+    local day_path = dir .. "/journals/2026-10-09.uj"
+    local clean, clean_day = read(path), read(day_path)
+    local inspected = storage.open(dir)
+    local n = #inspected:records()
+    inspected:close()
 
     tamper(dir, n, function(v) v.v.view_hash = codec.text(("0"):rep(64)) end)
     T.raises(function() open_sup(dir) end, "replay divergence at seq " .. n .. ": view hash")
-    write(path, clean)
+    write(path, clean); write(day_path, clean_day)
 
     tamper(dir, 3, function(v) v.v.decisions = codec.list {} end)
     T.raises(function() open_sup(dir) end, "replay divergence at seq 3: decisions")
-    write(path, clean)
+    write(path, clean); write(day_path, clean_day)
 
     tamper(dir, 1, function(v) v.v.bundle = codec.text(("f"):rep(64)) end)
     T.raises(function() open_sup(dir) end, "Refusing to replay under different rules")
-    write(path, clean)
+    write(path, clean); write(day_path, clean_day)
 
     T.raises(function() open_sup(dir, { config = schema.config { high = 99999 } }) end,
       "configuration differs")

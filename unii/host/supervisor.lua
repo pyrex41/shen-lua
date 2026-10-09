@@ -40,6 +40,7 @@ function M.open(dir, opts)
     dir = dir, core = core, store = store, info = info, provider = opts.provider,
     on_client_event = opts.on_client_event or function() end,
     outstanding = {}, started = {}, inbox = {}, messages = {}, view_cache = nil,
+    checkpoint_interval = opts.checkpoint_interval == nil and 32 or opts.checkpoint_interval,
   }, Sup)
   local ok, err = pcall(self._load, self, opts)
   if not ok then store:close(); error(err, 0) end
@@ -88,7 +89,71 @@ function Sup:_load(opts)
     error("replay divergence at seq 1: initial state hash", 0)
   end
   self:_refresh_view()
-  for i = 2, #recs do self:_replay(recs[i]) end
+  -- Message text remains in blobs. The in-memory table contains only small
+  -- metadata records with a lazy text accessor.
+  for id, m in pairs(self.store:message_index()) do
+    local meta = m
+    self.messages[tonumber(id)] = setmetatable({ kind = meta.kind, date = meta.date }, {
+      __index = function(_, k)
+        if k == "text" then return self.store:get_blob(meta.hash, meta.bytes) end
+      end,
+    })
+  end
+  local start = self:_restore_checkpoint() or 1
+  self.info.replay_start_seq = start + 1
+  self.info.replayed_records = 0
+  for rec in self.store:iter_records(start) do
+    self:_replay(rec)
+    self.info.replayed_records = self.info.replayed_records + 1
+  end
+end
+
+local function checkpoint_int(cp, name)
+  local v = cp.v[name]
+  if not v or v.t ~= "int" then error("checkpoint lacks int field " .. name, 0) end
+  return codec.to_number(v)
+end
+
+-- Try newest to oldest. Invalid/stale checkpoints are accelerators, not
+-- authority: set them aside and continue from an older one or record one.
+function Sup:_restore_checkpoint()
+  for _, candidate in ipairs(self.store:checkpoint_candidates()) do
+    local ok, seq_or_error = pcall(function()
+      if candidate.error then error(candidate.error, 0) end
+      local cp = codec.decode(candidate.payload)
+      if cp.t ~= "map" or not cp.v.kind or cp.v.kind.v ~= "checkpoint" then
+        error("not a checkpoint record", 0)
+      end
+      local seq = checkpoint_int(cp, "seq")
+      if seq < 1 or seq >= self.store.next_seq then error("stale journal position", 0) end
+      if text_field(cp, "anchor") ~= self.store:record_anchor(seq) then error("stale journal anchor", 0) end
+      if text_field(cp, "bundle") ~= self.core.bundle_hash then error("different rule bundle", 0) end
+      if codec.encode(cp.v.config) ~= codec.encode(schema.encode("config", self.config)) then
+        error("different configuration", 0)
+      end
+      local state = codec.to_shen(cp.v.state)
+      if self.core:state_hash(state) ~= text_field(cp, "state_hash") then error("state hash mismatch", 0) end
+      local rendered = self.core:render(state)
+      if sha256.hex(rendered) ~= text_field(cp, "view_hash") then error("view hash mismatch", 0) end
+      if self.core:status(state).rev ~= checkpoint_int(cp, "view_rev") then error("view revision mismatch", 0) end
+      local outstanding = {}
+      if not cp.v.outstanding or cp.v.outstanding.t ~= "list" then error("missing outstanding commands", 0) end
+      for _, tagged in ipairs(cp.v.outstanding.v) do
+        local command = schema.decode("command", tagged)
+        if command._ == "submit-summary" then outstanding[command.cmd] = command end
+      end
+      self.state, self.outstanding, self.started = state, outstanding, {}
+      self.view_cache = nil
+      self:_refresh_view()
+      self.info.checkpoint = candidate.name
+      self.info.checkpoint_seq = seq
+      return seq
+    end)
+    if ok then return seq_or_error end
+    self.store:set_aside_checkpoint(candidate.name, tostring(seq_or_error))
+    self.info.checkpoint_rejected = tostring(seq_or_error)
+  end
+  return nil
 end
 
 function Sup:_replay(rec)
@@ -120,7 +185,12 @@ function Sup:_absorb(ev, out, replaying)
   local rejected = false
   for _, d in ipairs(out.decisions) do if d._ == "event-rejected" then rejected = true end end
   if ev._ == "message-appended" and not rejected then
-    self.messages[ev.id] = { kind = ev.kind, text = ev.content.text, date = ev.date }
+    local hash, bytes = ev.content.sha256, ev.content.bytes
+    self.messages[ev.id] = setmetatable({ kind = ev.kind, date = ev.date }, {
+      __index = function(_, k)
+        if k == "text" then return self.store:get_blob(hash, bytes) end
+      end,
+    })
   end
   if ev._ == "summary-completed" or ev._ == "summary-failed" then
     for cmd, c in pairs(self.outstanding) do
@@ -160,7 +230,36 @@ function Sup:submit(event)
     error(seq, 0)
   end
   self:_absorb(schema.decode("event", tagged), out, false)
+  if self.checkpoint_interval > 0 and seq % self.checkpoint_interval == 0 then
+    local cok, cerr = pcall(self.checkpoint, self, seq)
+    if not cok then self.info.checkpoint_error = tostring(cerr) end
+  end
   return out, seq
+end
+
+function Sup:checkpoint(seq)
+  seq = seq or (self.store.next_seq - 1)
+  if seq < 1 then error("cannot checkpoint an empty journal", 0) end
+  local commands = {}
+  for _, command in pairs(self.outstanding) do
+    commands[#commands + 1] = schema.encode("command", command)
+  end
+  table.sort(commands, function(a, b)
+    return codec.encode(a) < codec.encode(b)
+  end)
+  local payload = txn_bytes {
+    kind = codec.sym("checkpoint"),
+    seq = codec.int_of(seq),
+    anchor = codec.text(assert(self.store:record_anchor(seq))),
+    bundle = codec.text(self.core.bundle_hash),
+    config = schema.encode("config", self.config),
+    state = codec.decode(self.core:state_bytes(self.state)),
+    state_hash = codec.text(self:state_hash()),
+    view_hash = codec.text(self.view_hash),
+    view_rev = codec.int_of(self:status().rev),
+    outstanding = codec.list(commands),
+  }
+  return self.store:write_checkpoint(seq, payload)
 end
 
 -- Start every outstanding summary command not yet started in this process

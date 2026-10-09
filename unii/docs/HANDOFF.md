@@ -1,4 +1,4 @@
-# unii handoff: Phase 0 and Phase 1
+# unii handoff: Phase 0 through Phase 2
 
 unii is a provisional name. It is the memory engine for an endless
 conversation agent, built from the plan in this repository's task, *Shen and
@@ -57,7 +57,10 @@ unii/
     core.lua            boots shen-lua, checks the build stamp, calls the typed core
     supervisor.lua      single writer: validate, transition, journal and fsync, adopt; replay
     storage.lua         framed journal adapter (interface in docs/contracts/storage.md)
-    posix.lua           FFI open/write-all/fsync/flock/ftruncate/rename/atomic write
+    posix.lua           FFI durability operations and fault boundaries
+    storage_blobs.lua   content-addressed message/summary bodies
+    storage_checkpoint.lua durable checkpoint framing and fallback
+    storage_index.lua   rebuildable journal/message/blob/node/job indexes
     sha256.lua          pure-Lua SHA-256
     models.lua          provider interface, failure classification
     mock/network.lua    MOCK transport (contract in docs/contracts/network.md)
@@ -153,6 +156,18 @@ same property at the API level, plus crash tails at every byte offset,
 corruption refusal, lock contention across processes, tampered
 transactions, foreign bundles and configuration changes.
 
+### Phase 2
+
+`test_storage_phase2` proves that journals hold blob hashes rather than
+message/summary bodies, sequence order crosses daily shards, indexes rebuild,
+valid checkpoints skip earlier records with identical state/view hashes,
+stale checkpoints fall back, bad blobs refuse without journal mutation, and
+recovery does not read whole journal files into RAM.
+
+`test_storage_faults` injects process death at every observed write, sync and
+rename boundary, and separately covers commit ordering, torn writes and
+ENOSPC. See `docs/STORAGE_PHASE2.md` for the outcome matrix.
+
 ## Decisions worth knowing
 
 * **Leaf cap.** The 512-byte cap applies to `kind ": " text`. A user
@@ -209,11 +224,9 @@ been reported upstream from this branch.
   raw-context recovery mode, policy epoch change, message chunking (events
   longer than `chunk_max` are rejected), compaction context, and a search
   fallback.
-* **Storage.** One journal file holds everything. It is read entirely into
-  RAM, replay starts from record 1, and message text is held in RAM. There
-  are no blobs, checkpoints, indexes, day shards or backup/restore. Fault
-  injection covers only a failed append. On macOS, `fsync` has weaker
-  guarantees, and macOS has not been tested.
+* **Storage limits.** Backup/restore and blob garbage collection do not
+  exist. Index metadata is proportional to history. Linux x86_64 is tested;
+  macOS uses `F_FULLFSYNC` for regular files but is not exercised in CI.
 * **Complexity.** View, live-node and job collections are Shen lists, so
   each transition is O(view + live + jobs). That is a few hundred lines at
   the default thresholds. The one-million-message gate in Phase 7 has not
@@ -226,14 +239,10 @@ been reported upstream from this branch.
 
 ## Suggested next steps
 
-1. Phase 2 storage: content-addressed blobs for message text, checkpoints
-   (view, state, journal position) so replay does not start at record 1,
-   rebuildable indexes, and fault injection around every write, fsync and
-   rename.
-2. Plug in the real network adapter and one real summarizer provider
+1. Plug in the real network adapter and one real summarizer provider
    (Phase 3), keeping the same tests running against the mock.
-3. Add timers as host events (`TimerObserved`) for retry backoff, and an
+2. Add timers as host events (`TimerObserved`) for retry backoff, and an
    operator retry for blocked jobs.
-4. Add message chunking on UTF-8 boundaries, upstream of `message-appended`.
-5. Turns and prompts (Phase 4) on top of `unii.view-ready?` and the
+3. Add message chunking on UTF-8 boundaries, upstream of `message-appended`.
+4. Turns and prompts (Phase 4) on top of `unii.view-ready?` and the
    rendered view.
