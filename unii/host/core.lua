@@ -107,6 +107,7 @@ function M.boot(opts)
     config_errors = fn("unii.config-errors"), view_lines = fn("unii.view-lines"),
     status = fn("unii.status"), invariant_errors = fn("unii.invariant-errors"),
     view_ready = fn("unii.view-ready?"), merge_to_count = fn("unii.merge-keys-to-count"),
+    stuck_jobs = fn("unii.stuck-jobs"),
   }
   return self
 end
@@ -152,15 +153,25 @@ function Core:render(state)
   if #text ~= st.view_bytes then
     error(("view byte accounting mismatch: rendered %d, core says %d"):format(#text, st.view_bytes), 0)
   end
-  return text, #lines - 2
+  return text, #lines
 end
 
 function Core:status(state)
   local s = totable(call(self, "status", state))
   return {
     count = s[1], covered = s[2], view_bytes = s[3], view_lines = s[4], rev = s[5],
-    batch = s[6] == 1, queued = s[7], dispatched = s[8], blocked = s[9],
+    batch = s[6] == 1, queued = s[7], dispatched = s[8], blocked = s[9], uncertain = s[10],
   }
+end
+
+-- Jobs waiting for an operator: { {job, state = "blocked"|"uncertain", detail} }.
+function Core:stuck_jobs(state)
+  local out = {}
+  for i, row in ipairs(totable(call(self, "stuck_jobs", state))) do
+    local r = totable(row)
+    out[i] = { job = r[1], state = r[2], detail = r[3] }
+  end
+  return out
 end
 
 function Core:ready(state) return call(self, "view_ready", state) end

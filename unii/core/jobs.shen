@@ -51,6 +51,10 @@
   {unii.job --> string --> unii.job}
   [job Id K A _ Src] R -> [job Id K A [blocked R] Src])
 
+(define unii.uncertain-job
+  {unii.job --> string --> unii.job}
+  [job Id K A _ Src] C -> [job Id K A [uncertain C] Src])
+
 \\ ------------------------------------------------------------ ordering
 
 (define unii.job-rank

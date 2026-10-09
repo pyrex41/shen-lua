@@ -78,9 +78,14 @@
 
   C : symbol;
   ===================================
-  [retry-after-failure C] : unii.retry;)
+  [retry-after-failure C] : unii.retry;
 
-\\ A queued job carries the retry hint for its next dispatch.
+  ___________________________________
+  [retry-by-operator] : unii.retry;)
+
+\\ A queued job carries the retry hint for its next dispatch. An uncertain
+\\ job's request may have reached the provider (the transport could not
+\\ tell); it is never dispatched again without an operator retry.
 (datatype unii.job-status
   Rt : unii.retry;
   ===================================
@@ -92,7 +97,11 @@
 
   R : string;
   ===================================
-  [blocked R] : unii.job-status;)
+  [blocked R] : unii.job-status;
+
+  C : string;
+  ===================================
+  [uncertain C] : unii.job-status;)
 
 \\ job Id Key Attempt Status Source
 (datatype unii.job
@@ -117,7 +126,11 @@
 
   J : string; A : number; C : symbol;
   ========================================================================
-  [summary-failed J A C] : unii.event;)
+  [summary-failed J A C] : unii.event;
+
+  J : string;
+  ========================================================================
+  [operator-retry J] : unii.event;)
 
 (datatype unii.summary-input
   M : number; Kd : symbol; H : string;
@@ -139,7 +152,11 @@
 
   R : string;
   ==================================================
-  [input-rejected R] : unii.client-event;)
+  [input-rejected R] : unii.client-event;
+
+  J : string; C : string;
+  ==================================================
+  [effect-uncertain J C] : unii.client-event;)
 
 (datatype unii.attempt
   A : number; Rt : unii.retry;
@@ -188,6 +205,10 @@
   J : string; R : string;
   ===============================================
   [job-blocked J R] : unii.decision;
+
+  J : string; C : string;
+  ===============================================
+  [job-uncertain J C] : unii.decision;
 
   R : string;
   ===============================================
@@ -289,6 +310,11 @@
   [job _ _ _ [blocked _] _] -> true
   _ -> false)
 
+(define unii.uncertain?
+  {unii.job --> boolean}
+  [job _ _ _ [uncertain _] _] -> true
+  _ -> false)
+
 (define unii.leaf-job?
   {unii.job --> boolean}
   [job _ _ _ _ [leaf-source _ _ _]] -> true
@@ -317,7 +343,7 @@
 
 (define unii.failure-classes
   {--> (list symbol)}
-  -> [retryable permanent])
+  -> [retryable permanent uncertain])
 
 (define unii.hex-char?
   {string --> boolean}
