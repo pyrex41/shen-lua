@@ -8,6 +8,7 @@ local json = require("unii.host.network.json")
 local redact = require("unii.host.network.redact")
 
 return {
+  IS_MOCK = false,
   client = client.new,
   sse = sse,
   json = json,

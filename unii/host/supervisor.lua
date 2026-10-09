@@ -14,6 +14,13 @@
 -- continue on any divergence from what was recorded (commands, decisions,
 -- view hash, state hash), on a different rule bundle, or on a different
 -- configuration. The view is never refit from current policy.
+--
+-- Before a provider starts a summary command, a dispatch record (kind
+-- "dispatch", cmd, job) is journaled. A command with a dispatch record and
+-- no journaled outcome was in flight when a previous process stopped: the
+-- provider may have received it, so it is never sent again automatically.
+-- dispatch_pending() submits summary-failed with class "uncertain" for it
+-- and the core parks the job until an operator retries it.
 local codec = require("unii.host.codec")
 local schema = require("unii.host.schema")
 local sha256 = require("unii.host.sha256")
@@ -39,7 +46,7 @@ function M.open(dir, opts)
   local self = setmetatable({
     dir = dir, core = core, store = store, info = info, provider = opts.provider,
     on_client_event = opts.on_client_event or function() end,
-    outstanding = {}, started = {}, inbox = {}, messages = {}, view_cache = nil,
+    outstanding = {}, started = {}, intent = {}, inbox = {}, messages = {}, view_cache = nil,
   }, Sup)
   local ok, err = pcall(self._load, self, opts)
   if not ok then store:close(); error(err, 0) end
@@ -91,8 +98,18 @@ function Sup:_load(opts)
   for i = 2, #recs do self:_replay(recs[i]) end
 end
 
+function Sup:_replay_dispatch(rec, txn)
+  local cmd, job = text_field(txn, "cmd"), text_field(txn, "job")
+  local c = self.outstanding[cmd]
+  if not c or c.job ~= job then
+    error(("replay divergence at seq %d: dispatch record for %s is not an outstanding command"):format(rec.seq, cmd), 0)
+  end
+  self.intent[cmd] = true
+end
+
 function Sup:_replay(rec)
   local txn = codec.decode(rec.payload)
+  if txn.v.kind and txn.v.kind.v == "dispatch" then return self:_replay_dispatch(rec, txn) end
   local event = txn.v.event
   local state, out = self.core:transition(self.state, event)
   local function check(what, a, b)
@@ -124,7 +141,7 @@ function Sup:_absorb(ev, out, replaying)
   end
   if ev._ == "summary-completed" or ev._ == "summary-failed" then
     for cmd, c in pairs(self.outstanding) do
-      if c.job == ev.job then self.outstanding[cmd] = nil; self.started[cmd] = nil end
+      if c.job == ev.job then self.outstanding[cmd] = nil; self.started[cmd] = nil; self.intent[cmd] = nil end
     end
   end
   for _, c in ipairs(out.commands) do
@@ -163,17 +180,44 @@ function Sup:submit(event)
   return out, seq
 end
 
--- Start every outstanding summary command not yet started in this process
--- (after a restart this re-dispatches commands whose outcome was never
--- journaled; summaries are read-only, so a duplicate costs only spend).
+local function by_cmd(a, b) return tonumber(a.cmd:sub(2)) < tonumber(b.cmd:sub(2)) end
+
+-- Outstanding commands a previous process started and never resolved.
+function Sup:orphans()
+  local out = {}
+  for cmd, c in pairs(self.outstanding) do
+    if self.intent[cmd] and not self.started[cmd] then out[#out + 1] = c end
+  end
+  table.sort(out, by_cmd)
+  return out
+end
+
+-- Settle orphans as uncertain, in command order. Each is an ordinary
+-- journaled event, so replay reproduces it.
+function Sup:recover()
+  local n = 0
+  for _, c in ipairs(self:orphans()) do
+    if self.outstanding[c.cmd] then
+      self:submit { _ = "summary-failed", job = c.job, attempt = c.attempt.n, class = "uncertain" }
+      n = n + 1
+    end
+  end
+  return n
+end
+
+-- Start every outstanding summary command not yet started, journaling the
+-- dispatch intent first. Orphans are recovered as uncertain, never resent.
 function Sup:dispatch_pending()
   if not self.provider then return 0 end
+  self:recover()
   local cmds = {}
   for cmd, c in pairs(self.outstanding) do
     if not self.started[cmd] then cmds[#cmds + 1] = c end
   end
-  table.sort(cmds, function(a, b) return tonumber(a.cmd:sub(2)) < tonumber(b.cmd:sub(2)) end)
+  table.sort(cmds, by_cmd)
   for _, c in ipairs(cmds) do
+    self.store:append(txn_bytes { kind = codec.sym("dispatch"), cmd = codec.text(c.cmd), job = codec.text(c.job) })
+    self.intent[c.cmd] = true
     self.started[c.cmd] = true
     local source
     if c.input._ == "leaf-input" then
@@ -202,12 +246,19 @@ function Sup:pump(max_steps)
   while steps < max_steps do
     self:dispatch_pending()
     if #self.inbox == 0 and (not self.provider or self.provider:pending() == 0) then break end
-    if self.provider then self.provider:step() end
+    if self.provider then self.provider:step(self.step_ms or 0) end
     while #self.inbox > 0 do self:submit(table.remove(self.inbox, 1)) end
     steps = steps + 1
   end
   return steps
 end
+
+-- Grant one more attempt to a blocked or uncertain job.
+function Sup:operator_retry(job)
+  return self:submit { _ = "operator-retry", job = job }
+end
+
+function Sup:stuck_jobs() return self.core:stuck_jobs(self.state) end
 
 function Sup:status() return self.core:status(self.state) end
 function Sup:view() return self.view_text, self.view_hash end
