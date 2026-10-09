@@ -191,3 +191,30 @@
   _ [] -> []
   K [N | Ns] -> Ns where (unii.key= K (unii.node-key N))
   K [N | Ns] -> [N | (unii.remove-node K Ns)])
+
+(define unii.replace-node
+  {unii.node --> (list unii.node) --> (list unii.node)}
+  _ [] -> []
+  N [M | Ns] -> [N | Ns] where (unii.key= (unii.node-key N) (unii.node-key M))
+  N [M | Ns] -> [M | (unii.replace-node N Ns)])
+
+\\ A provisional node stands in for a leaf whose summary job is uncertain:
+\\ it renders, but it is never joined, merged or summarized from.
+(define unii.provisional?
+  {unii.node --> boolean}
+  [node _ _ _ _ [provisional _]] -> true
+  _ -> false)
+
+(define unii.find-real-node
+  {unii.key --> (list unii.node) --> (list unii.node)}
+  K Ns -> (let F (unii.find-node K Ns)
+            (if (and (cons? F) (unii.provisional? (head F))) [] F)))
+
+(define unii.has-real-node?
+  {unii.key --> (list unii.node) --> boolean}
+  K Ns -> (not (empty? (unii.find-real-node K Ns))))
+
+(define unii.has-provisional?
+  {unii.key --> (list unii.node) --> boolean}
+  K Ns -> (let F (unii.find-node K Ns)
+            (and (cons? F) (unii.provisional? (head F)))))

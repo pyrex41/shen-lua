@@ -43,7 +43,11 @@
 
   J : string; A : number;
   ======================================
-  [summarized J A] : unii.origin;)
+  [summarized J A] : unii.origin;
+
+  J : string;
+  ======================================
+  [provisional J] : unii.origin;)
 
 \\ node Key Text TextBytes [line RenderedLine LineBytes] Origin
 (datatype unii.line
@@ -80,6 +84,10 @@
   ===================================
   [retry-after-failure C] : unii.retry;
 
+  N : number;
+  ===================================
+  [retry-seek-shorter N] : unii.retry;
+
   ___________________________________
   [retry-by-operator] : unii.retry;)
 
@@ -103,11 +111,25 @@
   ===================================
   [uncertain C] : unii.job-status;)
 
-\\ job Id Key Attempt Status Source
+\\ A summary that fit the cap on try A of job J. A job keeps only its best:
+\\ the shortest so far, the earliest try on equal length.
+(datatype unii.candidate
+  J : string; A : number; B : number; T : string;
+  ===============================================
+  [candidate J A B T] : unii.candidate;)
+
+\\ progress Attempt RoundEnd Best -- tries Attempt..RoundEnd form the current
+\\ round; Best is [] or [Candidate].
+(datatype unii.progress
+  A : number; E : number; Bs : (list unii.candidate);
+  ===================================================
+  [progress A E Bs] : unii.progress;)
+
+\\ job Id Key Progress Status Source
 (datatype unii.job
-  Id : string; K : unii.key; A : number; St : unii.job-status; Src : unii.source;
-  ===============================================================================
-  [job Id K A St Src] : unii.job;)
+  Id : string; K : unii.key; P : unii.progress; St : unii.job-status; Src : unii.source;
+  ======================================================================================
+  [job Id K P St Src] : unii.job;)
 
 \\ content ByteLength Sha256Hex Text -- the host measures and hashes the text.
 (datatype unii.content
@@ -127,6 +149,10 @@
   J : string; A : number; C : symbol;
   ========================================================================
   [summary-failed J A C] : unii.event;
+
+  J : string; A : number; R : (list unii.content);
+  ========================================================================
+  [summary-uncertain J A R] : unii.event;
 
   J : string;
   ========================================================================
@@ -210,6 +236,14 @@
   ===============================================
   [job-uncertain J C] : unii.decision;
 
+  J : string; A : number; B : number;
+  ===============================================
+  [candidate-kept J A B] : unii.decision;
+
+  K : unii.key;
+  ===============================================
+  [view-replaced K] : unii.decision;
+
   R : string;
   ===============================================
   [event-rejected R] : unii.decision;
@@ -291,7 +325,10 @@
 
 (define unii.job-id {unii.job --> string} [job X _ _ _ _] -> X)
 (define unii.job-key {unii.job --> unii.key} [job _ X _ _ _] -> X)
-(define unii.job-attempt {unii.job --> number} [job _ _ X _ _] -> X)
+(define unii.job-progress {unii.job --> unii.progress} [job _ _ X _ _] -> X)
+(define unii.job-attempt {unii.job --> number} [job _ _ [progress X _ _] _ _] -> X)
+(define unii.job-round-end {unii.job --> number} [job _ _ [progress _ X _] _ _] -> X)
+(define unii.job-best {unii.job --> (list unii.candidate)} [job _ _ [progress _ _ X] _ _] -> X)
 (define unii.job-status {unii.job --> unii.job-status} [job _ _ _ X _] -> X)
 (define unii.job-source {unii.job --> unii.source} [job _ _ _ _ X] -> X)
 
@@ -343,7 +380,7 @@
 
 (define unii.failure-classes
   {--> (list symbol)}
-  -> [retryable permanent uncertain])
+  -> [retryable permanent])
 
 (define unii.hex-char?
   {string --> boolean}
