@@ -3,6 +3,8 @@ local storage = require("unii.host.storage")
 local posix = require("unii.host.posix")
 local codec = require("unii.host.codec")
 local schema = require("unii.host.schema")
+local supervisor = require("unii.host.supervisor")
+local mock = require("unii.host.mock.summarizer")
 
 local function transaction(text)
   return codec.encode(codec.map {
@@ -89,6 +91,47 @@ return {
     end
   end },
 
+  { "checkpoint crash injection at every boundary falls back to journal replay", function()
+    local function open_sup(dir)
+      return supervisor.open(dir, {
+        core = T.core(), provider = mock.new { cap = 512 }, checkpoint_interval = 0,
+      })
+    end
+    local probe = T.tmpdir("fault-cp-probe")
+    local probe_sup = open_sup(probe)
+    probe_sup:submit(T.msg(0, "user", "checkpoint boundary"))
+    local events = {}
+    with_hook(function(op)
+      if op:find("write", 1, true) or op:find("fsync", 1, true) or op:find("rename", 1, true) then
+        events[#events + 1] = op
+      end
+    end, function() probe_sup:checkpoint() end)
+    probe_sup:close()
+    T.rm(probe)
+    T.ok(#events >= 8)
+
+    for target = 1, #events do
+      local dir = T.tmpdir("fault-cp")
+      local sup = open_sup(dir)
+      sup:submit(T.msg(0, "user", "checkpoint boundary"))
+      local expected = sup:state_hash()
+      local seen = 0
+      posix.set_fault_hook(function(op)
+        if op:find("write", 1, true) or op:find("fsync", 1, true) or op:find("rename", 1, true) then
+          seen = seen + 1
+          if seen == target then return "crash" end
+        end
+      end)
+      pcall(sup.checkpoint, sup)
+      posix.set_fault_hook(nil)
+      sup:close()
+      local again = open_sup(dir)
+      T.eq(again:state_hash(), expected, "checkpoint boundary " .. target)
+      again:close()
+      T.rm(dir)
+    end
+  end },
+
   { "torn journal write is isolated and never becomes a committed record", function()
     local dir = T.tmpdir("fault-torn")
     local store = storage.open(dir)
@@ -109,7 +152,7 @@ return {
     T.rm(dir)
   end },
 
-  { "full disk before blob commit refuses without journal or in-memory mutation", function()
+  { "full disk during blob or journal commit refuses without in-memory mutation", function()
     local dir = T.tmpdir("fault-full")
     local store = storage.open(dir)
     posix.set_fault_hook(function(op, detail)
@@ -118,6 +161,14 @@ return {
       end
     end)
     T.raises(function() store:append(transaction("full disk")) end, "ENOSPC")
+    posix.set_fault_hook(nil)
+    T.eq(#store:records(), 0)
+    posix.set_fault_hook(function(op, detail)
+      if op == "write.before" and detail.path and detail.path:match("%.uj$") then
+        return { error = "ENOSPC full disk" }
+      end
+    end)
+    T.raises(function() store:append(transaction("journal full disk")) end, "ENOSPC")
     posix.set_fault_hook(nil)
     T.eq(#store:records(), 0)
     store:close()

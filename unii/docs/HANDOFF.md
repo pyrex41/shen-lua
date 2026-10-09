@@ -103,7 +103,7 @@ and stops reporting SKIP.
 ## Acceptance gates and how each was verified
 
 Every row is an automated test in `luajit unii/test/run.lua`. The last full
-run passed 82 tests, failed 0 and skipped 1. The skip is the oracle
+run passed 83 tests, failed 0 and skipped 1. The skip is the oracle
 fixtures, which do not exist yet. That count includes the upstream port
 specs (1,088 checks across 22 specs) and the kernel suite (134 of 134).
 The suite passes on both LuaJIT builds listed in `MANIFEST.md`.

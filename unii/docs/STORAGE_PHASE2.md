@@ -19,11 +19,12 @@ summary text; checkpoints and indexes can always be discarded and rebuilt.
 | ENOSPC/torn journal append | Refuse append; isolate partial final frame on restart | `test_storage_faults` |
 | Second owner | Refuse nonblocking OS `flock`; no PID-file inference | `test_storage` same- and cross-process cases |
 
-The boundary sweep discovers every write, file/directory sync and rename
-callback exercised by blob, shard-manifest, journal and index commits, then
-repeats the append with a simulated process death at each callback. Recovery
-must produce either zero records or the one complete transaction, never a
-partial or invented transaction.
+The boundary sweeps discover every write, file/directory sync and rename
+callback exercised by blob, shard-manifest, journal, index and checkpoint
+commits, then repeat the operation with a simulated process death at each
+callback. Journal recovery must produce either zero records or the one
+complete transaction, never a partial or invented transaction; checkpoint
+recovery must preserve the journal-derived state.
 
 ## Checkpoint proof
 
