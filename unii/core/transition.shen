@@ -9,7 +9,7 @@
 
 (define unii.init
   {unii.config --> unii.state}
-  Cf -> (unii.mk-state Cf 0 0 [] (unii.wrapper-bytes) [] [] false 0 0)
+  Cf -> (unii.mk-state Cf 0 0 [] 0 [] [] false 0 0)
     where (empty? (unii.config-errors Cf))
   Cf -> (error "unii.init: invalid configuration: ~A" (head (unii.config-errors Cf))))
 

@@ -15,21 +15,19 @@ local function rng(seed)
   return function(n) x = (16807 * x) % 2147483647; return x % n end
 end
 
-local function collapse(s) return (s:gsub("[\r\n]", " ")) end
+local collapse = require("unii.eval.oracle.oracle").canonical_text
 local function kstr(k) return k.level .. "/" .. k.index end
 
 local function parse_view(text)
   local lines = {}
   for line in text:gmatch("[^\n]*\n") do
-    if line ~= "<chat>\n" and line ~= "</chat>\n" then
-      local first, count, body = line:match("^(%d+)%+(%d+)|(.*)\n$")
-      lines[#lines + 1] = { first = tonumber(first), count = tonumber(count), text = body }
-    end
+    local first, count, body = line:match("^(%d+)%+(%d+)|(.*)\n$")
+    lines[#lines + 1] = { first = tonumber(first), count = tonumber(count), text = body }
   end
   return lines
 end
 
-local WORDS = { "alpha", "beta", "日本", "naïve", "🙂", "x\ny", "id=42", "|", "end" }
+local WORDS = { "alpha", "beta", "日本", "naïve", "🙂", "x\ny", "a\r\nb", "\t", "id=42", "|", "%", "end" }
 
 local function run_trace(seed, steps, cfg)
   local r = rng(seed)

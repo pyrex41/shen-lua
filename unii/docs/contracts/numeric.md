@@ -9,7 +9,7 @@ core.
 | Quantity | Domain | Enforced by |
 |---|---|---|
 | message ids, counts, node indexes | 0 .. 2^31 − 1 (`unii.max-id`) | `schema` `nat` (host), `unii.nat?` and sequence and ceiling checks (core) |
-| node levels | 0 .. 31 | `unii.valid-key?` |
+| node levels | 0 .. 30; a node's interval must end at or below 2^31 − 1 | `unii.valid-key?` |
 | byte counts | nat; a leaf is at most `leaf_cap` ≤ 65,536; a source chunk is at most `chunk_max` ≤ 2^20 | `config-errors`, `message-errors` |
 | view bytes | sum of line bytes; with a frontier of 2^31 leaves, each line under 600 bytes, this is far below 2^53 | — |
 | `unii.divmod-pow2 N L` | N < 2^40, 0 ≤ L < 40; anything else raises | its guard |
@@ -55,8 +55,10 @@ because two different eligible pairs cannot share the same left key.
 `unii.merge-keys-to-count Keys T Budget` merges the most due eligible pair
 (with every parent treated as built) until the view has at most `Budget`
 lines. With `Budget` equal to the length of the gist's rollback push list
-at step T, the resulting view equals the push list at all 20,001 steps,
-T = 0..20,000 (`test_view.lua`). The first-message variant of the due score
+after message t, the resulting view equals the push list at all 20,001
+steps, t = 0..20,000 (`test_view.lua`). The same steps appear as T =
+1..20,001 messages in the oracle's `rollback-20001.trace`, which
+`test_oracle.lua` diffs row by row. The first-message variant of the due score
 matches at only 481 of those steps, which is why the endpoint form is used.
 This policy is not used live.
 
@@ -65,9 +67,12 @@ This policy is not used live.
 This is a separate policy from the line-count policy above.
 
 ```
-line bytes  = #"<first>+<count>|" + text bytes + 1     (text with CR and LF each replaced by one space)
-view bytes  = 15 + sum of line bytes                     ("<chat>\n" + "</chat>\n")
+line bytes  = #"<first>+<count>|" + canonical text bytes + 1
+view bytes  = sum of line bytes        (prompt framing such as <chat> tags is not counted)
 ```
+
+Canonical text is defined in `decisions.md`: each line break and each other
+control becomes one space, and nothing is escaped.
 
 After the view has been extended, the core applies the policy:
 

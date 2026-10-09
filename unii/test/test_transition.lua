@@ -109,11 +109,11 @@ return {
     e:apply(T.msg(2, "user", "short"))
     local out = e:apply(T.done(c1, "summary one"))
     T.eq(e:status().covered, 0, "message 0 unresolved: nothing may enter the view")
-    T.eq(e.C:render(e.state), "<chat>\n</chat>\n")
+    T.eq(e.C:render(e.state), "")
     T.ok(not T.has_decision(out, "view-extended"))
     out = e:apply(T.done(c0, "summary zero"))
     T.eq(e:status().covered, 3)
-    T.eq(e.C:render(e.state), "<chat>\n0+1|summary zero\n1+1|summary one\n2+1|user: short\n</chat>\n")
+    T.eq(e.C:render(e.state), "0+1|summary zero\n1+1|summary one\n2+1|user: short\n")
     T.eq(#e:invariants(), 0)
   end },
 

@@ -83,12 +83,15 @@ return {
     end
   end },
 
-  { "line bytes equal rendered bytes; line breaks collapse byte-for-byte", function()
+  { "line bytes equal rendered bytes; each line break becomes one space", function()
     local s = S()
-    for _, c in ipairs { { 0, 0, "x" }, { 3, 5, "a\nb\r\nc 日本" }, { 0, 123456, "" }, { 10, 2, ("é"):rep(200) } } do
+    for _, c in ipairs { { 0, 0, "x", "x" }, { 3, 5, "a\nb\r\nc 日本", "a b c 日本" }, { 0, 123456, "", "" },
+                         { 10, 2, ("é"):rep(200), ("é"):rep(200) }, { 1, 1, "p|q%\t\0", "p|q%  " } } do
       local k = key(s, c[1], c[2])
-      local line = s.call("unii.render-line", k, c[3])
-      T.eq(#line, s.call("unii.line-bytes", k, #c[3]))
+      local l = s.totable(s.call("unii.make-line", k, c[3], #c[3]))
+      local line = l[2]
+      T.eq(#line, l[3])
+      T.eq(line:match("|(.*)\n$"), c[4])
       T.ok(not line:sub(1, -2):find("[\r\n]"), "only the final LF remains")
       T.eq(line:sub(-1), "\n")
       T.ok(line:find("^" .. (c[2] * 2 ^ c[1]) .. "%+" .. (2 ^ c[1]) .. "|"), "address prefix " .. line)

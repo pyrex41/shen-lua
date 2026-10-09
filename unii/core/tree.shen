@@ -11,10 +11,12 @@
   {unii.key --> unii.key --> boolean}
   [key L1 I1] [key L2 I2] -> (and (= L1 L2) (= I1 I2)))
 
+\\ A key is valid when its interval ends at or below the v1 message-count
+\\ ceiling 2^31 - 1 (so message ids run 0 .. 2^31 - 2).
 (define unii.valid-key?
   {unii.key --> boolean}
-  [key L I] -> (and (unii.nat? L) (and (<= L 31) (and (unii.nat? I)
-                (<= (* I (unii.pow2 L)) (- (unii.max-id) (- (unii.pow2 L) 1)))))))
+  [key L I] -> (and (unii.nat? L) (and (<= L 30) (and (unii.nat? I)
+                (<= (* I (unii.pow2 L)) (- (unii.max-id) (unii.pow2 L)))))))
 
 (define unii.key-count {unii.key --> number} [key L _] -> (unii.pow2 L))
 (define unii.key-first {unii.key --> number} [key L I] -> (* I (unii.pow2 L)))
@@ -62,19 +64,71 @@
   First _ _ L -> [[key L (fst (unii.divmod-pow2 First L))]])
 
 \\ ---------------------------------------------------------- canonical lines
-\\ A view line is First "+" Count "|" Text LF. Line breaks (CR and LF) inside
-\\ Text become single spaces, which keeps the byte length of Text unchanged,
-\\ so line bytes are computed exactly from the host-measured text bytes.
+\\ A view line is First "+" Count "|" Canonical(Text) LF
+\\ (docs/contracts/numeric.md, "Canonical text"). Canonical text replaces
+\\ each line break -- CR LF as one, lone CR, LF, NEL (U+0085), LS (U+2028),
+\\ PS (U+2029) -- and every other C0 control and DEL with one space, and
+\\ keeps all other bytes, including "|" and "%". Text arrives as valid UTF-8
+\\ with an exact byte count (checked at the boundary); the rendering and its
+\\ byte length are computed together, by byte index.
 
 (define unii.lf {--> string} -> (n->string 10))
-(define unii.cr {--> string} -> (n->string 13))
 
-(define unii.collapse-breaks
-  {string --> string}
-  "" -> ""
-  (@s C Rest) -> (cn " " (unii.collapse-breaks Rest))
-    where (or (= C (unii.lf)) (= C (unii.cr)))
-  (@s C Rest) -> (cn C (unii.collapse-breaks Rest)))
+(define unii.byte-at
+  {string --> number --> number}
+  S I -> (string->n (pos S I)))
+
+(define unii.canonical-text
+  {string --> number --> (string * number)}
+  S N -> (unii.canon-range S 0 N))
+
+\\ Ranges are split in halves so the work stays O(n log n); a split never
+\\ falls inside a UTF-8 sequence or between CR and LF.
+(define unii.canon-range
+  {string --> number --> number --> (string * number)}
+  S I J -> (unii.canon-scan S I J "" 0) where (<= (- J I) 64)
+  S I J -> (unii.canon-halves S I (unii.canon-split S I (+ I (unii.half (- J I))) J) J))
+
+(define unii.canon-halves
+  {string --> number --> number --> number --> (string * number)}
+  S I M J -> (unii.canon-scan S I J "" 0) where (>= M J)
+  S I M J -> (let A (unii.canon-range S I M)
+                  B (unii.canon-range S M J)
+               (@p (cn (fst A) (fst B)) (+ (snd A) (snd B)))))
+
+(define unii.canon-split
+  {string --> number --> number --> number --> number}
+  _ _ M J -> J where (>= M J)
+  S I M J -> (unii.canon-split S I (+ M 1) J)
+    where (or (unii.continuation? (unii.byte-at S M))
+              (and (= 10 (unii.byte-at S M)) (= 13 (unii.byte-at S (- M 1)))))
+  _ _ M _ -> M)
+
+(define unii.continuation?
+  {number --> boolean}
+  B -> (and (>= B 128) (< B 192)))
+
+(define unii.canon-scan
+  {string --> number --> number --> string --> number --> (string * number)}
+  _ I J Acc Len -> (@p Acc Len) where (>= I J)
+  S I J Acc Len -> (unii.canon-scan S (unii.canon-break-end S I J) J (cn Acc " ") (+ Len 1))
+    where (> (unii.canon-break-end S I J) I)
+  S I J Acc Len -> (unii.canon-scan S (+ I 1) J (cn Acc (pos S I)) (+ Len 1)))
+
+\\ End index of the line break or control starting at I, or I when there is none.
+(define unii.canon-break-end
+  {string --> number --> number --> number}
+  S I J -> (unii.canon-break-at S I J (unii.byte-at S I)))
+
+(define unii.canon-break-at
+  {string --> number --> number --> number --> number}
+  S I J 13 -> (+ I 2) where (and (< (+ I 1) J) (= 10 (unii.byte-at S (+ I 1))))
+  _ I _ B -> (+ I 1) where (or (< B 32) (= B 127))
+  S I J 194 -> (+ I 2) where (and (< (+ I 1) J) (= 133 (unii.byte-at S (+ I 1))))
+  S I J 226 -> (+ I 3) where (and (< (+ I 2) J)
+                                  (and (= 128 (unii.byte-at S (+ I 1)))
+                                       (element? (unii.byte-at S (+ I 2)) [168 169])))
+  _ I _ _ -> I)
 
 (define unii.address-string
   {unii.key --> string}
@@ -85,18 +139,21 @@
   K -> (+ (unii.decimal-width (unii.key-first K))
           (+ 1 (unii.decimal-width (unii.key-count K)))))
 
+\\ Line bytes from the canonical text's byte length.
 (define unii.line-bytes
   {unii.key --> number --> number}
-  K TextBytes -> (+ (unii.address-bytes K) (+ 1 (+ TextBytes 1))))
+  K CanonBytes -> (+ (unii.address-bytes K) (+ 1 (+ CanonBytes 1))))
 
-(define unii.render-line
-  {unii.key --> string --> string}
-  K Text -> (cn (unii.address-string K)
-                (cn "|" (cn (unii.collapse-breaks Text) (unii.lf)))))
+\\ Text is the node's raw text and Bytes its exact byte length.
+(define unii.make-line
+  {unii.key --> string --> number --> unii.line}
+  K Text Bytes -> (let C (unii.canonical-text Text Bytes)
+                    [line (cn (unii.address-string K) (cn "|" (cn (fst C) (unii.lf))))
+                          (unii.line-bytes K (snd C))]))
 
 (define unii.make-node
   {unii.key --> string --> number --> unii.origin --> unii.node}
-  K Text Bytes O -> [node K Text Bytes [line (unii.render-line K Text) (unii.line-bytes K Bytes)] O])
+  K Text Bytes O -> [node K Text Bytes (unii.make-line K Text Bytes) O])
 
 \\ Exact leaf text: the kind attribution, ": ", then the content verbatim.
 \\ Its byte size counts toward the leaf cap.
