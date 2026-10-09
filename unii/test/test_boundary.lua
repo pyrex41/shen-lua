@@ -175,4 +175,18 @@ return {
     local S = core.shen()
     T.ok(not pcall(S.value, "*pwned*"), "message text was evaluated")
   end },
+
+  { "upstream probe: datatype rules with >= 6 premises (workaround in types.shen)", function()
+    local dir = unii .. "/test/fixtures/upstream"
+    local function probe(file, expr)
+      return (T.sh(("luajit %q %q %q"):format(dir .. "/probe.lua", dir .. "/" .. file, expr)))
+    end
+    local five = probe("five_premises.shen", '(probe5-node-text (mk-probe5-node 3 "hi"))')
+    T.ok(five:find("LOAD ok\nUSE hi", 1, true), five)
+    local six = probe("six_premises.shen", '(probe6-node-text (mk-probe6-node 3 "hi"))')
+    if six:find("LOAD ok\nUSE hi", 1, true) then
+      error("the pinned runtime now accepts 6-premise rules; drop the nesting workaround in types.shen")
+    end
+    T.ok(six:find("shen.consume", 1, true), "six-premise failure changed shape: " .. six)
+  end },
 }
