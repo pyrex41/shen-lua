@@ -24,6 +24,8 @@ local function system_prompt(cap, job)
   local rt = job.attempt.retry
   if rt and rt._ == "retry-too-long" then
     s = s .. (" A previous attempt was %d bytes, over the limit: be shorter."):format(rt.bytes)
+  elseif rt and rt._ == "retry-seek-shorter" then
+    s = s .. (" The best attempt so far is %d bytes: try to be shorter without losing facts."):format(rt.bytes)
   end
   return s
 end

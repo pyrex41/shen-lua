@@ -236,4 +236,15 @@ return {
     sup:close()
     T.rm(dir)
   end },
+
+  { "the provisional prompt passes each round hint to the model", function()
+    local cc = require("unii.host.providers.chat_completions")
+    local function system(retry)
+      local job = { attempt = { n = 2, retry = retry }, input = { _ = "leaf-input", kind = "user" }, source = "x" }
+      return cc.messages(job, 512)[1].content
+    end
+    T.ok(not system({ _ = "first-attempt" }):find("previous", 1, true))
+    T.ok(system({ _ = "retry-too-long", bytes = 600 }):find("was 600 bytes, over the limit", 1, true))
+    T.ok(system({ _ = "retry-seek-shorter", bytes = 300 }):find("best attempt so far is 300 bytes", 1, true))
+  end },
 }
