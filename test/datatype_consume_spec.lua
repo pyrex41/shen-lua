@@ -85,6 +85,18 @@ local function run_rule(name, goal, assum)
   return res
 end
 
+-- The same predicate on the legacy engine: the KL defun, called the way
+-- shen.typecheck starts a proof. Wide rules run wide-mode code here
+-- (compiler.lua, WIDE).
+local function run_legacy(name, goal, assum)
+  local fn = P.F[name .. "#type"]
+  local lock = P.F["@v"](true, P.F["@v"](0, P.F["vector"](0)))
+  local ok, res = pcall(fn, goal, assum, P.F["shen.prolog-vector"](), lock, 0,
+                        function() return true end)
+  if not ok then return nil, errmsg(res) end
+  return res
+end
+
 local function varname(i) return "V" .. i end
 
 local function define_row(n)
@@ -115,9 +127,12 @@ shen.eval([[
 -- first that used to be missing. From sixteen the native consume helper
 -- nested past LuaJIT's 100-table __index chain ("loop in gettable") and then
 -- past Lua's 200 locals per function; from about thirty the legacy KL defun
--- did too, and the datatype failed to load at all. Thirty-seven is the
--- widest that loads today (see the note at the end of this file).
-local WIDTHS = { 5, 6, 8, 12, 15, 16, 20, 24, 30, 32, 37 }
+-- did too, and the datatype failed to load at all. From thirty-eight the
+-- legacy continuations passed ~3N values (250 registers per frame), which
+-- needed wide mode on both compilers, as did 40+ in the native translator.
+-- Sixty-four is past the 60-upvalue and 200-syntax-level limits, 100 and
+-- 128 past the native 150 lifted functions. See the note at the end.
+local WIDTHS = { 5, 6, 8, 12, 15, 16, 20, 24, 30, 32, 37, 38, 40, 64, 100, 128 }
 
 local function check_width(n)
   local before = {}
@@ -178,14 +193,22 @@ local function check_width(n)
   local no, nerr = run_rule(name, nope, hyp)
   check(n .. " premises: unpacked rule does not prove 2 : piece",
         nerr or no, false)
+
+  local lt, lterr = run_legacy(name, seven, tailhyp)
+  check(n .. " premises: legacy: last element is unpacked", lterr or lt, true)
+  local lm, lmerr = run_legacy(name, seven, hyp)
+  check(n .. " premises: legacy: 7 : piece needs the last element", lmerr or lm, false)
+  local ls, lserr = run_legacy(name, goal, bad)
+  check(n .. " premises: legacy: short hypothesis misses", lserr or ls, false)
+  local le, leerr = run_legacy(name, goal, R.NIL)
+  check(n .. " premises: legacy: empty context misses", leerr or le, false)
 end
 
 for _, n in ipairs(WIDTHS) do check_width(n) end
 
--- Thirty-eight premises still fail to load: the legacy KL compiler hoists
--- each premise's freeze continuation into a function taking all ~3N
--- captures as parameters and passes them on in a nested call, which passes
--- LuaJIT's 250-slot frame limit ("function or expression too complex").
+-- 194 premises is the widest that loads (checked by hand, ~15 s, so not in
+-- WIDTHS). At 195 the consume helper's own signature has N+6 = 201
+-- parameters, past Lua's 200 locals per function in either compiler.
 
 print(string.format("datatype_consume_spec: %d pass, %d fail", pass, fail))
 os.exit(fail == 0 and 0 or 1)
