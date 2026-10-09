@@ -100,4 +100,29 @@ return {
     sup:close(); client:close()
     T.rm(dir)
   end) },
+
+  { "CLI --network real: dropped request is reported stuck, `unii retry` recovers it", with_server(function(s)
+    local dir = T.tmpdir("realcli") .. "/chat"
+    local bin = T.root() .. "/unii/bin/unii"
+    local function run(args) return T.sh(("UNII_API_KEY=test-key-not-secret %q %s"):format(bin, args)) end
+    local out, ok = run(("init --dir %q --cap 64"):format(dir))
+    T.ok(ok, out)
+    out, ok = run(("append --dir %q --count 2 --seed 3 --quiet --network real --url %q --model m")
+      :format(dir, s.base .. "/drop"))
+    T.ok(ok, out)
+    T.ok(out:find("EFFECT UNCERTAIN", 1, true), out)
+    T.ok(not out:find("test-key-not-secret", 1, true), "key not printed")
+    out = run(("status --dir %q"):format(dir))
+    local job = out:match("stuck uncertain%s+(%S+)")
+    T.ok(job, out)
+    local journal = io.open(dir .. "/journal.uj", "rb"):read("*a")
+    T.ok(not journal:find("test-key-not-secret", 1, true), "key not journaled")
+    out, ok = run(("retry --dir %q --job %s --network real --url %q --model m")
+      :format(dir, job, s.base .. "/v1/chat/completions"))
+    T.ok(ok, out)
+    T.ok(out:find("retrying " .. job, 1, true), out)
+    out = run(("status --dir %q"):format(dir))
+    T.ok(not out:find("stuck uncertain " .. job, 1, true), out)
+    T.rm(dir:match("^(.*)/chat$"))
+  end) },
 }
