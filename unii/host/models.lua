@@ -10,7 +10,9 @@
 --
 -- Provider shape:
 --   provider.name, provider.is_mock
---   provider:start(client, job, on_outcome) -> request handle (cancel())
+--   provider:start(job, on_outcome) -> request handle (cancel())
+--   provider:step()     advance the provider's network client
+--   provider:pending()  number of requests still in flight
 -- where job = { cmd, job, key, attempt, retry, input, source }.
 local M = {}
 

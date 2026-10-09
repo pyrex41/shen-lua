@@ -145,7 +145,7 @@ function Sup:submit(event)
   self.state = state
   local ok, err = pcall(self._refresh_view, self)
   if not ok then self.state, self.view_cache = prev_state, prev_cache; error(err, 0) end
-  local seq = self.store:append(txn_bytes {
+  local aok, seq = pcall(self.store.append, self.store, txn_bytes {
     kind = codec.sym("event"),
     event = tagged,
     commands = out.commands_tagged,
@@ -154,6 +154,11 @@ function Sup:submit(event)
     view_hash = codec.text(self.view_hash),
     state_hash = codec.text(self.core:state_hash(state)),
   })
+  if not aok then
+    self.state, self.view_cache = prev_state, prev_cache
+    self:_refresh_view()
+    error(seq, 0)
+  end
   self:_absorb(schema.decode("event", tagged), out, false)
   return out, seq
 end
