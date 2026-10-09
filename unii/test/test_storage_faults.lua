@@ -144,6 +144,7 @@ return {
     end)
     T.raises(function() store:append(transaction("torn")) end, "EIO torn write")
     posix.set_fault_hook(nil)
+    T.raises(function() store:append(transaction("must reopen")) end, "storage is poisoned")
     store:close()
     local reopened, info = storage.open(dir)
     T.eq(#reopened:records(), 0)
@@ -163,6 +164,10 @@ return {
     T.raises(function() store:append(transaction("full disk")) end, "ENOSPC")
     posix.set_fault_hook(nil)
     T.eq(#store:records(), 0)
+    T.raises(function() store:append(transaction("must reopen")) end, "storage is poisoned")
+    store:close()
+
+    store = storage.open(dir)
     posix.set_fault_hook(function(op, detail)
       if op == "write.before" and detail.path and detail.path:match("%.uj$") then
         return { error = "ENOSPC full disk" }
@@ -171,6 +176,7 @@ return {
     T.raises(function() store:append(transaction("journal full disk")) end, "ENOSPC")
     posix.set_fault_hook(nil)
     T.eq(#store:records(), 0)
+    T.raises(function() store:append(transaction("must reopen")) end, "storage is poisoned")
     store:close()
     local reopened = storage.open(dir)
     T.eq(#reopened:records(), 0)

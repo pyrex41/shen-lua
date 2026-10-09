@@ -164,10 +164,14 @@ return {
     local sup = open_sup(dir)
     feed(sup, 0, 3)
     local before = sup:state_hash()
+    local before_view, before_view_hash = sup:view()
     local real = sup.store.append
     sup.store.append = function() error("storage append: disk full (injected)", 0) end
     T.raises(function() sup:submit(T.msg(3, "user", "lost")) end, "disk full")
     T.eq(sup:state_hash(), before)
+    local after_view, after_view_hash = sup:view()
+    T.eq(after_view, before_view)
+    T.eq(after_view_hash, before_view_hash)
     sup.store.append = real
     sup:submit(T.msg(3, "user", "kept"))
     local h = sup:state_hash()

@@ -96,6 +96,8 @@ function M.write_all(fd, s)
     local w = tonumber(C.write(fd, buf + off, want))
     if w < 0 then
       if ffi.errno() ~= EINTR then return nil, errstr("write", fd) end
+    elseif w == 0 then
+      return nil, "write(" .. tostring(fd) .. "): returned zero bytes"
     else
       off = off + w
       action = hit(op .. ".after", { fd = fd, path = fd_paths[tonumber(fd)], offset = off, bytes = w })

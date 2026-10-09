@@ -115,6 +115,11 @@ Records 2 and later are `event` transactions:
    sync. Their failure cannot undo or compete with an authoritative journal
    commit.
 
+Any failed mutating append poisons that store handle. It refuses every later
+append until the process closes and reopens the chat, because the failure may
+have left either a torn frame or a complete frame whose sync result is
+uncertain.
+
 ## Replay
 
 When the store is opened:

@@ -26,6 +26,10 @@ callback. Journal recovery must produce either zero records or the one
 complete transaction, never a partial or invented transaction; checkpoint
 recovery must preserve the journal-derived state.
 
+After any mutating append error, the store handle is poisoned and refuses
+later appends until it is closed and recovery reopens it. This prevents
+sequence reuse or appending after an unknown partial frame.
+
 ## Checkpoint proof
 
 A checkpoint binds:

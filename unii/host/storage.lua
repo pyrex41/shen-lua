@@ -334,7 +334,7 @@ function Store:iter_records(after)
   end
 end
 
-function Store:append(payload)
+local function append_unprotected(self, payload)
   if #payload > M.MAX_RECORD then error("storage: record over " .. M.MAX_RECORD .. " bytes", 0) end
   local physical, refs, day = physicalize(payload, self.blobs)
   ensure_shard(self, day)
@@ -365,6 +365,21 @@ function Store:append(payload)
     if not iok then self.info.index_error = tostring(ierr) end
   end
   return seq
+end
+
+function Store:append(payload)
+  if self.poisoned then
+    error("storage is poisoned after a failed mutation; close and reopen before appending", 0)
+  end
+  local ok, result = pcall(append_unprotected, self, payload)
+  if not ok then
+    -- The failure may have happened after any prefix of a frame, or after a
+    -- complete frame reached the kernel but before its sync was confirmed.
+    -- Continuing could append after a torn frame or reuse a committed seq.
+    self.poisoned = true
+    error(result, 0)
+  end
+  return result
 end
 
 function Store:record_anchor(seq)

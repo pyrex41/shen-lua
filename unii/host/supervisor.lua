@@ -133,6 +133,10 @@ function Sup:_restore_checkpoint()
       end
       local state = codec.to_shen(cp.v.state)
       if self.core:state_hash(state) ~= text_field(cp, "state_hash") then error("state hash mismatch", 0) end
+      local invariant_errors = self.core:invariant_errors(state)
+      if #invariant_errors > 0 then
+        error("state invariants failed: " .. table.concat(invariant_errors, "; "), 0)
+      end
       local rendered = self.core:render(state)
       if sha256.hex(rendered) ~= text_field(cp, "view_hash") then error("view hash mismatch", 0) end
       if self.core:status(state).rev ~= checkpoint_int(cp, "view_rev") then error("view revision mismatch", 0) end
@@ -212,9 +216,14 @@ function Sup:submit(event)
   local tagged = schema.encode("event", event)
   local state, out = self.core:transition(self.state, tagged)
   local prev_state, prev_cache = self.state, self.view_cache
+  local prev_text, prev_hash = self.view_text, self.view_hash
   self.state = state
   local ok, err = pcall(self._refresh_view, self)
-  if not ok then self.state, self.view_cache = prev_state, prev_cache; error(err, 0) end
+  if not ok then
+    self.state, self.view_cache = prev_state, prev_cache
+    self.view_text, self.view_hash = prev_text, prev_hash
+    error(err, 0)
+  end
   local aok, seq = pcall(self.store.append, self.store, txn_bytes {
     kind = codec.sym("event"),
     event = tagged,
@@ -226,7 +235,7 @@ function Sup:submit(event)
   })
   if not aok then
     self.state, self.view_cache = prev_state, prev_cache
-    self:_refresh_view()
+    self.view_text, self.view_hash = prev_text, prev_hash
     error(seq, 0)
   end
   self:_absorb(schema.decode("event", tagged), out, false)
