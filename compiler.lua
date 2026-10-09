@@ -548,10 +548,13 @@ end
 local CSE_MAX_LOCALS = 100
 local CCACHE = {}   -- chain key -> Lua local/slot name, block-scoped via __index
 local HOIST = nil   -- nil, or { out = {stmt strings}, pure = bool } at a flush site
-local FNL = { np = 0, npt = 0, pt = false, can_pt = false }  -- per-Lua-function
+-- nloc: every Lua local this function has declared so far (params, let
+-- locals, hoisted chain steps, fN callee refs), summed across branches, so it
+-- over-approximates the live count Lua checks against its 200 cap.
+local FNL = { np = 0, npt = 0, pt = false, can_pt = false, nloc = 0 }  -- per-Lua-function
 
-local function new_fnl(can_pt)
-  return { np = 0, npt = 0, pt = false, can_pt = can_pt }
+local function new_fnl(can_pt, nparams)
+  return { np = 0, npt = 0, pt = false, can_pt = can_pt, nloc = nparams or 0 }
 end
 
 local function child_cache()
@@ -583,6 +586,7 @@ end
 local function chain_slot(expr)
   if FNL.np < CSE_MAX_LOCALS then
     FNL.np = FNL.np + 1
+    FNL.nloc = FNL.nloc + 1
     local ln = gen("p")
     HOIST.out[#HOIST.out+1] = "local " .. ln .. " = " .. expr .. "; "
     return ln
@@ -1522,6 +1526,7 @@ local function snapshot_env(eform, env)
     local ln = env[kname]
     if type(ln) == "string" and params[ln] then
       local cap = gen("c")
+      FNL.nloc = FNL.nloc + 1
       stmts[#stmts + 1] = "local " .. cap .. " = " .. ln .. ";"
       newenv[kname] = cap
     end
@@ -1623,13 +1628,13 @@ end
 -- its free variables as parameters; returns the `KC[i](params)` call. The
 -- body is a SEPARATE Lua function: no `goto tco` (SELF cleared), no goto-kind
 -- failure continuations, no impl-local fN refs, and its own local budget.
-local function hoist_kc(form, env)
-  local params = kc_params(form, env)
+local function hoist_kc(form, env, params, nparams)
+  if not params then params, nparams = kc_params(form, env) end
   local saved_self = SELF
   local saved_h, saved_cc, saved_fnl = HOIST, CCACHE, FNL
   local saved_cont = push_inline_cont()
   local saved_impl = IN_IMPL
-  SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true); IN_IMPL = false
+  SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true, nparams); IN_IMPL = false
   local body_stmts = ctail(form, env)
   if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
   SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
@@ -1637,6 +1642,27 @@ local function hoist_kc(form, env)
   local idx = #CTX.cbodies + 1
   CTX.cbodies[idx] = "function(" .. params .. ") " .. body_stmts .. " end"
   return "KC[" .. idx .. "](" .. params .. ")"
+end
+
+-- A long let chain in one Lua function (the kernel's pattern-matching KL for
+-- a sequent rule with ~30 premises spends ~6 lets per premise) would exceed
+-- Lua's 200-locals-per-function cap. Past this budget the rest of the chain
+-- continues in a fresh KC function via a proper tail call. The margin covers
+-- locals the budget does not see ahead of time (call-chain flattening).
+local LET_SPLIT_LOCALS = 120
+
+local function try_split_let(form, env)
+  if not CTX or FNL.nosplit then return nil end
+  local used = FNL.nloc + (IN_IMPL and #FREF_LIST or 0)
+  if used < LET_SPLIT_LOCALS then return nil end
+  -- a goto-kind failure continuation's label lives in this function
+  for i = 1, #CONT do
+    if CONT[i].kind == "goto" then return nil end
+  end
+  -- a body that needs this many parameters would split again on its first let
+  local params, nparams = kc_params(form, env)
+  if nparams >= LET_SPLIT_LOCALS then FNL.nosplit = true; return nil end
+  return "return " .. hoist_kc(form, env, params, nparams)
 end
 
 -- ------------------------------------------------------------------
@@ -1909,8 +1935,11 @@ function ctail(form, env)
       local v   = car(cdr(form))
       local val = car(cdr(cdr(form)))
       local body= car(cdr(cdr(cdr(form))))
+      local split = try_split_let(form, env)
+      if split then return split end
       local lowered = try_lower_freeze_let(v, val, body, env)
       if lowered then return lowered end
+      FNL.nloc = FNL.nloc + 1
       local ln = gen("v")
       local pre, valc = cstmt_expr(val, env)
       local e2 = extend(env, v.name, ln)
@@ -2025,7 +2054,7 @@ local function cdefun(form)
   CTX = new_ctx()
   -- fresh chain-hoist state for the impl function (see CSE block above ccall)
   local saved_fnl, saved_cc = FNL, CCACHE
-  FNL = new_fnl(true)
+  FNL = new_fnl(true, #params)
   CCACHE = {}
   -- Self-tail-call -> loop lowering. Eligible unless:
   --   * the function is not PURELY tail-recursive -- some self-reference is a
