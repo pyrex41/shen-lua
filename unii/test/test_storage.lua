@@ -15,13 +15,6 @@ end
 local function write(path, s)
   local f = assert(io.open(path, "wb")); f:write(s); f:close()
 end
-local function ls(dir)
-  local out = T.sh(("ls -1 %q"):format(dir))
-  local t = {}
-  for name in out:gmatch("[^\n]+") do t[#t + 1] = name end
-  return t
-end
-
 local PAYLOADS = { "first", "", "bin\0\255\n\nUJ1 9 9\n", ("z"):rep(70) }
 
 local function journal_with(payloads)

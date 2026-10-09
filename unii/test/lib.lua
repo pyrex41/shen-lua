@@ -38,10 +38,12 @@ function M.root()
 end
 
 function M.sh(cmd)
-  local p = io.popen(cmd .. " 2>&1")
+  local p = io.popen("( " .. cmd .. " ) 2>&1; echo \"__EXIT=$?\"")
   local out = p:read("*a")
-  local ok, _, code = p:close()
-  return out, (ok == true or ok == 0), code
+  p:close()
+  local code = tonumber(out:match("__EXIT=(%d+)\n?$"))
+  out = out:gsub("__EXIT=%d+\n?$", "")
+  return out, code == 0, code
 end
 
 -- Shared booted core (one Shen environment per test process).
