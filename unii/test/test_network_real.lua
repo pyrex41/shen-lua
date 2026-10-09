@@ -10,6 +10,19 @@ local chat = require("unii.host.providers.chat_completions")
 
 local server
 
+local function journal_bytes(dir)
+  local manifest = assert(io.open(dir .. "/journals/MANIFEST", "rb"))
+  local names = manifest:read("*a")
+  manifest:close()
+  local out = {}
+  for day in names:gmatch("(%d%d%d%d%-%d%d%-%d%d)\n") do
+    local file = assert(io.open(dir .. "/journals/" .. day .. ".uj", "rb"))
+    out[#out + 1] = file:read("*a")
+    file:close()
+  end
+  return table.concat(out)
+end
+
 local function setup()
   if server then return server end
   local ok, network = pcall(require, "unii.host.network")
@@ -115,7 +128,7 @@ return {
     out = run(("status --dir %q"):format(dir))
     local job = out:match("stuck uncertain%s+(%S+)")
     T.ok(job, out)
-    local journal = io.open(dir .. "/journal.uj", "rb"):read("*a")
+    local journal = journal_bytes(dir)
     T.ok(not journal:find("test-key-not-secret", 1, true), "key not journaled")
     out, ok = run(("retry --dir %q --job %s --network real --url %q --model m")
       :format(dir, job, s.base .. "/v1/chat/completions"))
