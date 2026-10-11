@@ -296,8 +296,11 @@ end)
 -- primitives (pos, tlstr, string->n, n->string, hdstr, explode, hash, the
 -- reader) count CODE POINTS, not bytes. Pure-ASCII text stays on the old byte
 -- fast path: every helper below first checks for a byte >= 0x80 and only then
--- walks the string as UTF-8, so ASCII text costs a byte check or a C-level
--- scan for a high byte.
+-- walks the string as UTF-8. The checks are plain string.byte loops on
+-- purpose: string.find with a pattern is not JIT-compiled by LuaJIT 2.1 and
+-- aborts every trace that reaches it, which made an ASCII pos loop ~1000x
+-- slower in testing. pos remembers the last string it scanned (first_high),
+-- so a loop indexing one string scans it once.
 --
 -- INVALID UTF-8 is never an error and never loses data. Decoding is lenient:
 -- any byte that does not begin a well-formed sequence -- a stray continuation
@@ -315,9 +318,22 @@ end)
 -- U+D800..U+DFFF and errors on anything else. Everything here is plain Lua
 -- 5.1 string/arith code (no `utf8` library), so it runs identically on
 -- LuaJIT 2.1 and PUC Lua 5.1..5.4.
-local sbyte, ssub, schar, sfind = string.byte, string.sub, string.char, string.find
+local sbyte, ssub, schar = string.byte, string.sub, string.char
 local mfloor = math.floor
-local HIGHPAT = "[\128-\255]"
+
+-- first_high(s): byte index of the first byte >= 0x80 in s, or false if s is
+-- pure ASCII. One-entry memo: strings are interned, so the hit test is a
+-- pointer compare, and a loop calling pos on the same string scans it once.
+local FH_S, FH_H = nil, false
+local function first_high(s)
+  if s == FH_S then return FH_H end
+  local h = false
+  for i = 1, #s do
+    if sbyte(s, i) >= 0x80 then h = i; break end
+  end
+  FH_S, FH_H = s, h
+  return h
+end
 
 -- u8dec(s, i) -> code point, byte length of the character at byte index i
 -- (i <= #s). Lenient: an ill-formed sequence decodes as its first byte alone.
@@ -368,7 +384,7 @@ end
 
 -- u8len(s): number of characters (code points / lone invalid bytes).
 local function u8len(s)
-  local h = sfind(s, HIGHPAT)
+  local h = first_high(s)
   if not h then return #s end
   local n, i, len = h - 1, h, #s
   while i <= len do
@@ -383,7 +399,7 @@ end
 local function u8pos(s, n)
   local len = #s
   if n >= len then return nil end            -- chars <= bytes
-  local h = sfind(s, HIGHPAT)
+  local h = first_high(s)
   if not h or h > n + 1 then return ssub(s, n + 1, n + 1) end
   local i, k = h, h - 1                       -- k = index of char at byte i
   while i <= len do
@@ -413,11 +429,17 @@ end
 -- u8explode(s): KL list of the characters of s.
 local function u8explode(s)
   local acc = NIL
-  if not sfind(s, HIGHPAT) then
-    for i = #s, 1, -1 do acc = cons(ssub(s, i, i), acc) end
-    return acc
+  local i = #s
+  while i >= 1 do                     -- ASCII fast path, back to front
+    local b = sbyte(s, i)
+    if b >= 0x80 then break end
+    acc = cons(schar(b), acc)
+    i = i - 1
   end
-  local chars, i, len = {}, 1, #s
+  if i == 0 then return acc end
+  acc = NIL
+  local chars, len = {}, #s
+  i = 1
   while i <= len do
     local _, l = u8dec(s, i)
     chars[#chars + 1] = ssub(s, i, i + l - 1)
@@ -430,11 +452,17 @@ end
 -- u8codes(s): KL list of the character codes of s (string->n of each char).
 local function u8codes(s)
   local acc = NIL
-  if not sfind(s, HIGHPAT) then
-    for i = #s, 1, -1 do acc = cons(sbyte(s, i), acc) end
-    return acc
+  local i = #s
+  while i >= 1 do                     -- ASCII fast path, back to front
+    local b = sbyte(s, i)
+    if b >= 0x80 then break end
+    acc = cons(b, acc)
+    i = i - 1
   end
-  local cps, i, len = {}, 1, #s
+  if i == 0 then return acc end
+  acc = NIL
+  local cps, len = {}, #s
+  i = 1
   while i <= len do
     local cp, l = u8dec(s, i)
     cps[#cps + 1] = cp
@@ -444,7 +472,7 @@ local function u8codes(s)
   return acc
 end
 
-P.utf8 = { HIGHPAT = HIGHPAT, dec = u8dec, enc = u8enc, len = u8len,
+P.utf8 = { first_high = first_high, dec = u8dec, enc = u8enc, len = u8len,
            pos = u8pos, tl = u8tl, hd = u8hd, explode = u8explode, codes = u8codes }
 
 local function nstr_error(n)
@@ -1160,8 +1188,18 @@ function P.install_native_stdlib()
   local orig_hash = F["hash"]
   local function hashkey_bytes(s)
     local acc = 1
-    if sfind(s, HIGHPAT) then
-      local i, len = 1, #s
+    local len = #s
+    for i = 1, len do
+      local b = sbyte(s, i)
+      if b >= 0x80 then acc = nil; break end
+      if b ~= 0 then
+        if acc > 10000000000 then acc = acc + b else acc = acc * b end
+      end
+    end
+    if acc then return acc end
+    do                                -- non-ASCII: fold code points
+      acc = 1
+      local i = 1
       while i <= len do
         local b, l = u8dec(s, i)
         if b ~= 0 then
@@ -1171,13 +1209,6 @@ function P.install_native_stdlib()
       end
       return acc
     end
-    for i = 1, #s do
-      local b = sbyte(s, i)
-      if b ~= 0 then
-        if acc > 10000000000 then acc = acc + b else acc = acc * b end
-      end
-    end
-    return acc
   end
   local function hash(v, bound)
     local s
@@ -2267,7 +2298,7 @@ local ENV = {
       if n == 0 then
         if sbyte(s, 1) < 0xC2 then return ssub(s, 1, 1) end
       else
-        local h = sfind(s, HIGHPAT)       -- first non-ASCII byte, if any
+        local h = first_high(s)           -- first non-ASCII byte, if any
         if not h or h > n + 1 then return ssub(s, n + 1, n + 1) end
       end
     end
@@ -2286,6 +2317,20 @@ local ENV = {
       if c and c < 0xC2 then return c end
     end
     return F["string->n"](s)
+  end,
+  -- (string->n (pos S N)) fused by compiler.lua: the code of the N-th
+  -- character without allocating the one-character string.
+  STRNPOS = function(s, n)
+    if type(s) == "string" and type(n) == "number" and n >= 0 and n < #s then
+      local c = sbyte(s, n + 1)
+      if n == 0 then
+        if c < 0xC2 then return c end
+      elseif c < 0x80 then
+        local h = first_high(s)
+        if not h or h > n + 1 then return c end
+      end
+    end
+    return F["string->n"](F["pos"](s, n))
   end,
   NSTR = function(n)
     if type(n) == "number" and n >= 0 and n < 128 and n == mfloor(n) then

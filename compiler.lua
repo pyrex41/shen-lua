@@ -974,7 +974,19 @@ local function ccall(form, env)
         if name == "@s" and ar == 2 then return "CN(" .. argstr .. ")" end
         if name == "pos" and ar == 2 then return "POS(" .. argstr .. ")" end
         if name == "tlstr" and ar == 1 then return "TLSTR(" .. argstr .. ")" end
-        if name == "string->n" and ar == 1 then return "STRN(" .. argstr .. ")" end
+        if name == "string->n" and ar == 1 then
+          -- (string->n (pos S I)) / (string->n (hdstr S)): read the code in
+          -- place (STRNPOS) instead of building a one-character string just
+          -- to take its code. The argument's own lowering is exactly
+          -- "POS(<args>)" (see pos/hdstr below) unless it was hoisted.
+          local a = args[1]
+          if is_cons(a) and is_symbol(car(a)) and not env[car(a).name]
+             and (car(a).name == "pos" or car(a).name == "hdstr") then
+            local inner = cargs[1]:match("^POS%((.*)%)$")
+            if inner then return "STRNPOS(" .. inner .. ")" end
+          end
+          return "STRN(" .. argstr .. ")"
+        end
         if name == "n->string" and ar == 1 then return "NSTR(" .. argstr .. ")" end
         if name == "hdstr" and ar == 1 then return "POS(" .. argstr .. ", 0)" end
         if name == "shen.hds=?" and ar == 2 then return "HDS_EQ(" .. argstr .. ")" end
