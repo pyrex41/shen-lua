@@ -342,7 +342,19 @@ defprim("absvector", 1, function(n)
   return setmetatable(v, Vmt)
 end)
 defprim("absvector?", 1, function(x) return getmetatable(x)==Vmt end)
-defprim("<-address", 2, function(v, i) return v[i+2] end)
+-- An out-of-range read is an error (every in-range slot holds a value: the
+-- fail object until written), so kernel code that probes past the end under
+-- trap-error -- the vector printer's shen.iter-vector, shen.dict? -- sees
+-- the boundary instead of a Lua nil.
+local function addr_oob(v, i)
+  ERR(R.to_str and (tostring(i) .. " is not a valid index") or "invalid index")
+end
+P.addr_oob = addr_oob
+defprim("<-address", 2, function(v, i)
+  local w = v[i+2]
+  if w == nil then addr_oob(v, i) end
+  return w
+end)
 defprim("address->", 3, function(v, i, x) v[i+2]=x; return v end)
 
 -- freeze/thaw : thunks are 0-arity functions (kernel: (defun thaw (V) (V)))
@@ -960,7 +972,8 @@ function P.install_native_stdlib()
   -- fn (reader.kl): the 42 shen->kl translator compiles every call to a
   -- function whose arity is unknown at translation time (forward references
   -- within a file, mainly) as ((fn name) args...), and the kernel `fn` pays
-  -- an arity property get PLUS an assoc over the whole shen.*lambdatable*
+  -- an arity property get PLUS a shen.lambda-form property get (a
+  -- trap-error'd dict lookup on 42.2; an assoc over shen.*lambdatable* on S42)
   -- on EVERY such call — measured at ~35% of urdr's software-SHA-256 suite
   -- (jit.p F3: is_cons/equal < assoc < fn). Fast path: for a symbol naming
   -- a live function with known positive arity, verify the lambdatable entry
@@ -970,19 +983,25 @@ function P.install_native_stdlib()
   -- curried lambda. APP dispatches a raw function with recorded arity
   -- identically to the curried chain (exact call, partial application,
   -- over-application), but without one MKFUN closure allocation per applied
-  -- argument. Every (set shen.*lambdatable* ...) builds a fresh cons spine,
-  -- so table identity is the correct invalidation key; arity-0 and
+  -- argument. Every write of a shen.lambda-form property (native put/unput,
+  -- i.e. update-lambda-table / shen.set-lambda-form-entry) bumps
+  -- P.LAMBDA_FORM_GEN, which is the invalidation key (the 42.0 requirement:
+  -- a redefinition must drop the cached callable form); arity-0 and
   -- unknown-arity names always take the original path (kernel `fn` CALLS an
   -- arity-0 function rather than returning it).
   local orig_fn = F["fn"]
-  local fn_seen, fn_seen_lt = {}, nil
+  local fn_seen, fn_seen_lt, fn_seen_lt2 = {}, nil, nil
   local function fn_fast(v)
     if is_symbol(v) then
       local f = F[v.name]
       local ar = f ~= nil and FA[f] or nil
       if ar and ar > 0 then
-        local lt = GLOBALS["shen.*lambdatable*"]
-        if lt ~= fn_seen_lt then fn_seen = {}; fn_seen_lt = lt end
+        -- (an S42-lineage kernel via SHEN_KL_DIR or a Yggdrasil slice keeps
+        -- its lambda table in shen.*lambdatable*: a fresh spine per update)
+        local lt, lt2 = P.LAMBDA_FORM_GEN, GLOBALS["shen.*lambdatable*"]
+        if lt ~= fn_seen_lt or lt2 ~= fn_seen_lt2 then
+          fn_seen = {}; fn_seen_lt = lt; fn_seen_lt2 = lt2
+        end
         if fn_seen[v.name] then return f end
         orig_fn(v)               -- errors exactly like the kernel on a miss
         fn_seen[v.name] = true
@@ -1376,78 +1395,99 @@ function P.install_native_stdlib()
     return data
   end
 
-  -- Property store (get/put/unput/arity). Kernel does hash + trap-error
-  -- <-vector + assoc; empty buckets are the fail object, which <-vector
-  -- turns into an exception. Same layout, no pcall.
+  -- Property store (get/put/unput/arity) over the ShenOSKernel 42.2 dict
+  -- (dict.kl). A dict is an absvector
+  --   address 0: shen.dictionary   1: capacity   2: entry count
+  --   address 3+i: bucket i  — an assoc list of (Key . Props)
+  -- where Props is itself an assoc list of (Prop . Value). In the pure-array
+  -- layout address a lives at v[a + 2]. The kernel's get/put/unput go through
+  -- trap-error around shen.<-dict plus shen.assoc-set/shen.assoc-rm; these
+  -- natives build exactly the same bucket and entry lists (assoc-set replaces
+  -- in place keeping the stored key, else appends; assoc-rm drops the first
+  -- match) without the pcall. Anything that is not a well-formed dict, and
+  -- every error path, delegates to the compiled original so messages match.
   local orig_get = F["get"]
   local orig_put = F["put"]
   local orig_unput = F["unput"]
   local orig_arity = F["arity"]
-  local orig_change = F["shen.change-pointer-value"]
-  local orig_remove = F["shen.remove-pointer"]
   local arity_sym = intern("arity")
+  local dict_sym = intern("shen.dictionary")
+  local lambda_form_sym = intern("shen.lambda-form")
+  -- bucket address of `key` in dict `vec`: returns bucket, slot index (v[]).
   local function bucket_at(vec, key)
-    if getmetatable(vec) ~= Vmt then return nil, nil end
-    local lim = vec[2]
-    if type(lim) ~= "number" or lim <= 0 then return nil, nil end
-    local h = hash(key, lim)
+    if getmetatable(vec) ~= Vmt or vec[2] ~= dict_sym then return nil, nil end
+    local cap = vec[3]
+    if type(cap) ~= "number" or cap <= 0 then return nil, nil end
+    local h = hash(key, cap)
     if type(h) ~= "number" then return nil, nil end
-    local slot = vec[h + 2]
-    if slot == fail_sym or slot == nil then return NIL, h end
-    return slot, h
+    local slot = h + 5
+    local b = vec[slot]
+    if b == nil or b == fail_sym then return nil, nil end
+    return b, slot
   end
-  local function pointer_match(pair, key, prop)
-    if not is_cons(pair) then return false end
-    local kp = pair[1]
-    if not is_cons(kp) then return false end
-    local rest = kp[2]
-    return is_cons(rest) and rest[2] == NIL
-       and equal(kp[1], key) and equal(rest[1], prop)
-  end
-  local function change_pointer(key, prop, val, lst)
-    local orig = lst
+  -- shen.assoc-set, iteratively; nil on an improper list (caller delegates).
+  local function assoc_set(k, v, l)
     local head, last
     while true do
-      if lst == NIL then
-        local cell = cons(cons(cons(key, cons(prop, NIL)), val), NIL)
-        if last then last[2] = cell; return head end
-        return cell
+      if l == NIL then
+        local cell = cons(cons(k, v), NIL)
+        if last then last[2] = cell; return head, true end
+        return cell, true
       end
-      if not is_cons(lst) then return orig_change(key, prop, val, orig) end
-      local pair = lst[1]
-      if pointer_match(pair, key, prop) then
-        local cell = cons(cons(pair[1], val), lst[2])
-        if last then last[2] = cell; return head end
-        return cell
+      if not is_cons(l) then return nil end
+      local pair = l[1]
+      if is_cons(pair) and equal(k, pair[1]) then
+        local cell = cons(cons(pair[1], v), l[2])
+        if last then last[2] = cell; return head, false end
+        return cell, false
       end
       local cell = cons(pair, NIL)
       if last then last[2] = cell else head = cell end
       last = cell
-      lst = lst[2]
+      l = l[2]
     end
   end
-  local function remove_pointer(key, prop, lst)
-    local orig = lst
+  -- shen.assoc-rm, iteratively; nil on an improper list.
+  local function assoc_rm(k, l)
     local head, last
     while true do
-      if lst == NIL then
-        if last then return head else return NIL end
+      if l == NIL then
+        if last then return head end
+        return NIL
       end
-      if not is_cons(lst) then return orig_remove(key, prop, orig) end
-      if pointer_match(lst[1], key, prop) then
-        if last then last[2] = lst[2]; return head end
-        return lst[2]
+      if not is_cons(l) then return nil end
+      local pair = l[1]
+      if is_cons(pair) and equal(k, pair[1]) then
+        if last then last[2] = l[2]; return head end
+        return l[2]
       end
-      local cell = cons(lst[1], NIL)
+      local cell = cons(pair, NIL)
       if last then last[2] = cell else head = cell end
       last = cell
-      lst = lst[2]
+      l = l[2]
     end
+  end
+  -- (key . props) entry of `key` in a bucket, or nil.
+  local function find_entry(bucket, key)
+    while is_cons(bucket) do
+      local e = bucket[1]
+      if is_cons(e) and equal(key, e[1]) then return e end
+      bucket = bucket[2]
+    end
+    return nil
+  end
+  local function find_prop(props, prop)
+    while is_cons(props) do
+      local p = props[1]
+      if is_cons(p) and equal(prop, p[1]) then return p end
+      props = props[2]
+    end
+    return nil
   end
   -- Sidecar Lua table for *property-vector* (port-performance.md: property
   -- access). Kernel keys are almost always interned symbols, so identity
-  -- table lookup beats hash+assoc. The absvector remains the observable
-  -- store; the cache is a write-through index.
+  -- table lookup beats hash+assoc. The dict remains the observable store;
+  -- the cache is a write-through index.
   local PGET = {}
   local function cacheable(x)
     local t = type(x)
@@ -1472,32 +1512,61 @@ function P.install_native_stdlib()
     if t then t[prop] = nil end
   end
   local pv_of = function() return GLOBALS["*property-vector*"] end
+  -- Bumped on every write of a shen.lambda-form property (update-lambda-table,
+  -- shen.set-lambda-form-entry, unput): fn_fast's invalidation key. 42.0
+  -- requires a cached callable form to be dropped when a function is
+  -- redefined (in particular to zero or unknown arity).
+  P.LAMBDA_FORM_GEN = 0
+  local function lookup(key, prop, vec)
+    local bucket = bucket_at(vec, key)
+    if bucket == nil then return nil end
+    local e = find_entry(bucket, key)
+    if e == nil then return nil end
+    local p = find_prop(e[2], prop)
+    if p == nil then return nil end
+    return p[2]
+  end
   local function get(key, prop, vec)
-    if vec == pv_of() then
+    local is_pv = vec == pv_of()
+    if is_pv then
       local v, ok = cache_get(key, prop)
       if ok then return v end
     end
-    local bucket, h = bucket_at(vec, key)
-    if h == nil then return orig_get(key, prop, vec) end
-    if bucket == NIL then return orig_get(key, prop, vec) end
-    local pair = assoc(cons(key, cons(prop, NIL)), bucket)
-    if pair == NIL or not is_cons(pair) then return orig_get(key, prop, vec) end
-    local val = pair[2]
-    if vec == pv_of() then cache_put(key, prop, val) end
+    local val = lookup(key, prop, vec)
+    if val == nil then return orig_get(key, prop, vec) end
+    if is_pv then cache_put(key, prop, val) end
     return val
   end
   local function put(key, prop, val, vec)
-    local bucket, h = bucket_at(vec, key)
-    if h == nil then return orig_put(key, prop, val, vec) end
-    vec[h + 2] = change_pointer(key, prop, val, bucket)
-    if vec == pv_of() then cache_put(key, prop, val) end
+    local bucket, slot = bucket_at(vec, key)
+    if slot == nil then return orig_put(key, prop, val, vec) end
+    local e = find_entry(bucket, key)
+    local props, _ = assoc_set(prop, val, e and e[2] or NIL)
+    if props == nil then return orig_put(key, prop, val, vec) end
+    local nb, added = assoc_set(key, props, bucket)
+    if nb == nil then return orig_put(key, prop, val, vec) end
+    vec[slot] = nb
+    if added then vec[4] = vec[4] + 1 end
+    if vec == pv_of() then
+      cache_put(key, prop, val)
+      if prop == lambda_form_sym then P.LAMBDA_FORM_GEN = P.LAMBDA_FORM_GEN + 1 end
+    end
     return val
   end
   local function unput(key, prop, vec)
-    local bucket, h = bucket_at(vec, key)
-    if h == nil then return orig_unput(key, prop, vec) end
-    vec[h + 2] = remove_pointer(key, prop, bucket)
-    if vec == pv_of() then cache_rm(key, prop) end
+    local bucket, slot = bucket_at(vec, key)
+    if slot == nil then return orig_unput(key, prop, vec) end
+    local e = find_entry(bucket, key)
+    local props = assoc_rm(prop, e and e[2] or NIL)
+    if props == nil then return orig_unput(key, prop, vec) end
+    local nb, added = assoc_set(key, props, bucket)
+    if nb == nil then return orig_unput(key, prop, vec) end
+    vec[slot] = nb
+    if added then vec[4] = vec[4] + 1 end
+    if vec == pv_of() then
+      cache_rm(key, prop)
+      if prop == lambda_form_sym then P.LAMBDA_FORM_GEN = P.LAMBDA_FORM_GEN + 1 end
+    end
     return key
   end
   local function arity(name)
@@ -1505,30 +1574,30 @@ function P.install_native_stdlib()
     if ok then return v end
     local pv = pv_of()
     if pv == nil then return -1 end
-    local bucket, h = bucket_at(pv, name)
-    if h == nil or bucket == NIL then return -1 end
-    local pair = assoc(cons(name, cons(arity_sym, NIL)), bucket)
-    if pair == NIL or not is_cons(pair) then return -1 end
-    cache_put(name, arity_sym, pair[2])
-    return pair[2]
+    if bucket_at(pv, name) == nil then return orig_arity(name) end
+    local val = lookup(name, arity_sym, pv)
+    if val == nil then return -1 end
+    cache_put(name, arity_sym, val)
+    return val
   end
   local function get_or(key, prop, vec, default)
-    if vec == pv_of() then
+    local is_pv = vec == pv_of()
+    if is_pv then
       local v, ok = cache_get(key, prop)
       if ok then return v end
     end
-    local bucket, h = bucket_at(vec, key)
-    if h == nil or bucket == NIL then
+    local val
+    if bucket_at(vec, key) == nil then
+      local ok, v = pcall(orig_get, key, prop, vec)
+      if ok then val = v end
+    else
+      val = lookup(key, prop, vec)
+    end
+    if val == nil then
       if type(default) == "function" then return default() end
       return default
     end
-    local pair = assoc(cons(key, cons(prop, NIL)), bucket)
-    if pair == NIL or not is_cons(pair) then
-      if type(default) == "function" then return default() end
-      return default
-    end
-    local val = pair[2]
-    if vec == pv_of() then cache_put(key, prop, val) end
+    if is_pv then cache_put(key, prop, val) end
     return val
   end
   P.ENV.GET_OR = get_or
@@ -1741,8 +1810,6 @@ function P.install_native_stdlib()
   install("put", put, 4)
   install("unput", unput, 3)
   install("arity", arity, 1)
-  install("shen.change-pointer-value", change_pointer, 4)
-  install("shen.remove-pointer", remove_pointer, 3)
   install("vector?", vector_q, 1)
   install("<-vector", vref, 2)
   install("vector->", vset, 3)
@@ -1975,11 +2042,12 @@ local ENV = {
     return w
   end,
   ADDR_OR = function(v, n, default)
-    if type(v) ~= "table" or type(n) ~= "number" then
+    local w = (type(v) == "table" and type(n) == "number") and v[n + 2] or nil
+    if w == nil then
       if type(default) == "function" then return default() end
       return default
     end
-    return v[n + 2]
+    return w
   end,
   -- Placeholder: trap-error (get ...) during kernel load, before native get.
   -- install_native_stdlib replaces this with a pcall-free lookup.
@@ -2014,7 +2082,11 @@ local ENV = {
     end
     return F["n->string"](n)
   end,
-  ADDR = function(v, i) return v[i + 2] end,
+  ADDR = function(v, i)
+    local w = v[i + 2]
+    if w == nil then return F["<-address"](v, i) end
+    return w
+  end,
   ADSET = function(v, i, x) v[i + 2] = x; return v end,
   VMT = Vmt,
   -- allow compiled code to reach a few Lua builtins safely

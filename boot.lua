@@ -1,7 +1,7 @@
 -- boot.lua : load the full Shen KLambda kernel into the Lua runtime and
--- initialise it. Returns the prims module P with everything live. (On the
--- S42 (2026-08-25) kernel self-initialises at load time; see FILES
--- and initialise() below.)
+-- initialise it. Returns the prims module P with everything live. The
+-- ShenOSKernel 42.2 modules are pure defuns; initialise() below runs
+-- (shen.initialise), the extension initialisers and (stlib.initialise).
 local R = require("runtime")
 local C = require("compiler")
 local P = require("prims")
@@ -146,41 +146,27 @@ local function find_kldir()
 end
 local KLDIR = find_kldir() .. "/"
 P.KLDIR = KLDIR   -- resolved .kl directory (trailing /), for typecheck_native
--- Boot order for the S42 (2026-08-25) kernel. The first 15 entries
--- are the refreshed KLambda modules. The refreshed kernel initialises itself
--- at LOAD time: declarations.kl runs top-level forms — (set *property-vector*
--- (vector 20000)), the environment `set`s, (shen.initialise-arity-table ...),
--- (put shen shen.external-symbols ...) and (shen.build-lambda-table ...) — that
--- the removed init.kl used to run from shen.initialise (see initialise()).
+-- Boot order for the ShenOSKernel-42.2 kernel (community shen-sources line).
+-- Every 42.2 .kl file is pure defuns: no module has load-time side effects, so
+-- the order below (upstream make.shen's module order, then the booted
+-- extensions, then the precompiled standard library) is for readability only.
+-- All initialisation happens AFTER load, in initialise() below, exactly as
+-- upstream ports do it:
+--   (shen.initialise)  -- init.kl: environment, *property-vector* dict,
+--                      -- arity table, lambda forms, kernel signatures
+--   (stlib.initialise) -- stlib.kl: stdlib arities, macros, datatypes, types
 --
--- Order is NOT upstream Sources/make.shen order. make.shen relies on the
--- factorise pass + a macros bootstrap that runs last; shen-lua compiles KL
--- directly, so what matters is that a module's LOAD-TIME side effects see
--- their dependencies already defined:
---   * declarations' top-level init calls put/vector/hash/shen.lambda-entry
---     (sys), so sys precedes declarations;
---   * types.kl's 161 top-level (declare ...) forms actually RUN the type
---     checker at load (each declare infers the signature's variance), so every
---     function `declare` reaches transitively must already be defined:
---     shen.prolog-vector (macros.kl), shen.*sigf* + the arity table
---     (declarations.kl), and — new in the refresh — shen.rectify-type and the
---     rest of the inference machinery (t-star.kl). Pre-refresh t-star trailed
---     types; the refresh moved shen.rectify-type into t-star, so t-star must
---     now precede types. Hence the tail: macros declarations t-star types.
---
--- The trailing three are the community ShenOSKernel extensions, which Tarver's
--- refresh no longer ships as KLambda. shen-lua keeps vendoring them on top so
--- the CLI launcher etc. stay available; they are pure defuns/defmacros
--- referencing only public kernel functions, so they load unchanged.
---
--- NOTE: stlib is NOT here. The standard library is no longer a precompiled
--- klambda/stlib.kl; it is loaded from the S-lineage Shen sources under
--- lib/StLib/ by load_stdlib() (below), which the refresh's own install.shen
--- drives. See lib/StLib/PROVENANCE.md and klambda/PROVENANCE.md.
+-- Booted extensions match what shen-scheme 0.50 boots: features and
+-- programmable-pattern-matching (both initialised in initialise(), in that
+-- order, as shen-scheme does), expand-dynamic and launcher. Vendored but NOT
+-- booted (opt-in): extension-namespaces and extension-type-annotations. See
+-- klambda/PROVENANCE.md.
 local FILES = {
-  "yacc","core","load","prolog","reader","sequent","sys","toplevel",
-  "track","writer","backend","macros","declarations","t-star","types",
-  "extension-features","extension-expand-dynamic","extension-launcher"
+  "yacc","core","declarations","load","prolog","reader","sequent","sys",
+  "dict","t-star","toplevel","track","types","writer","init","macros",
+  "extension-features","extension-expand-dynamic","extension-launcher",
+  "extension-programmable-pattern-matching",
+  "stlib"
 }
 
 -- ---- standard streams ----------------------------------------------------
@@ -200,7 +186,7 @@ P.GLOBALS["*implementation*"] = rawget(_G, "jit") and "LuaJIT" or _VERSION
 P.GLOBALS["*port*"]           = "shen-lua"
 P.GLOBALS["*porters*"]        = "shen-lua contributors"
 P.GLOBALS["*os*"]             = (package.config and package.config:sub(1,1) == "\\") and "Windows" or "Unix"
-P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes from declarations.kl ("42")
+P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes from init.kl ("42.2")
 
 -- ---- kernel bytecode cache -------------------------------------------------
 -- Loading the kernel from .kl sources costs ~0.8s (read + parse + KL->Lua
@@ -434,16 +420,20 @@ local function read_cache(path, key)
 end
 
 -- ---- load the kernel -----------------------------------------------------
--- Loads the 19 .kl modules in FILES (see above): the 15 refreshed S42
--- (2026-07-11) KLambda modules plus the vendored community stlib + 3 booted
--- extensions. The opt-in extension-programmable-pattern-matching.kl is
--- vendored but not booted.
+-- Loads the .kl modules in FILES (see above): the 16 ShenOSKernel 42.2 kernel
+-- modules, 4 booted extensions and the precompiled stlib. The opt-in
+-- extension-namespaces.kl / extension-type-annotations.kl are vendored but
+-- not booted.
 -- The KLambda sources are vendored under `klambda/` so the repository
 -- is self-contained. You can still override with SHEN_KL_DIR (e.g. to point
 -- at a full ShenOSKernel checkout during development).
 
 -- Native overrides, installed after the compiled KL defuns are all in F.
 local function install_native_overrides()
+  -- shen.lambda-entry without a KL->Lua compile per entry: every
+  -- update-lambda-table (each `define`, and the 326 stdlib arities that
+  -- (stlib.initialise-arities) registers at boot) builds one.
+  P.install_native_lambda_entry()
   -- Hottest Prolog deref primitives (see prims.install_native_prolog).
   P.install_native_prolog()
   -- Hottest general-purpose kernel functions with native Lua
@@ -482,7 +472,13 @@ local function kernel_key()
 end
 
 -- ---- hoisted kernel type signatures ---------------------------------------
--- klambda/types.kl ends with 161 top-level `(declare Name Type)` forms, and
+-- (ShenOSKernel 42.2 has no top-level forms at all — its kernel signatures are
+-- precompiled closures in init.kl's shen.initialise-signedfuncs — so on the
+-- vendored kernel hoist_tail finds nothing to hoist. The machinery stays for
+-- S42-shaped trees via SHEN_KL_DIR, and record_declares / replay_declares are
+-- reused for the standard library's 290 declares; see stlib_types.)
+-- On the S42.0 kernel, klambda/types.kl ended with 161 top-level
+-- `(declare Name Type)` forms, and
 -- they are not cheap annotations: `declare` (types.kl) runs the type theory for
 -- real on every one of them —
 --   (a) shen.variancy over the signature under the Prolog machine,
@@ -551,8 +547,9 @@ end
 -- Split a kernel file's forms into (body, init forms, declares). Only a
 -- TRAILING run of non-defun top-level forms is ever moved, and it is run
 -- immediately after the body chunk, so hoisting cannot reorder anything. In
--- the 42 kernel exactly two files have such a run: types.kl (161 declares)
--- and declarations.kl (one form, (shen.build-lambda-table (external shen))).
+-- the S42.0 kernel exactly two files had such a run: types.kl (161 declares)
+-- and declarations.kl (one form, (shen.build-lambda-table (external shen)));
+-- ShenOSKernel 42.2 has none.
 -- Anything less tidy than [defuns...][inits...][declares...] is left inline.
 local function hoist_tail(forms)
   local last = #forms
@@ -595,7 +592,7 @@ local function record_declares(decls)
       if rec.n ~= n0 + 1 or rec[rec.n].k ~= "c" then
         error("shen-lua: unexpected declare recording", 0)
       end
-      out[#out + 1] = { name = d.name.name, dump = rec[rec.n].dump }
+      out[#out + 1] = { name = d.name.name, typ = d.typ, dump = rec[rec.n].dump }
     end
   end)
   P.FASL_REC = saved_rec
@@ -612,12 +609,17 @@ local function record_declares(decls)
   return out
 end
 
-local function replay_declares(decl)
+-- fns: optional pre-loaded chunk functions (index-aligned with decl).
+-- on_sig: optional (name, typ) hook — the native typechecker's signature
+-- table, which a live `declare` would have fed through its wrapper.
+local function replay_declares(decl, fns, on_sig)
   local sigf = R.intern("shen.*sigf*")
   local assoc, set = P.F["shen.assoc->"], P.F["set"]
-  for _, e in ipairs(decl) do
-    local fn = P.load_chunk(e.dump, "declare:" .. e.name)
-    set(sigf, assoc(R.intern(e.name), fn(), P.GLOBALS["shen.*sigf*"]))
+  for i, e in ipairs(decl) do
+    local fn = fns and fns[i] or P.load_chunk(e.dump, "declare:" .. e.name)
+    local name = R.intern(e.name)
+    if on_sig and e.typ ~= nil then on_sig(name, e.typ) end
+    set(sigf, assoc(name, fn(), P.GLOBALS["shen.*sigf*"]))
   end
 end
 
@@ -1368,134 +1370,52 @@ local function install_fasl()
   FASL_INSTALLED = true
 end
 
--- ---- initialise ----------------------------------------------------------
--- ---- standard library (S-lineage lib/StLib sources) ----------------------
--- Tarver's S42 release ships the standard library as Shen SOURCES under
--- Lib/StLib (loaded into the SBCL image at install time), not as a precompiled
--- stlib.kl. shen-lua vendors those sources under lib/StLib/ and loads them the
--- same way: through the kernel's own (load ...) / define pipeline. Unlike raw
--- stlib.kl defuns (which the pre-refresh port booted as a kernel module), the
--- define path registers each function's arity property + shen.*lambdatable*
--- entry, so `(fn filter)` and a bare top-level `(filter ...)` now resolve
--- instead of raising "fn: filter is undefined".
---
--- We run upstream's own install.shen (its factorise toggles, the package +
--- systemf externals block, everything) with two mechanical rewrites:
---   1. its relative (load "Sub/file.shen") paths are made absolute against the
---      vendored directory, so no process chdir is needed (a chdir would
---      invalidate the KLDIR-relative reads the fasl kernel-key hashing does);
---   2. its (tc +) toggles are neutralised to (tc -), i.e. the stdlib is loaded
---      WITHOUT typechecking. This matches the pre-refresh behaviour (the old
---      precompiled stlib.kl registered no stdlib type signatures either — its
---      stlib.initialise was never called), it is markedly faster, and it keeps
---      the native typecheck drivers deferred at boot (a tc+ load would trigger
---      the typechecker and translate them eagerly). Functions are still fully
---      defined and arity-registered — only their type signatures are skipped.
--- SHEN_NO_STDLIB=1 skips the whole thing (a kernel-only embed); SHEN_STDLIB_DIR
--- overrides the location.
+-- ---- standard library (precompiled klambda/stlib.kl) ----------------------
+-- ShenOSKernel 42.2 ships the standard library precompiled as klambda/stlib.kl
+-- (generated by upstream make-stlib.shen from lib/stlib). Its defuns load with
+-- the kernel (FILES); port-upgrades.md (41.1) then requires a call to
+-- (stlib.initialise) after the kernel is initialised, which installs the
+-- library's package/external symbols, arities + lambda forms, macros,
+-- datatypes, type signatures and source records, and finishes with
+-- (preclude-all-but []) (set shen.*userdefs* []) (cd "") (tc -). This is
+-- exactly what shen-scheme 0.50 does. SHEN_NO_STDLIB=1 skips the call (the
+-- defuns stay loaded but are not registered as Shen functions).
 local STDLIB_LOADED = false
--- set when the stdlib was materialised to a fresh temp directory (single-file
--- bundle): its paths differ on every boot, so a path-keyed boot image would
--- miss every time AND leave a new multi-megabyte file behind on each run.
-local STDLIB_EPHEMERAL = false
-local function find_stdlib_dir()
-  local env = os.getenv("SHEN_STDLIB_DIR")
-  if env and env ~= "" then return env end
-  -- module-relative first (chdir-independent: boot.lua sits at the repo root)
-  local src = debug.getinfo(1, "S").source
-  local here = src:match("^@(.*)[/\\][^/\\]*$")
-  local candidates = {}
-  if here then
-    candidates[#candidates+1] = here .. "/lib/StLib"
-    -- LuaRocks deploys copy_directories' lib/ tree under lib/lua/5.1,
-    -- separate from these modules under share/lua/5.1.
-    local tree = here:match("^(.*)/share/lua/[%d.]+$")
-    if tree then candidates[#candidates+1] = tree .. "/lib/lua/5.1/StLib" end
-  end
-  candidates[#candidates+1] = "lib/StLib"
-  for _, d in ipairs(candidates) do
-    local f = io.open(d .. "/install.shen", "r")
-    if f then f:close(); return d end
-  end
-  -- Single-file bundle: no lib/StLib on disk, but make-bundle.lua embedded the
-  -- whole tree as P.STDLIB_SOURCES (relpath -> content). Materialise it once to
-  -- a temp dir and load from there (reuses the ordinary file-based load path).
-  if P.STDLIB_SOURCES then
-    STDLIB_EPHEMERAL = true
-    local base = os.tmpname(); os.remove(base)
-    os.execute("mkdir -p '" .. base .. "'")
-    for rel, content in pairs(P.STDLIB_SOURCES) do
-      local full = base .. "/" .. rel
-      local sub = full:match("^(.*)/[^/]*$")
-      if sub then os.execute("mkdir -p '" .. sub .. "'") end
-      local fh = io.open(full, "wb")
-      if fh then fh:write(content); fh:close() end
-    end
-    return base
-  end
-  return nil
+
+-- (stlib.initialise-types) is 290 (declare Name Type) calls, and `declare`
+-- runs the type theory for real on each (variancy under the Prolog machine,
+-- then a KL->Lua compile of the signature's prolog abstraction): ~0.2 s, the
+-- bulk of a warm boot. Everything it depends on is fixed by the kernel cache
+-- key, so cache it exactly the way the S42 kernel's own types.kl signatures
+-- were cached (hoist_tail / record_declares / replay_declares): a sidecar file
+-- next to the kernel bytecode cache holds, per signature, its raw type and the
+-- dumped abstraction chunk, plus the gensym / inference counters. A warm boot
+-- replays them into shen.*sigf* (and the native typechecker's signature
+-- table) in the original order. SHEN_KERNEL_CACHE=off disables it with the
+-- kernel cache.
+local SIGS_FORMAT = "SHENSIG1"
+local function stlib_sigs_path()
+  if P.KERNEL_CACHE_DATA then return nil end   -- single-file bundle
+  local p = cache_path()
+  return p and (p .. ".stlib") or nil
 end
 
--- ---- standard-library boot image ------------------------------------------
--- Everything above caches a PIECE of the boot. This caches the whole standard
--- library phase as one artifact — the closest a Lua host gets to shen-cl's
--- save-lisp-and-die, which is why it starts so much faster: it does not rebuild
--- anything.
---
--- A warm stdlib load was, before this, ~20 separate fasl hits plus the
--- install.shen driver around them, and the driver is not free: reading
--- install.shen through the kernel reader alone costs ~12 ms, and the trailing
--- (external stlib) / systemf / preclude-all-but block another ~11 ms, none of
--- which any per-file cache could ever capture because it does not happen inside
--- a file. The image records the ENTIRE span — driver forms and nested loads
--- alike, in stream order — as one fasl record stream (the nested loads splice
--- their own streams into it; see splice_into_outer), and replays it in one go.
---
--- Invalidation is by construction rather than by convention: the file name is
--- keyed on the kernel key + the record format + the Prolog engine + the
--- rewritten install.shen text, and the image itself carries the path and
--- content hash of EVERY file the recorded span loaded. A stale or edited
--- standard-library file fails its hash and the image is a miss. The per-file
--- fasl caches are still written on a miss, so if the image cannot be
--- serialized for any reason the next boot is exactly as fast as it was before
--- this existed. SHEN_STDLIB_IMAGE=off disables it.
-local IMAGE_FORMAT = "SHENIMG1"
-
--- Keyed on the install.shen text as it is ON DISK, deliberately NOT on the
--- rewritten script: the rewrite bakes in the absolute stdlib directory, and
--- boot.lua resolves that differently depending on how it was itself located
--- ("./lib/StLib" from a repo-root run, an absolute path from a package.path
--- run), which would give the same checkout several images of a megabyte each.
--- The directory is not dropped from the key so much as checked more strictly:
--- the recorded dependency paths must all still hash to what they did, so an
--- image recorded against one tree simply misses against another.
-local function image_path(raw_script)
-  local d = fasl_dir()
-  if not d or not FASL_INSTALLED then return nil end
-  local v = os.getenv("SHEN_STDLIB_IMAGE")
-  if v == "off" or v == "0" or STDLIB_EPHEMERAL then return nil end
-  local env = IMAGE_FORMAT .. "|" .. FASL_FORMAT
-    .. "|" .. (os.getenv("SHEN_PROLOG_ENGINE") or "native")
-  return d .. "/stdlib-"
-    .. bit.tohex(fnv1a(raw_script, fnv1a(env, fnv1a((kernel_key()))))) .. ".img"
-end
-
--- header: IMAGE_FORMAT\n ndeps\n { #path\n path #content\n hash\n }*
--- followed by a fasl record stream (fasl_serialize).
-local function image_write(path, rec, arity0)
-  local parts = { IMAGE_FORMAT, "\n", tostring(#rec.deps), "\n" }
-  for _, d in ipairs(rec.deps) do
-    parts[#parts+1] = #d.path .. "\n" .. d.path
-      .. #d.content .. "\n" .. bit.tohex(fnv1a(d.content)) .. "\n"
+local function write_sigs(path, key, decl, counters)
+  local parts = { SIGS_FORMAT, "\n", key, "\n", tostring(#decl), "\n" }
+  for _, e in ipairs(decl) do
+    parts[#parts+1] = e.name .. "\n" .. #e.dump .. "\n" .. e.dump
+    kdata_ser(e.typ, parts)
   end
-  parts[#parts+1] = fasl_serialize(rec, arity0)
-  atomic_write(path, table.concat(parts))
+  parts[#parts+1] = tostring(counters.gensym) .. "\n" .. tostring(counters.infs) .. "\n"
+  local tmp = path .. ".tmp"
+  local fh = io.open(tmp, "wb")
+  if not fh then return end
+  fh:write(table.concat(parts)); fh:close()
+  os.remove(path)
+  os.rename(tmp, path)
 end
 
--- Returns the parsed record stream, or nil if the image is absent, malformed,
--- or any recorded dependency no longer hashes to what it did. Also returns the
--- dependency contents, in load order, for the FASL_ROLL fold.
-local function image_read(path)
+local function read_sigs(path, key)
   local data = read_file(path)
   if not data then return nil end
   local pos = 1
@@ -1505,128 +1425,140 @@ local function image_read(path)
     local s = data:sub(pos, e - 1); pos = e + 1
     return s
   end
-  if line() ~= IMAGE_FORMAT then return nil end
-  local nd = tonumber(line() or ""); if not nd then return nil end
-  local contents = {}
-  for i = 1, nd do
-    local plen = tonumber(line() or ""); if not plen then return nil end
-    if pos + plen - 1 > #data then return nil end
-    local dpath = data:sub(pos, pos + plen - 1); pos = pos + plen
-    local clen = tonumber(line() or ""); if not clen then return nil end
-    local hash = line(); if not hash then return nil end
-    local c = read_file(dpath)
-    if not c or #c ~= clen or bit.tohex(fnv1a(c)) ~= hash then return nil end
-    contents[i] = c
-  end
-  local cached = fasl_parse(data, pos)
-  if not cached then return nil end
-  return cached, contents
+  if line() ~= SIGS_FORMAT or line() ~= key then return nil end
+  local n = tonumber(line() or ""); if not n then return nil end
+  local decl = {}
+  local ok = pcall(function()
+    for i = 1, n do
+      local nm = line()
+      local len = tonumber(line() or "")
+      if not nm or not len or pos + len - 1 > #data then error("truncated") end
+      local dump = data:sub(pos, pos + len - 1)
+      pos = pos + len
+      local typ
+      typ, pos = kdata_de(data, pos)
+      decl[i] = { name = nm, typ = typ, dump = dump }
+    end
+  end)
+  if not ok then return nil end
+  local gensym = tonumber(line() or ""); if not gensym then return nil end
+  local infs = tonumber(line() or ""); if not infs then return nil end
+  return { decl = decl, gensym = gensym, infs = infs }
 end
+
+local function stlib_types(verbose)
+  local init_types = P.F["stlib.initialise-types"]
+  local path = stlib_sigs_path()
+  if not path then return init_types() end
+  local key = kernel_key() .. "|" .. SIGS_FORMAT
+  local tn = package.loaded["typecheck_native"]
+  local on_sig = tn and tn.record_sig or nil
+  local cached = read_sigs(path, key)
+  if cached then
+    -- load every dump before running any, so a foreign-arch file falls back
+    -- to the real declares with nothing half-applied
+    local fns, lok = {}, true
+    for i, e in ipairs(cached.decl) do
+      local ok, fn = pcall(P.load_chunk, e.dump, "declare:" .. e.name)
+      if not ok then lok = false; break end
+      fns[i] = fn
+    end
+    if lok then
+      replay_declares(cached.decl, fns, on_sig)
+      if type(P.GLOBALS["shen.*gensym*"]) == "number"
+         and cached.gensym > P.GLOBALS["shen.*gensym*"] then
+        P.GLOBALS["shen.*gensym*"] = cached.gensym
+      end
+      if type(P.GLOBALS["shen.*infs*"]) == "number"
+         and cached.infs > P.GLOBALS["shen.*infs*"] then
+        P.GLOBALS["shen.*infs*"] = cached.infs
+      end
+      if verbose then io.stderr:write("  stdlib signatures (cached)\n") end
+      return
+    end
+    os.remove(path)
+  end
+  -- Cold: collect the (name, type) pairs the compiled initialiser declares,
+  -- then run the real declares through record_declares in the same order.
+  local live = P.F["declare"]
+  local decls = {}
+  P.F["declare"] = function(name, typ)
+    decls[#decls + 1] = { name = name, typ = typ }
+    return name
+  end
+  local ok, err = pcall(init_types)
+  P.F["declare"] = live
+  if not ok then error(err, 0) end
+  local out = record_declares(decls)
+  if out then
+    write_sigs(path, key, out, {
+      gensym = type(P.GLOBALS["shen.*gensym*"]) == "number" and P.GLOBALS["shen.*gensym*"] or 0,
+      infs   = type(P.GLOBALS["shen.*infs*"]) == "number" and P.GLOBALS["shen.*infs*"] or 0,
+    })
+  end
+end
+
+local STDLIB_PHASES = { "environment", "arities", "macros", "synonyms",
+                        "datatypes", "types", "sources", "final" }
 
 local function load_stdlib(verbose)
   if STDLIB_LOADED then return end
   if os.getenv("SHEN_NO_STDLIB") == "1" then return end
-  local dir = find_stdlib_dir()
-  if not dir then
-    if verbose then io.stderr:write("  stdlib: lib/StLib not found; skipping (kernel-only)\n") end
+  if not P.F["stlib.initialise"] then
+    if verbose then io.stderr:write("  stdlib: stlib.initialise not defined; skipping\n") end
     return
   end
-  local raw_script = read_file(dir .. "/install.shen")
-  if not raw_script then return end
-  local script = raw_script
-  -- Rewrite the relative (load "X") targets to absolute so no chdir is needed.
-  -- All install.shen load paths are relative; the replacement text is escaped
-  -- for gsub's % handling.
-  local prefix = ("(load \"" .. dir .. "/"):gsub("%%", "%%%%")
-  script = script:gsub('%(load "', prefix)
-  script = script:gsub("%(tc %+%)", "(tc -)")   -- load without typechecking (see above)
   local hush0 = P.GLOBALS["*hush*"]
-  P.GLOBALS["*hush*"] = true       -- suppress the ~20 "loaded" echoes
-
-  -- The driver: read install.shen and run its forms. A top-level (load "X") is
-  -- dispatched straight to `load` rather than through `eval`, which is what it
-  -- would compile to anyway — it saves a chunk compile per file, and it keeps
-  -- the recorded image free of chunks that would re-run the load it is meant to
-  -- have replaced.
-  local function run_driver()
-    local forms = P.F["read-from-string"](script)
-    while R.is_cons(forms) do
-      local f = forms[1]
-      if R.is_cons(f) and R.is_symbol(f[1]) and f[1].name == "load"
-         and R.is_cons(f[2]) and type(f[2][1]) == "string" and f[2][2] == R.NIL then
-        P.F["load"](f[2][1])
-      else
-        P.F["eval"](f)
-      end
-      forms = forms[2]
-    end
-  end
-
-  local path = image_path(raw_script)
   local ok, err = pcall(function()
-    if path then
-      local cached, contents = image_read(path)
-      if cached then
-        local rok, rerr = pcall(fasl_replay, cached)
-        if not rok then
-          os.remove(path)   -- stale beyond what the hashes caught
-          error(rerr, 0)
-        end
-        fasl_log("image hit  " .. path)
-        -- Fold the same content into the rolling key the per-file path would
-        -- have, in the same order, so a user program's fasl key is unchanged
-        -- whether the stdlib came from the image or from its 20 fasl files.
-        for _, c in ipairs(contents) do FASL_ROLL = fnv1a(c, FASL_ROLL) end
-        return
-      end
-      fasl_log("image miss " .. path)
-      local rec = { n = 0, in_chunk = false, deps = {} }
-      local arity0 = {}
-      for k, v in pairs(C.ARITY) do arity0[k] = v end
-      FASL_STACK[#FASL_STACK + 1] = rec
-      P.FASL_REC = rec
-      C.NO_KDATA = true          -- recorded chunks must be relocatable
-      local dok, derr = pcall(run_driver)
-      FASL_STACK[#FASL_STACK] = nil
-      P.FASL_REC = FASL_STACK[#FASL_STACK]
-      C.NO_KDATA = P.FASL_REC ~= nil
-      if not dok then error(derr, 0) end
-      local wok, werr = pcall(image_write, path, rec, arity0)
-      if not wok then fasl_log("image uncacheable: " .. tostring(werr)) end
-      return
+    -- (stlib.initialise) is exactly these phases in this order; run them
+    -- individually so the types phase can be served from the cache.
+    local whole = true
+    for _, ph in ipairs(STDLIB_PHASES) do
+      if not P.F["stlib.initialise-" .. ph] then whole = false end
     end
-    run_driver()
+    if not whole then return P.F["stlib.initialise"]() end
+    -- The phases are straight-line, run-once code: thousands of calls with
+    -- literal source trees (sources) and datatype rule compiles (datatypes).
+    -- Under the JIT they are bimodal — 10 ms or 700 ms for the sources phase
+    -- on the same host, depending on which side traces get recorded — and
+    -- never faster than the interpreter. Run them interpreted; the JIT is
+    -- restored (only if it was on) before anything else runs.
+    local jit_was_on = jit and jit.status and jit.status()
+    if jit_was_on then jit.off() end
+    local pok, perr = pcall(function()
+      for _, ph in ipairs(STDLIB_PHASES) do
+        if ph == "types" then stlib_types(verbose)
+        else P.F["stlib.initialise-" .. ph]() end
+      end
+    end)
+    if jit_was_on then jit.on() end
+    if not pok then error(perr, 0) end
   end)
   P.GLOBALS["*hush*"] = hush0
   if not ok then
-    error("stdlib load failed: " .. tostring(P.F["error-to-string"](err)), 0)
+    error("stdlib initialise failed: " .. tostring(P.F["error-to-string"](err)), 0)
   end
   STDLIB_LOADED = true
-  if verbose then io.stderr:write("  loaded stdlib from " .. dir .. "\n") end
+  if verbose then io.stderr:write("  initialised stdlib\n") end
 end
 P.load_stdlib = load_stdlib
 
 local function initialise()
-  -- Kernel environment setup (env globals, *property-vector*, arity table).
-  --
-  -- On the S42 kernel this all happens at LOAD time via
-  -- top-level forms in declarations.kl — there is no `shen.initialise` function
-  -- to call, so load_kernel() has already done it by the time we get here.
-  --
-  -- Older kernels (pre-refresh community ShenOSKernel, reachable via
-  -- SHEN_KL_DIR) instead define `shen.initialise` and expect it to be called
-  -- once, post-load. Preserve that path when the function is present.
+  -- ShenOSKernel 42.2: the kernel files are pure defuns; (shen.initialise)
+  -- (init.kl) builds the environment, the *property-vector* dict, the arity
+  -- table, the lambda forms and the kernel signatures. It must run exactly
+  -- once, after load_kernel(). A kernel without it (e.g. an older Tarver S42
+  -- tree via SHEN_KL_DIR, which self-initialises at load) is tolerated.
   local r
   local fn = P.F["shen.initialise"]
   if fn then r = fn() end
-  -- Initialise the Shen Batteries feature registry from capabilities detected
-  -- by native extension installers.  The Batteries module loader asks the
-  -- port for `(shen.x.features.current)` before loading a module; leaving the
-  -- registry unbound makes that query fail even though the extension API is
-  -- otherwise available.  Keep this derived from backend globals so
-  -- SHEN_X_SHA256=pure (and ports without native backends) advertise no host
-  -- capability while retaining the portable implementation.
-  if P.F["shen.x.features.current"] then
+  -- Feature registry for the features extension (shen.x.features.*). The
+  -- 42.2 extension's initialise declares its own types and registers the
+  -- cond-expand macro; seed it with the features detected from native
+  -- backends (the Shen Batteries module loader queries
+  -- (shen.x.features.current) before loading a module). SHEN_X_SHA256=pure
+  -- (and hosts without native backends) advertise no host capability.
+  if P.F["shen.x.features.initialise"] then
     local detected = {}
     local function add_backend(global, feature)
       local backend = P.GLOBALS[global]
@@ -1636,20 +1568,20 @@ local function initialise()
     end
     add_backend("shen.x.*sha256-backend*", "shen.x/sha256-host")
     add_backend("shen.x.*zmq-backend*", "shen.x/zmq-host")
-    -- The community extension's `features.initialise` additionally hooks the
-    -- legacy macro registration API (`shen.set-lambda-form-entry`), which is
-    -- not present in the refreshed 42 kernel.  Seed its backing global
-    -- directly; `features.current` is the stable API consumed by Batteries
-    -- and `features.add` can still extend this list later.
-    P.GLOBALS["shen.x.features.*features*"] = R.from_table(detected)
+    P.F["shen.x.features.initialise"](R.from_table(detected))
+  end
+  -- Programmable pattern matching: installs the custom pattern compiler /
+  -- reducer hooks with an empty handler registry and declares the
+  -- register/unregister API, as shen-scheme 0.50 does at boot.
+  if P.F["shen.x.programmable-pattern-matching.initialise"] then
+    P.F["shen.x.programmable-pattern-matching.initialise"]()
   end
   -- Register the lua.* interop entries in Shen's own arity/lambda-form
   -- tables (needs the *property-vector* the kernel just created).
   require("lua_interop").post_initialise()
-  -- Load the standard library from its S-lineage Shen sources (lib/StLib).
-  -- Done here, at the single post-kernel-init chokepoint every boot path runs
-  -- (shen.boot, run-kernel-tests, the port specs), so the stdlib is present
-  -- for all of them. SHEN_NO_STDLIB=1 opts out.
+  -- Standard library: the precompiled klambda/stlib.kl was loaded with the
+  -- kernel; (stlib.initialise) installs its package info, arities, lambda
+  -- forms, macros, datatypes and types. SHEN_NO_STDLIB=1 skips it.
   load_stdlib()
   return r
 end

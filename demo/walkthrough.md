@@ -5,7 +5,7 @@
 
 This document is executable proof of what shen-lua is and how it works, built with [showboat](https://github.com/simonw/showboat) (`uv tool install showboat`). Every code block below was actually run from the repo root; `showboat verify demo/walkthrough.md` re-runs them all and confirms the outputs still hold.
 
-**What it is:** [Shen](https://shenlanguage.org) — a functional Lisp with pattern matching, an optional sequent-calculus type system, and integrated Prolog — running on LuaJIT. Shen programs compile to KLambda (a ~46-primitive Lisp kernel); this port compiles KLambda to Lua source, which LuaJIT trace-compiles to machine code. It passes the official Shen 42 kernel test suite and runs (slower) on plain Lua 5.1/5.4/5.5.
+**What it is:** [Shen](https://shenlanguage.org) — a functional Lisp with pattern matching, an optional sequent-calculus type system, and integrated Prolog — running on LuaJIT. Shen programs compile to KLambda (a ~46-primitive Lisp kernel); this port compiles KLambda to Lua source, which LuaJIT trace-compiles to machine code. It passes the official ShenOSKernel 42.2 test suite and runs (slower) on plain Lua 5.1/5.4/5.5.
 
 ## 1. The language, through the launcher
 
@@ -113,7 +113,7 @@ rejected by the typechecker: type error in rule 1 of broken-check-port
 
 ## 6. How it boots fast: kernel, standard-library, and load caches
 
-First boot compiles the vendored S42 kernel files and loads the Shen-source standard library; later boots can use **kernel bytecode and standard-library caches**. A **fasl-style cache** records loaded programs so later loads can skip reader, macroexpansion and typechecking. The following check measures an in-process warm boot on this walkthrough's host, rather than a guaranteed startup time on every host (see [benchmark methodology](../doc/BENCHMARKS.md)):
+First boot compiles the vendored ShenOSKernel 42.2 files (including the precompiled standard library); later boots can use **kernel bytecode and standard-library signature caches**. A **fasl-style cache** records loaded programs so later loads can skip reader, macroexpansion and typechecking. The following check measures an in-process warm boot on this walkthrough's host, rather than a guaranteed startup time on every host (see [benchmark methodology](../doc/BENCHMARKS.md)):
 
 ```bash
 t0=$(luajit -e "io.write(os.clock())"); luajit -e "local shen=require(\"shen\"); shen.boot{quiet=true}; assert(shen.eval(\"(+ 1 2)\") == 3)" ; luajit -e "
@@ -127,16 +127,16 @@ print(string.format(\"boot+initialise under 250ms: %s\", tostring(ms < 250)))"
 boot+initialise under 250ms: true
 ```
 
-## 7. Certification: the official 42 test suite, from this clone
+## 7. Certification: the official 42.2 test suite, from this clone
 
-The suite is vendored in `tests/`; this runs all 134 official kernel tests (typechecker, Prolog, the works) and prints the final tally:
+The suite is vendored in `tests/`; this runs all 143 official kernel tests (typechecker, Prolog, the works) and prints the final tally:
 
 ```bash
 luajit run-kernel-tests.lua 2>/dev/null | grep -E "^(passed|failed|pass rate)" | tail -3
 ```
 
 ```output
-passed ... 134
+passed ... 143
 failed ... 0
 pass rate ... 100%
 ```
@@ -148,7 +148,7 @@ SHEN_FASL=off SHEN_PROLOG_ENGINE=legacy luajit run-kernel-tests.lua 2>/dev/null 
 ```
 
 ```output
-passed ... 134
+passed ... 143
 failed ... 0
 ```
 

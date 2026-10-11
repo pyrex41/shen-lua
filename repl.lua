@@ -289,9 +289,9 @@ function M.run(opts)
   opts = opts or {}
   local P = opts.P or require("boot")
   -- "kernel loaded?" probe: `version` is a stable public kernel function
-  -- present in every Shen version. (Do NOT probe shen.initialise — the S42
-  -- 2026-07-11 refresh removed it, folding initialisation into declarations.kl
-  -- load-time forms; probing it would reload the kernel on every call.)
+  -- present in every Shen version. (Do NOT probe shen.initialise — Tarver's
+  -- S41.2/S42 kernels had none, folding initialisation into load-time forms;
+  -- probing it would reload the kernel on every call on such a tree.)
   if P.F["version"] == nil then P.load_kernel(opts.verbose) end
   if P.GLOBALS["*property-vector*"] == nil then P.initialise() end
 

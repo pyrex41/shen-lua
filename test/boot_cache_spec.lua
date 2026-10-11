@@ -1,16 +1,15 @@
 -- test/boot_cache_spec.lua — PORT-AUTHORED coverage for the boot caches
 -- (pyrex41/shen-lua#46).
 --
--- Three layers of the boot are cached, and each replaces work that used to be
+-- Two layers of the boot are cached, and each replaces work that used to be
 -- redone on every single start:
 --
---   * the kernel bytecode cache (.shen-kernel-cache.<build>.bin, SHENKC3) now
---     also carries klambda/types.kl's 161 hoisted type signatures as dumped
---     prolog abstractions, plus the gensym / inference counters `declare`
---     advances;
---   * the standard-library boot image (<fasl dir>/stdlib-<key>.img) records the
---     WHOLE stdlib phase — install.shen's own forms and the ~20 nested loads
---     alike — as one record stream;
+--   * the kernel bytecode cache (.shen-kernel-cache.<build>.bin) holds the
+--     compiled ShenOSKernel 42.2 modules, including the precompiled stdlib
+--     (klambda/stlib.kl);
+--   * its sidecar (<kernel cache>.stlib) holds the 290 standard-library type
+--     signatures that (stlib.initialise-types) declares, as dumped prolog
+--     abstractions, plus the gensym / inference counters `declare` advances;
 --   * two kernel functions that used to run the compiler at boot,
 --     shen.lambda-entry and shen.assoc->, are native.
 --
@@ -72,7 +71,8 @@ local function names(l)
 end
 local sig = names(P.GLOBALS["shen.*sigf*"])
 print("sigf " .. #sig .. " " .. table.concat(sig, ","))
-print("lambdatable " .. #names(P.GLOBALS["shen.*lambdatable*"]))
+print("userdefs " .. #names(P.GLOBALS["shen.*userdefs*"]))
+print("arity " .. tostring(P.F["arity"](R.intern("filter"))))
 print("alldatatypes " .. table.concat(names(P.GLOBALS["shen.*alldatatypes*"]), ","))
 print("datatypes " .. table.concat(names(P.GLOBALS["shen.*datatypes*"]), ","))
 print("gensym " .. tostring(P.GLOBALS["shen.*gensym*"]))
@@ -99,67 +99,45 @@ do
     return run("env " .. env .. " luajit " .. sh_quote(script))
   end
 
-  local d1, d2, d3, d4 = fresh(), fresh(), fresh(), fresh()
+  local d1, d2 = fresh(), fresh()
   -- (a) nothing cached at all: the reference
   local ref = boot("SHEN_KERNEL_CACHE=off SHEN_FASL=off")
-  -- (b) kernel bytecode cache cold, then warm (exercises SHENKC3 write + read)
+  -- (b) kernel bytecode cache + stdlib signature sidecar cold, then warm
   local kc = "SHEN_KERNEL_CACHE=" .. sh_quote(kcache)
   local kcold = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d1))
+  local sidecar = io.open(kcache .. ".stlib", "rb")
+  local sidecar_data = sidecar and sidecar:read("*a")
+  if sidecar then sidecar:close() end
   local kwarm = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d1))
-  -- (c) stdlib boot image cold, then warm
-  local icold = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d2))
-  local iwarm = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d2))
-  -- (d) image explicitly disabled: the per-file fasl path must still agree
-  local noimg = boot(kc .. " SHEN_STDLIB_IMAGE=off SHEN_FASL_DIR=" .. sh_quote(d3))
+  local kwarm2 = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d2))
 
-  check(ref:find("sigf 182 ", 1, true) ~= nil,
-        "#46: uncached boot registers kernel, stdlib, and checked-integer signatures")
+  -- 163 kernel + 3 features + 2 pattern-matching + 4 checked-integer + 290
+  -- stdlib (shen-scheme 0.50 reports 458: the same minus checked-integer)
+  check(ref:find("sigf 462 ", 1, true) ~= nil,
+        "#46: uncached boot registers kernel, extension, checked-integer and stdlib signatures")
   check(ref:find("typecheck 49", 1, true) ~= nil,
         "#46: uncached boot typechecks a user definition")
+  check(ref:find("arity 2", 1, true) ~= nil,
+        "#46: stdlib functions are registered (arity filter = 2)")
   check(kcold == ref, "#46: cold kernel-bytecode-cache boot == uncached boot")
-  check(kwarm == ref, "#46: WARM kernel-bytecode-cache boot == uncached boot")
-  check(icold == ref, "#46: stdlib image miss == uncached boot")
-  check(iwarm == ref, "#46: stdlib image HIT == uncached boot")
-  check(noimg == ref, "#46: SHEN_STDLIB_IMAGE=off == uncached boot")
+  check(sidecar_data ~= nil and sidecar_data:sub(1, 8) == "SHENSIG1",
+        "#46: a cold boot writes the stdlib signature sidecar")
+  check(kwarm == ref, "#46: WARM kernel-bytecode-cache + signature sidecar boot == uncached boot")
+  check(kwarm2 == ref, "#46: warm boot with a fresh fasl dir == uncached boot")
 
-  -- The image must actually have been exercised — otherwise the checks above
-  -- would pass vacuously if it silently never engaged.
-  local dbg = run("env " .. kc .. " SHEN_FASL_DIR=" .. sh_quote(d2)
-                  .. " SHEN_FASL_DEBUG=1 luajit " .. sh_quote(script))
-  check(dbg:find("image hit", 1, true) ~= nil,
-        "#46: the third run really is a stdlib image HIT")
-  local dbg4 = run("env " .. kc .. " SHEN_FASL_DIR=" .. sh_quote(d4)
-                   .. " SHEN_FASL_DEBUG=1 luajit " .. sh_quote(script))
-  check(dbg4:find("image miss", 1, true) ~= nil,
-        "#46: a fresh fasl dir is a stdlib image MISS")
-
-  -- Invalidation: the image carries the path and content hash of every file the
-  -- recorded span loaded, so editing one must miss even though install.shen and
-  -- the kernel are untouched. Done against a COPY of the tree (SHEN_STDLIB_DIR)
-  -- so the checkout is never mutated, not even transiently.
+  -- A damaged sidecar must be a miss (the real declares run), never an error
+  -- or a half-applied replay.
   do
-    local tree = os.tmpname(); os.remove(tree)
-    os.execute("mkdir -p " .. sh_quote(tree))
-    os.execute("cp -R " .. sh_quote(here .. "lib/StLib") .. "/. " .. sh_quote(tree))
-    local d5 = fresh()
-    local cp = kc .. " SHEN_STDLIB_DIR=" .. sh_quote(tree)
-                  .. " SHEN_FASL_DIR=" .. sh_quote(d5) .. " SHEN_FASL_DEBUG=1 "
-    local first = run("env " .. cp .. "luajit " .. sh_quote(script))
-    local second = run("env " .. cp .. "luajit " .. sh_quote(script))
-    check(first:find("image miss", 1, true) ~= nil,
-          "#46: first boot against a copied stdlib tree records an image")
-    check(second:find("image hit", 1, true) ~= nil,
-          "#46: second boot against the copied tree hits it")
-    local w = io.open(tree .. "/Lists/lists.shen", "ab")
-    w:write("\n\\\\ boot_cache_spec probe\n"); w:close()
-    local edited = run("env " .. cp .. "luajit " .. sh_quote(script))
-    check(edited:find("image miss", 1, true) ~= nil,
-          "#46: editing a standard-library file invalidates the boot image")
-    os.execute("rm -rf " .. sh_quote(tree) .. " " .. sh_quote(d5))
+    local w = io.open(kcache .. ".stlib", "wb")
+    w:write((sidecar_data or "SHENSIG1\n"):sub(1, 4000)); w:close()
+    local damaged = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d1))
+    check(damaged == ref, "#46: a truncated signature sidecar falls back to the real declares")
+    local again = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d1))
+    check(again == ref, "#46: the sidecar is rewritten after a miss")
   end
 
-  os.remove(script); os.remove(kcache)
-  for _, d in ipairs({ d1, d2, d3, d4 }) do os.execute("rm -rf " .. sh_quote(d)) end
+  os.remove(script); os.remove(kcache); os.remove(kcache .. ".stlib")
+  for _, d in ipairs({ d1, d2 }) do os.execute("rm -rf " .. sh_quote(d)) end
 end
 
 -- ---------------------------------------------------------------------------
