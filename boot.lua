@@ -211,7 +211,12 @@ P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes f
 -- select direct-call vs APP codegen), the file list, and the LuaJIT version/
 -- arch (bytecode is not portable across either). SHEN_KERNEL_CACHE=off
 -- disables; any other value overrides the cache path.
-local CACHE_FORMAT = "SHENKC4"  -- 4: hoisted declare typeforms evaluated before
+local CACHE_FORMAT = "SHENKC5"  -- 5: code-point string primitives (issue #80):
+                                --    kernel chunks, fasls and stdlib images
+                                --    built over byte-based pos/tlstr/
+                                --    string->n/n->string/hash are stale
+                                --    (fasl_key and image_path fold this key)
+                                -- 4: hoisted declare typeforms evaluated before
                                 --    `declare` (issue #62); 3: per-chunk hoisted
                                 --    (declare ...) block + gensym/inference
                                 --    counters
