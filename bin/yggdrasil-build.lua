@@ -3,7 +3,7 @@
 --   luajit bin/yggdrasil-build.lua <shaken-dir> <out.lua> [--linked]
 --
 -- <shaken-dir> is a Yggdrasil stage-1 output directory: a tree-shaken
--- kernel (kernel.kl, ShenOSKernel-42 defuns in load order), the user
+-- kernel (kernel.kl, ShenOSKernel defuns in load order), the user
 -- program as KL (one or more user= files), and yggdrasil.manifest.txt.
 -- The builder compiles every KL form ahead of time with the port's own
 -- compiler (compiler.lua C.compile_top) and emits ONE runnable Lua
@@ -108,8 +108,8 @@ end
 assert(man.kernel, MANIFEST .. ": missing kernel=")
 assert(man.init, MANIFEST .. ": missing init=")
 assert(#man.user > 0, MANIFEST .. ": no user= entries")
-if man["kernel-version"] ~= "42" then
-  io.stderr:write(("yggdrasil-build: warning: manifest kernel-version=%s, this port is certified against 42\n")
+if man["kernel-version"] ~= "42.2" then
+  io.stderr:write(("yggdrasil-build: warning: manifest kernel-version=%s, this port is certified against 42.2\n")
     :format(tostring(man["kernel-version"])))
 end
 

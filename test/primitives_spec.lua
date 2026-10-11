@@ -12,7 +12,9 @@
 --   * floats render bare ("3.5"), not C-printf "%f" ("3.500000");
 --   * an uninitialized absvector slot reads back as the `shen.fail!` symbol
 --     (shen-go returns a distinguished `undefined` object);
---   * an out-of-range <-address reads back as nil rather than raising.
+--   * (an out-of-range <-address used to read back as nil; it now raises, as
+--     on shen-scheme, so the kernel vector printer's trap-error'd probe past
+--     the end works: (vector 3) prints <... ... ...>.)
 --
 --   luajit test/primitives_spec.lua
 local shen = require("shen")
@@ -145,11 +147,13 @@ checkeq("(<-address (address-> (absvector 3) 1 7) 1)", "7")
 -- Uninitialized slot: this port reads back the `shen.fail!` symbol (shen-go
 -- returns a distinguished `undefined` object). Lock in the port's behavior.
 checkeq("(<-address (absvector 3) 0)", "shen.fail!")
--- Out-of-range read does not raise here — it returns nil (Lua nil -> renders
--- as the empty string via to_str). We assert the no-raise contract directly.
+-- Out-of-range read raises (shen-scheme: "99 is not a valid index for ...");
+-- the kernel's vector printer (shen.iter-vector) relies on it to find the end.
 do
   local ok = pcall(function() return shen.eval("(<-address (absvector 3) 99)") end)
-  check(ok, "out-of-range <-address does not raise (returns nil)")
+  check(not ok, "out-of-range <-address raises")
+  checkeq("(trap-error (<-address (absvector 3) 99) (/. E out))", "out")
+  checkeq("(make-string \"~A\" (vector 3))", "\"<... ... ...>\"")
 end
 
 -- ---------------------------------------------------------------------------

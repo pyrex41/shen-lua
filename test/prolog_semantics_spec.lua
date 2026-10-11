@@ -171,15 +171,21 @@ check("var? failure backtracks into the next clause",
 -- shen.*prolog-memory* is the size of the bindings vector the kernel's
 -- call-prolog allocates per query (macros.shen shen.prolog-vector), so it is
 -- a hard ceiling on how many Prolog variables one query may allocate.
--- declarations.kl — byte-identical in all four ports' checkouts — sets it to
--- 1000, of which slots 0 and 1 hold the printer and the next-index counter.
--- shen-lua's native engine grew its variable arena without bound, so queries
--- that raise on the other three ports returned a value here.
+-- ShenOSKernel 42.2's shen.initialise-environment (init.kl) ends with
+-- (prolog-memory 10000); slots 0 and 1 hold the printer and the next-index
+-- counter. shen-lua's native engine grew its variable arena without bound, so
+-- queries that raise on the other ports returned a value here.
+--
+-- The ceiling checks below lower the budget to 1000 with (prolog-memory 1000)
+-- (the S42 default): a 10000-deep tdown would overflow the LuaJIT stack before
+-- it reached the variable ceiling, which is a different error.
 -- ---------------------------------------------------------------------------
 check("shen.*prolog-memory* is the kernel default",
-      shen.eval("(value shen.*prolog-memory*)"), 1000)
+      shen.eval("(value shen.*prolog-memory*)"), 10000)
+check("prolog-memory sets and reads back the budget",
+      shen.eval("(prolog-memory 1000)"), 1000)
 check("prolog-memory reads the current value back",
-      shen.eval("(prolog-memory -1)"), 1000)
+      shen.eval("(value shen.*prolog-memory*)"), 1000)
 
 check("query under the ceiling succeeds",
       q("(prolog? (tdown 900 R) (return R))"), "done")
@@ -208,6 +214,7 @@ do
   local root = arg[0]:gsub("test/[^/]*$", "")
   if root == "" then root = "./" end
   local prog = [[
+(prolog-memory 1000)
 (defprolog ldown
   0 done <-- !;
   N R <-- (when (> N 0)) (is M (- N 1)) (ldown M R);)

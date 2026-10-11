@@ -345,10 +345,11 @@ function M.install(Pmod, Emod)
     end
     return nil
   end
-  -- Kernel signatures: refreshed kernels carry them as (declare ...) forms in
-  -- types.kl; pre-refresh kernels (reachable via SHEN_KL_DIR) carry them as
-  -- shen.initialise-signedfuncs CPS lambdas in init.kl. Try the refresh source
-  -- first, fall back to the legacy one. An incomplete harvest (missing source
+  -- Kernel signatures: Tarver S41.2/S42 kernels carry them as (declare ...)
+  -- forms in types.kl; ShenOSKernel 42.2 (vendored) carries them as
+  -- shen.initialise-signedfuncs CPS lambdas in init.kl (164 harvested). Try
+  -- types.kl first (it has no declares on 42.2, so it reports incomplete),
+  -- then init.kl. An incomplete harvest (missing source
   -- or an unrecognised form) leaves sigs_complete false, which forces the
   -- legacy in-kernel typecheck path — slower, but identical verdicts.
   M.sigs_complete = harvest_types_sigs(read_kl("types"))
@@ -416,6 +417,9 @@ function M.install(Pmod, Emod)
   --    boot.lua installs the engine before initialise(), so every kernel
   --    declare is captured. Delegates unconditionally (legacy *sigf* stays
   --    the source of truth for the legacy engine).
+  -- boot.lua replays cached stdlib signatures without calling `declare`;
+  -- this keeps the native signature table in step with shen.*sigf*.
+  M.record_sig = function(name, type_) NativeSig[name] = type_ end
   local orig_declare = F["declare"]
   if orig_declare then
     F["declare"] = function(name, type_)
