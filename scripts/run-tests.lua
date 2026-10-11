@@ -51,6 +51,7 @@ local specs = {
   "test/tailcall_spec.lua",
   "test/typecheck_api_spec.lua",
   "test/typecheck_lazy_spec.lua",
+  "test/utf8_strings_spec.lua",
 }
 
 local function sh_quote(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end

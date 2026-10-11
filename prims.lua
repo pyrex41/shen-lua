@@ -291,23 +291,190 @@ defprim("cn", 2, function(a,b)
   if type(a)~="string" or type(b)~="string" then ERR("cn: not strings") end
   return a..b
 end)
+-- ---- strings are sequences of Unicode code points, held as UTF-8 ----------
+-- (issue #80). A Shen string is a Lua string of UTF-8 bytes; the character
+-- primitives (pos, tlstr, string->n, n->string, hdstr, explode, hash, the
+-- reader) count CODE POINTS, not bytes. Pure-ASCII text stays on the old byte
+-- fast path: every helper below first checks for a byte >= 0x80 and only then
+-- walks the string as UTF-8, so ASCII text costs a byte check or a C-level
+-- scan for a high byte.
+--
+-- INVALID UTF-8 is never an error and never loses data. Decoding is lenient:
+-- any byte that does not begin a well-formed sequence -- a stray continuation
+-- byte, a 0xC0/0xC1/0xF5..0xFF lead, a truncated sequence, an overlong form,
+-- an encoded surrogate, anything above U+10FFFF -- is ONE character on its
+-- own, consisting of that raw byte, whose code (string->n) is the byte value
+-- 0x80..0xFF (the Latin-1 reading of that byte). pos/tlstr/explode keep the
+-- raw byte, so (cn (hdstr S) (tlstr S)) == S always holds. The one thing that
+-- does not round-trip is (n->string (string->n B)) for such a byte B: it
+-- yields the UTF-8 encoding of U+0080..U+00FF, a different (valid) string.
+-- The reader decodes source text the same way, so a stray Latin-1 byte in a
+-- source string literal reads as the character of the same code.
+--
+-- n->string accepts integral 0..0x10FFFF except the surrogates
+-- U+D800..U+DFFF and errors on anything else. Everything here is plain Lua
+-- 5.1 string/arith code (no `utf8` library), so it runs identically on
+-- LuaJIT 2.1 and PUC Lua 5.1..5.4.
+local sbyte, ssub, schar, sfind = string.byte, string.sub, string.char, string.find
+local mfloor = math.floor
+local HIGHPAT = "[\128-\255]"
+
+-- u8dec(s, i) -> code point, byte length of the character at byte index i
+-- (i <= #s). Lenient: an ill-formed sequence decodes as its first byte alone.
+local function u8dec(s, i)
+  local c = sbyte(s, i)
+  if c < 0x80 then return c, 1 end
+  if c < 0xC2 then return c, 1 end
+  if c < 0xE0 then
+    local c2 = sbyte(s, i + 1)
+    if c2 and c2 >= 0x80 and c2 < 0xC0 then return (c - 0xC0) * 64 + (c2 - 0x80), 2 end
+    return c, 1
+  end
+  if c < 0xF0 then
+    local c2, c3 = sbyte(s, i + 1, i + 2)
+    if c3 and c2 >= 0x80 and c2 < 0xC0 and c3 >= 0x80 and c3 < 0xC0 then
+      local cp = (c - 0xE0) * 4096 + (c2 - 0x80) * 64 + (c3 - 0x80)
+      if cp >= 0x800 and (cp < 0xD800 or cp > 0xDFFF) then return cp, 3 end
+    end
+    return c, 1
+  end
+  if c < 0xF5 then
+    local c2, c3, c4 = sbyte(s, i + 1, i + 3)
+    if c4 and c2 >= 0x80 and c2 < 0xC0 and c3 >= 0x80 and c3 < 0xC0
+       and c4 >= 0x80 and c4 < 0xC0 then
+      local cp = (c - 0xF0) * 262144 + (c2 - 0x80) * 4096 + (c3 - 0x80) * 64 + (c4 - 0x80)
+      if cp >= 0x10000 and cp <= 0x10FFFF then return cp, 4 end
+    end
+  end
+  return c, 1
+end
+
+-- u8enc(n) -> UTF-8 encoding of code point n, or nil if n is not an integral
+-- Unicode scalar value (0..0x10FFFF minus the surrogates).
+local function u8enc(n)
+  if type(n) ~= "number" or n ~= mfloor(n) or n < 0 then return nil end
+  if n < 0x80 then return schar(n) end
+  if n < 0x800 then return schar(0xC0 + mfloor(n / 64), 0x80 + n % 64) end
+  if n < 0x10000 then
+    if n >= 0xD800 and n <= 0xDFFF then return nil end
+    return schar(0xE0 + mfloor(n / 4096), 0x80 + mfloor(n / 64) % 64, 0x80 + n % 64)
+  end
+  if n <= 0x10FFFF then
+    return schar(0xF0 + mfloor(n / 262144), 0x80 + mfloor(n / 4096) % 64,
+                 0x80 + mfloor(n / 64) % 64, 0x80 + n % 64)
+  end
+  return nil
+end
+
+-- u8len(s): number of characters (code points / lone invalid bytes).
+local function u8len(s)
+  local h = sfind(s, HIGHPAT)
+  if not h then return #s end
+  local n, i, len = h - 1, h, #s
+  while i <= len do
+    local _, l = u8dec(s, i)
+    i = i + l; n = n + 1
+  end
+  return n
+end
+
+-- u8pos(s, n): the n-th (0-based) character of s as a string, or nil when n
+-- is out of range. ASCII prefix -> one byte substring.
+local function u8pos(s, n)
+  local len = #s
+  if n >= len then return nil end            -- chars <= bytes
+  local h = sfind(s, HIGHPAT)
+  if not h or h > n + 1 then return ssub(s, n + 1, n + 1) end
+  local i, k = h, h - 1                       -- k = index of char at byte i
+  while i <= len do
+    local _, l = u8dec(s, i)
+    if k == n then return ssub(s, i, i + l - 1) end
+    i = i + l; k = k + 1
+  end
+  return nil
+end
+
+-- u8tl(s): s without its first character (s non-empty).
+local function u8tl(s)
+  local c = sbyte(s, 1)
+  if c < 0xC2 then return ssub(s, 2) end
+  local _, l = u8dec(s, 1)
+  return ssub(s, l + 1)
+end
+
+-- u8hd(s): the first character of s as a string (s non-empty).
+local function u8hd(s)
+  local c = sbyte(s, 1)
+  if c < 0xC2 then return ssub(s, 1, 1) end
+  local _, l = u8dec(s, 1)
+  return ssub(s, 1, l)
+end
+
+-- u8explode(s): KL list of the characters of s.
+local function u8explode(s)
+  local acc = NIL
+  if not sfind(s, HIGHPAT) then
+    for i = #s, 1, -1 do acc = cons(ssub(s, i, i), acc) end
+    return acc
+  end
+  local chars, i, len = {}, 1, #s
+  while i <= len do
+    local _, l = u8dec(s, i)
+    chars[#chars + 1] = ssub(s, i, i + l - 1)
+    i = i + l
+  end
+  for j = #chars, 1, -1 do acc = cons(chars[j], acc) end
+  return acc
+end
+
+-- u8codes(s): KL list of the character codes of s (string->n of each char).
+local function u8codes(s)
+  local acc = NIL
+  if not sfind(s, HIGHPAT) then
+    for i = #s, 1, -1 do acc = cons(sbyte(s, i), acc) end
+    return acc
+  end
+  local cps, i, len = {}, 1, #s
+  while i <= len do
+    local cp, l = u8dec(s, i)
+    cps[#cps + 1] = cp
+    i = i + l
+  end
+  for j = #cps, 1, -1 do acc = cons(cps[j], acc) end
+  return acc
+end
+
+P.utf8 = { HIGHPAT = HIGHPAT, dec = u8dec, enc = u8enc, len = u8len,
+           pos = u8pos, tl = u8tl, hd = u8hd, explode = u8explode, codes = u8codes }
+
+local function nstr_error(n)
+  local shown = type(n) == "number" and numToStr(n) or tostring(n)
+  ERR("n->string: " .. shown .. " is not a Unicode code point (0..1114111, excluding surrogates)")
+end
+
 defprim("pos", 2, function(s,n)
   if type(s)~="string" then ERR("pos: not a string") end
-  if n < 0 or n >= #s then ERR("pos: index out of range") end
-  return string.sub(s, n+1, n+1)
+  if type(n)~="number" or n < 0 or n ~= mfloor(n) then ERR("pos: index out of range") end
+  local c = u8pos(s, n)
+  if c == nil then ERR("pos: index out of range") end
+  return c
 end)
 defprim("tlstr", 1, function(s)
   if type(s)~="string" then ERR("tlstr: not a string") end
   if #s == 0 then ERR("tlstr: empty string") end
-  return string.sub(s, 2)
+  return u8tl(s)
 end)
 defprim("string->n", 1, function(s)
   if type(s) ~= "string" or #s == 0 then ERR("string->n: empty or non-string") end
-  return string.byte(s,1)
+  local c = sbyte(s, 1)
+  if c < 0xC2 then return c end
+  return (u8dec(s, 1))
 end)
 defprim("n->string", 1, function(n)
   if type(n) ~= "number" then ERR("n->string: not a number") end
-  return string.char(n)
+  local ch = u8enc(n)
+  if ch == nil then nstr_error(n) end
+  return ch
 end)
 defprim("string->symbol", 1, function(s) return intern(s) end)
 
@@ -388,11 +555,20 @@ end
 P.mk_out_stream, P.mk_in_stream = mk_out_stream, mk_in_stream
 
 -- shen.char-stoutput? : port-specific predicate referenced by `pr` to choose
--- between a fast (write-string) and a fallback (write-chars) path. Our streams
--- are byte streams, so we return false and the `write-chars` path is used.
-defprim("shen.char-stoutput?", 1, function(_st) return false end)
+-- between a fast (write-string) and a fallback (write-chars) path. write-chars
+-- writes (string->n (pos S I)) per character with write-byte, which cannot
+-- carry a code point above 0x7F (issue #80), so every output stream here is a
+-- CHARACTER stream for pr: shen.write-string writes the string's UTF-8 bytes
+-- as they are. write-byte stays a raw byte primitive.
+defprim("shen.char-stoutput?", 1, function(_st) return true end)
+defprim("shen.write-string", 2, function(s, st)
+  if not is_stream(st) or st.kind~="out" then ERR("pr: not an output stream") end
+  if type(s) ~= "string" then ERR("pr: not a string") end
+  st.write(s)
+  return s
+end)
 -- shen.char-stinput? : input-side counterpart used by `read-byte` callers.
--- Our streams are byte streams.
+-- Our streams are byte streams: (read-byte S) returns raw bytes.
 defprim("shen.char-stinput?", 1, function(_st) return false end)
 
 -- write-byte (N STREAM) -> N : write a single byte to an output stream
@@ -402,13 +578,57 @@ defprim("write-byte", 2, function(n, st)
   return n
 end)
 
--- read-byte (STREAM) -> N | -1 at EOF
-defprim("read-byte", 1, function(st)
-  if not is_stream(st) or st.kind~="in" then ERR("read-byte: not an input stream") end
+-- raw next byte of an input stream, honouring one byte of pushback (used by
+-- the UTF-8 decoder below when a sequence turns out to be ill-formed).
+local function stream_byte(st)
+  local pb = st.pb
+  if pb then st.pb = nil; return pb end
   if st.eof then return -1 end
   local b = st.readbyte()
   if b == nil then st.eof = true; return -1 end
   return b
+end
+
+-- read-byte (STREAM) -> N | -1 at EOF
+defprim("read-byte", 1, function(st)
+  if not is_stream(st) or st.kind~="in" then ERR("read-byte: not an input stream") end
+  return stream_byte(st)
+end)
+
+-- stream_char(st) -> code point of the next character of st, or -1 at EOF.
+-- Lenient like u8dec: an ill-formed sequence yields its lead byte's value and
+-- the offending byte is pushed back to start the next character.
+local function stream_char(st)
+  local c = stream_byte(st)
+  if c < 0xC2 or c > 0xF4 then return c end      -- ASCII, EOF, or lone byte
+  local need = c < 0xE0 and 1 or (c < 0xF0 and 2 or 3)
+  local cp = c < 0xE0 and c - 0xC0 or (c < 0xF0 and c - 0xE0 or c - 0xF0)
+  for _ = 1, need do
+    local b = stream_byte(st)
+    if b < 0x80 or b > 0xBF then
+      if b ~= -1 then st.pb = b end
+      return c
+    end
+    cp = cp * 64 + (b - 0x80)
+  end
+  if (need == 2 and (cp < 0x800 or (cp >= 0xD800 and cp <= 0xDFFF)))
+     or (need == 3 and (cp < 0x10000 or cp > 0x10FFFF)) then
+    return c        -- overlong / surrogate / out of range: lead byte alone
+  end
+  return cp
+end
+
+-- shen.my-read-byte (reader.kl) feeds the reader behind `read` and `lineread`.
+-- The reader consumes character codes (it rebuilds text with n->string), so
+-- the native override (install_native_stdlib) reads one UTF-8 character with
+-- stream_char and returns its code point; read-byte on the same stream still
+-- sees raw bytes.
+-- shen.read-unit-string: one character as a string ("" at EOF).
+defprim("shen.read-unit-string", 1, function(st)
+  if not is_stream(st) or st.kind~="in" then ERR("read-unit-string: not an input stream") end
+  local cp = stream_char(st)
+  if cp == -1 then return "" end
+  return u8enc(cp) or schar(cp)
 end)
 
 -- open (NAME DIRECTION) -> stream ; DIRECTION is symbol `in` or `out`
@@ -923,22 +1143,34 @@ function P.install_native_stdlib()
   -- hash (sys.kl:117) drives EVERY dict operation — get/put and the whole
   -- property system (arities, source, types, ...). The kernel computes it as
   --   (shen.mod (shen.prodbutzero (map string->n (explode V)) 1) Bound)
-  -- i.e. explode V into its printed characters, take each char's first BYTE
-  -- (string->n = string.byte), and fold them with prodbutzero: multiply while
-  -- the accumulator stays <= 1e10, switch to ADD once it exceeds (the kernel's
-  -- own overflow guard — so the key never leaves the double-exact range), then
-  -- reduce mod Bound with 0 mapped to 1. For a symbol explode yields the bytes
-  -- of its name; for a string, the bytes of the string (tlstr/pos/string->n
-  -- are all byte-based here) — verified identical to the compiled-KL hash over
-  -- every kernel F-name x 5 bounds plus edge strings (empty, embedded NUL,
-  -- UTF-8, >1e10-triggering lengths): 0 mismatches. Any other value type
-  -- delegates to the original so its exact printed form is never second-guessed.
-  -- Boot alone calls hash ~800 times (all on symbol keys); a native fold there
-  -- and at runtime avoids the per-call explode list + map + KL recursion.
+  -- i.e. explode V into its printed characters, take each character's code
+  -- (string->n: its Unicode code point, issue #80), and fold them with
+  -- prodbutzero: multiply while the accumulator stays <= 1e10, switch to ADD
+  -- once it exceeds (the kernel's own overflow guard — so the key never
+  -- leaves the double-exact range), then reduce mod Bound with 0 mapped to 1.
+  -- For a symbol explode yields the characters of its name; for a string,
+  -- the characters of the string. ASCII text folds bytes directly (byte ==
+  -- code point); text with a byte >= 0x80 folds code points, exactly as the
+  -- kernel definition does over the code-point primitives, so the result
+  -- agrees with the compiled-KL hash and with = (equal strings, equal hash).
+  -- Any other value type delegates to the original so its exact printed form
+  -- is never second-guessed. Boot alone calls hash ~800 times (all on symbol
+  -- keys); a native fold there and at runtime avoids the per-call explode
+  -- list + map + KL recursion.
   local orig_hash = F["hash"]
-  local sbyte = string.byte
   local function hashkey_bytes(s)
     local acc = 1
+    if sfind(s, HIGHPAT) then
+      local i, len = 1, #s
+      while i <= len do
+        local b, l = u8dec(s, i)
+        if b ~= 0 then
+          if acc > 10000000000 then acc = acc + b else acc = acc * b end
+        end
+        i = i + l
+      end
+      return acc
+    end
     for i = 1, #s do
       local b = sbyte(s, i)
       if b ~= 0 then
@@ -1179,16 +1411,45 @@ function P.install_native_stdlib()
     elseif type(v) == "boolean" then s = v and "true" or "false"
     elseif type(v) == "number" then s = numToStr(v)
     else return orig_explode(v) end
-    local acc = NIL
-    for i = #s, 1, -1 do acc = cons(string.sub(s, i, i), acc) end
-    return acc
+    return u8explode(s)
   end
+  -- shen.string->bytes / shen.str->bytes: despite the names, the kernel
+  -- builds both from string->n, i.e. character CODES (code points), which is
+  -- also what the reader consumes (read-from-string = str->bytes + <s-exprs>).
   local orig_s2b = F["shen.string->bytes"]
   local function string_to_bytes(s)
     if type(s) ~= "string" then return orig_s2b(s) end
-    local acc = NIL
-    for i = #s, 1, -1 do acc = cons(string.byte(s, i), acc) end
-    return acc
+    return u8codes(s)
+  end
+  local orig_str2b = F["shen.str->bytes"]
+  local function str_to_bytes(s)
+    if type(s) ~= "string" then return orig_str2b(s) end
+    return u8codes(s)
+  end
+
+  -- read-file: the kernel reads the file as a BYTE list and feeds it to the
+  -- reader, whose <notdbq>/<alpha> rules rebuild text with n->string. With
+  -- code-point strings that would re-encode every byte of a UTF-8 sequence
+  -- as its own character (mojibake), so read-file instead decodes the file
+  -- as UTF-8 into code points (lenient: an invalid byte reads as the code of
+  -- that byte). read-file-as-bytelist itself keeps returning raw bytes. The
+  -- body below is the kernel's read-file (reader.kl) over that code list.
+  local orig_my_read_byte = F["shen.my-read-byte"]
+  local function my_read_byte(st)
+    if not is_stream(st) or st.kind ~= "in" then return orig_my_read_byte(st) end
+    return stream_char(st)
+  end
+  local orig_read_file = F["read-file"]
+  local function read_file(name)
+    if type(name) ~= "string" then return orig_read_file(name) end
+    local fh = io.open(name, "rb")
+    if not fh then return orig_read_file(name) end   -- same open error
+    local data = fh:read("*a") or ""
+    fh:close()
+    local codes = u8codes(data)
+    local ok, parsed = pcall(F["compile"], F["shen.<s-exprs>"], codes)
+    if not ok then parsed = F["shen.reader-error"](GLOBALS["shen.*residue*"]) end
+    return F["shen.process-sexprs"](parsed)
   end
 
   -- concat: (intern (cn (str A) (str B))) — intern("true") is boolean true.
@@ -1229,7 +1490,7 @@ function P.install_native_stdlib()
   local orig_hdstr = F["hdstr"]
   local function hdstr(s)
     if type(s) ~= "string" or #s == 0 then return orig_hdstr(s) end
-    return string.sub(s, 1, 1)
+    return u8hd(s)
   end
   local function byte_to_digit(n) return n - 48 end
   local function limit(v) return v[2] end
@@ -1716,6 +1977,9 @@ function P.install_native_stdlib()
   install("shen.length-h", length_h, 2)
   install("explode", explode, 1)
   install("shen.string->bytes", string_to_bytes, 1)
+  install("shen.str->bytes", str_to_bytes, 1)
+  install("read-file", read_file, 1)
+  install("shen.my-read-byte", my_read_byte, 1)
   install("concat", concat, 2)
   install("nth", nth, 2)
   install("sum", sum, 1)
@@ -1993,24 +2257,39 @@ local ENV = {
     if type(a) == "string" and type(b) == "string" then return a .. b end
     return F["cn"](a, b)
   end,
+  -- Inline string helpers (compiler.lua lowers pos/tlstr/string->n/n->string/
+  -- hdstr to these). Fast path: the bytes involved are ASCII (< 0x80, or
+  -- < 0xC2 for a lone first byte, which can never start a multi-byte
+  -- character), so one byte is one character. Otherwise fall back to the
+  -- code-point primitive (issue #80).
   POS = function(s, n)
     if type(s) == "string" and type(n) == "number" and n >= 0 and n < #s then
-      return string.sub(s, n + 1, n + 1)
+      if n == 0 then
+        if sbyte(s, 1) < 0xC2 then return ssub(s, 1, 1) end
+      else
+        local h = sfind(s, HIGHPAT)       -- first non-ASCII byte, if any
+        if not h or h > n + 1 then return ssub(s, n + 1, n + 1) end
+      end
     end
     return F["pos"](s, n)
   end,
   TLSTR = function(s)
-    if type(s) == "string" and #s > 0 then return string.sub(s, 2) end
+    if type(s) == "string" then
+      local c = sbyte(s, 1)
+      if c and c < 0xC2 then return ssub(s, 2) end
+    end
     return F["tlstr"](s)
   end,
   STRN = function(s)
-    if type(s) == "string" and #s > 0 then return string.byte(s, 1) end
+    if type(s) == "string" then
+      local c = sbyte(s, 1)
+      if c and c < 0xC2 then return c end
+    end
     return F["string->n"](s)
   end,
   NSTR = function(n)
-    if type(n) == "number" then
-      local ok, ch = pcall(string.char, n)
-      if ok then return ch end
+    if type(n) == "number" and n >= 0 and n < 128 and n == mfloor(n) then
+      return schar(n)
     end
     return F["n->string"](n)
   end,
