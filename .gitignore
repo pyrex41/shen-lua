@@ -1,6 +1,8 @@
 .claude/
 .shen-kernel-cache*.bin
 .shen-kernel-cache*.bin.tmp
+.shen-kernel-cache*.bin.stlib
+.shen-kernel-cache*.bin.stlib.tmp
 build/shen-bundle.lua
 .fasl-test/
 luacov.stats.out

@@ -1,96 +1,113 @@
 # Provenance of the vendored KLambda kernel
 
-The vendored `klambda/` tree has **two lineages**. Read both sections — they
-come from different upstreams and are updated independently.
+## Current: ShenOSKernel 42.2 (community `shen-sources` line)
 
-## 1. Kernel proper — S42 (2026-08-25 refresh)
+The whole `klambda/` tree (23 `.kl` files) and the kernel test suite under
+`../tests/` are vendored **byte-identical** from the ShenOSKernel 42.2 release —
+the kernel that upstream [shen-scheme 0.50](https://github.com/tizoc/shen-scheme/tree/v0.50)
+(2026-10-01) ships:
 
-- **Canonical source**: `pyrex41/shen-upstream` — the designated mirror of Mark
-  Tarver's shenlanguage.org uploads (private repo).
-  - Tag: `s42-pristine-20260825`
-  - Commit: `pending mirror import`
-    ("Pristine import of the 2026-08-25 S42 refresh from shenlanguage.org")
-- **Upstream origin** (what the mirror imported): Mark Tarver's `S42.zip`,
-  the reference SBCL/Windows distribution.
-  - URL: https://www.shenlanguage.org/Download/S42.zip
-  - Last-Modified: 2026-08-25
-  - Zip SHA-256: `30abdc7e5a1e27b7a20109c1ed141e4712885e31f24d9710d16415fbbd4dfb23`
+- **Repository**: [`Shen-Language/shen-sources`](https://github.com/Shen-Language/shen-sources)
+  - Tag: `shen-42.2`
+  - Commit: `73507e069fe147aefb728d632c4ce40bc6a7b314`
+    ("Prepare Shen kernel 42.2 release", 2026-10-01)
+- **Release asset**: `ShenOSKernel-42.2.tar.gz`
+  - SHA-256: `1d02273003654d34ec020ae67cb214ecec410dee3350419ff807d82b652678d8`
+    (the checksum pinned in shen-scheme 0.50's Makefile)
+  - `klambda/*.kl` and `tests/` verified against the extracted archive with
+    `cmp` / `diff -r`.
+- `(version)` reports `"42.2"` (set by `shen.initialise-environment` in
+  `init.kl`).
 
-These 15 files are vendored **byte-identical** to `KLambda/` in the mirror at
-that tag — equivalently, to the zip's `KLambda/` directory (both verified with
-`cmp`):
+Files:
 
-    yacc core load prolog reader sequent sys t-star toplevel
-    track types writer backend declarations macros
+    core declarations dict init load macros prolog reader sequent sys
+    t-star toplevel track types writer yacc          -- kernel
+    stlib                                            -- precompiled standard library
+    extension-features extension-expand-dynamic extension-launcher
+    extension-programmable-pattern-matching          -- extensions (booted)
+    extension-namespaces extension-type-annotations  -- extensions (vendored, opt-in)
 
-> **Caveat — S42 is the upstream 2026-08-25 distribution.** Community
-> extensions retained below are not part of the pristine archive.
-> `(version)` reports `"42"` (it is set in `declarations.kl`).
+### Lineage choice (pyrex41/shen-lua#79, option a)
 
-### What changed vs the community ShenOSKernel-42 we used to vendor
+This is a **lineage switch**. Releases up to 0.11.x vendored Mark Tarver's
+**S42.0** kernel (`S42.zip` from shenlanguage.org, 2026-08-25, mirrored as
+`pyrex41/shen-upstream` tag `s42-pristine-20260825`, zip SHA-256
+`30abdc7e5a1e27b7a20109c1ed141e4712885e31f24d9710d16415fbbd4dfb23`) plus the
+community 42 extensions and the S-lineage `Lib/StLib` Shen sources. 42.1 and
+42.2 are releases of the **community** line only, which differs structurally,
+so per the cross-port decision (pyrex41/bifrost#26, pyrex41/yggdrasil#32) the
+42.2 kernel is adopted **wholesale** rather than porting its changes onto the
+S42.0 base. Every port that Bifrost and Yggdrasil drive therefore runs the
+same kernel as shen-scheme 0.50, byte for byte.
 
-- **New: `backend.kl`** — a `cl.*` KLambda→Common-Lisp backend. Irrelevant to
-  the Lua runtime, but on the upstream boot list, so vendored and booted (it is
-  pure defuns; it defines functions that are never called under Lua).
-- **Removed: `compiler.kl`** — was shen-cl's generated KL→Lisp compiler (a
-  shen-cl build artifact, never part of any ShenOSKernel release). shen-lua has
-  its own Lua compiler (`compiler.lua`) and never used it at runtime. Dropped.
-- **Removed: `dict.kl`** — the dictionary layer is gone. Property vectors are
-  now plain vectors: `*property-vector*` is `(vector 20000)` and `get`/`put`
-  index it via `hash` + `shen.change-pointer-value` / `shen.remove-pointer`,
-  rather than the old `shen.dict` / `shen.<-dict` / `shen.dict->`. Internal to
-  `get`/`put`; callers are unaffected.
-- **Removed: `init.kl`** — its work moved into `declarations.kl` and
-  `toplevel.kl`. There is **no `shen.initialise` function** any more: the
-  kernel initialises itself at LOAD time via top-level forms in
-  `declarations.kl` — `(set *property-vector* (vector 20000))`, the environment
-  `set`s, `(shen.initialise-arity-table …)`, `(put shen shen.external-symbols …)`
-  and `(shen.build-lambda-table …)`. `shen.initialise-lambda-forms` /
-  `-signedfuncs` / `-environment` are gone; `shen.initialise-lambda-tables`
-  (~renamed) and the arity table remain.
-- **Removed: `stlib.kl`** — the standard library is no longer shipped as a
-  precompiled KLambda blob; upstream now ships it as **Shen sources** under
-  `Lib/StLib/`. shen-lua vendors those sources under `lib/StLib/` and loads them
-  at boot (see section 2 and `lib/StLib/PROVENANCE.md`); `stlib.kl` is gone.
-- Other renames observed: `hush` → `shen.hush`, `input+` → `shen.input-h+` /
-  `shen.process-input+`, plus new `shen.rdecons`, `shen.shen`, pointer helpers.
+What that means structurally, relative to the S42.0 tree it replaces:
 
-## 2. Extensions — community ShenOSKernel-42 (retained); stdlib moved out
+- **`init.kl` and `shen.initialise` are back.** Every 42.2 file is pure
+  defuns; nothing initialises at load time. `boot.lua` loads all modules and
+  then calls `(shen.initialise)` (environment, `*property-vector*`, arity
+  table, lambda forms, kernel signatures), the extension initialisers, and
+  `(stlib.initialise)`. The S42 load-order constraints (`… macros declarations
+  t-star types`) and the hoisted `types.kl` declares are gone.
+- **`dict.kl` is back.** `*property-vector*` is a `shen.dict` (an absvector:
+  `shen.dictionary`, capacity, count, then hash buckets of `(Key . Props)`),
+  and `get`/`put`/`unput` go through `shen.<-dict` / `shen.dict->` /
+  `shen.assoc-set` / `shen.assoc-rm`. `prims.lua`'s native property store was
+  rewritten for this layout.
+- **Lambda forms are a property again.** `fn` reads the `shen.lambda-form`
+  property; there is no `shen.*lambdatable*`. 42.0's requirement that a cached
+  callable form be invalidated when a function is redefined with zero or
+  unknown arity is met by the native `fn` fast path keying its cache on a
+  generation counter that every `shen.lambda-form` write bumps.
+- **`stlib.kl` is back** as the standard library: the precompiled output of
+  42.2's `lib/stlib` sources (upstream `make-stlib.shen`). The S-lineage
+  `lib/StLib` sources that 0.11.x loaded at boot were removed; see
+  "Standard library" below.
+- **`backend.kl`** (S42's `cl.*` Common Lisp backend) is not part of 42.2 and
+  was removed.
+- **42.1 source-form handlers**: `shen.macroexpand-h` takes a 4th argument and
+  `shen.try-parse` returns parsed forms that the read loop expands afterwards.
+  shen-lua overrides none of `read`, `lineread`, `shen.read-loop`,
+  `shen.try-parse`, `macroexpand` or `shen.macroexpand-h`, so the kernel's
+  own order applies; `read`/`lineread` at EOF without a trailing newline
+  behave like shen-scheme 0.50.
+- **42.2 namespaces**: `extension-namespaces.kl` is vendored from the release
+  as generated (it already carries the 42.2 `externals`/`with-externals`
+  change). It is not booted; a program loads the extension's Shen source
+  (`extensions/namespaces.shen` in shen-sources) and calls
+  `(shen.x.namespaces.initialise)`, as the 42.2 extension tests do.
 
-**Extensions.** Tarver's refresh does not ship these; they are **retained
-byte-identical from the community `ShenOSKernel-42`** release (zip SHA-256
-`49f1b85d02348d9b3ebc461570c5c56cc066270ab81e35d5257625fb9d17fe82`) so the CLI
-launcher etc. stay available:
+### Boot list
 
-- `extension-features.kl`, `extension-expand-dynamic.kl` — booted.
-- `extension-launcher.kl` — booted; provides the launcher the CLI can use.
-- `extension-programmable-pattern-matching.kl` — vendored, opt-in, **not** booted.
+`boot.lua` (`FILES`) boots the 16 kernel modules, `extension-features`,
+`extension-expand-dynamic`, `extension-launcher`,
+`extension-programmable-pattern-matching` and `stlib` — the same set
+shen-scheme 0.50 boots. After `(shen.initialise)` it calls
+`(shen.x.features.initialise …)` and
+`(shen.x.programmable-pattern-matching.initialise)` in that order (as
+shen-scheme does), registers the `lua.*` interop entries, then runs
+`(stlib.initialise)`. The resulting `shen.*sigf*` matches shen-scheme 0.50's
+458 signatures plus the four `lua.checked-*` signatures.
 
-They are pure `defun`/`defmacro` referencing only public kernel functions
-(`get`/`put`/`arity`/…) — never the removed `dict.*`, `shen.<-dict`, or
-`shen.initialise-*` — so they load unchanged against the refreshed kernel.
+### Standard library
 
-**Standard library.** No longer a `.kl` file here. It is loaded at boot from the
-S-lineage Shen sources vendored under `lib/StLib/` — see
-[`lib/StLib/PROVENANCE.md`](../lib/StLib/PROVENANCE.md) and `boot.lua`
-`load_stdlib`. Loading through the kernel's own `define` path (rather than as
-raw `stlib.kl` defuns) registers each function's `arity` property + lambda-table
-entry, which **fixes** the long-standing quirk where a bare `(fn filter)` /
-top-level `(filter …)` raised "fn: filter is undefined" (the pre-refresh
-`stlib.kl` never called `stlib.initialise`, so those functions had runtime
-`arity` = -1). A regression test lives in `test/stdlib_spec.lua`.
-
-## Boot order
-
-The boot order lives in `boot.lua` (`FILES`) with a full rationale. It is **not**
-upstream `Sources/make.shen` order: make.shen relies on the factorise pass and a
-macros bootstrap that runs last, whereas shen-lua compiles KLambda directly, so
-what matters is that each module's LOAD-TIME side effects (the `declare` forms in
-`types.kl`, the init forms in `declarations.kl`) see their dependencies already
-defined. The resulting tail is `… macros declarations t-star types`.
+`klambda/stlib.kl` loads with the kernel and `(stlib.initialise)` registers
+it (port-upgrades.md, 41.1). Its 290 `declare`s are cached next to the kernel
+bytecode cache (`<kernel cache>.stlib`, keyed on the kernel cache key); see
+`boot.lua` `stlib_types`. `SHEN_NO_STDLIB=1` skips `(stlib.initialise)`.
 
 ## Overriding
 
 Set `SHEN_KL_DIR=/path/to/some/other/klambda` to boot a different KLambda tree
-(e.g. a full ShenOSKernel checkout during development). `boot.lua` uses it
-instead of this vendored directory.
+with the same file set (e.g. a development build of shen-sources). `boot.lua`
+loads the `FILES` list from it and calls `shen.initialise` /
+`stlib.initialise` when the tree defines them.
+
+## History
+
+- 0.11.x: Tarver S42.0 (2026-08-25 refresh) + community 42 extensions +
+  S-lineage `lib/StLib` sources loaded at boot.
+- Earlier: Tarver S41.2 (2026-07-11 refresh); before that the community
+  ShenOSKernel 41.2 / 41.1 releases.
+
+`git log -- klambda/PROVENANCE.md` has the full earlier text of each entry.

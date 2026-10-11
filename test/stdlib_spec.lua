@@ -1,14 +1,13 @@
--- test/stdlib_spec.lua — regression for loading the standard library from its
--- S-lineage Shen sources (lib/StLib) instead of a precompiled stlib.kl.
+-- test/stdlib_spec.lua — regression for standard-library registration.
 --
--- The motivating bug: the pre-refresh port booted klambda/stlib.kl as raw KL
+-- The motivating bug: an earlier port booted klambda/stlib.kl as raw KL
 -- defuns, which put functions in F but NEVER registered their `arity` property
--- or shen.*lambdatable* entry (stlib.initialise was never called). So a bare
--- top-level `(filter ...)` or a first-class `(fn filter)` — both of which
--- resolve through the lambda table — died with "fn: filter is undefined",
--- even though the function existed. Loading the stdlib through the kernel's own
--- (load)/define pipeline (boot.lua load_stdlib) registers the arity + lambda
--- entry, so these now work. This spec locks that behaviour in.
+-- or lambda form (stlib.initialise was never called). So a bare top-level
+-- `(filter ...)` or a first-class `(fn filter)` — both of which resolve
+-- through the lambda form — died with "fn: filter is undefined", even though
+-- the function existed. On ShenOSKernel 42.2 boot.lua load_stdlib runs
+-- (stlib.initialise) after the kernel is initialised (port-upgrades.md 41.1),
+-- which registers every arity + lambda form. This spec locks that in.
 --
 --   luajit test/stdlib_spec.lua
 local shen = require("shen")
