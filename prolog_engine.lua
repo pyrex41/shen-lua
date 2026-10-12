@@ -186,6 +186,12 @@ local function mkcons(carv, cdrv)
 end
 M.cons = mkcons
 
+-- t[1] . t[2] . ... . tail, allocated innermost first like nested CONS calls
+function M.cons_list(t, tail)
+  for i = #t, 1, -1 do tail = mkcons(t[i], tail) end
+  return tail
+end
+
 function M.car(v) return cells[v - CONS_BASE] end
 function M.cdr(v) return cells[v - CONS_BASE + 1] end
 function M.is_cons(v) return v >= CONS_BASE end
@@ -338,6 +344,20 @@ function M.newcontV(fn, ...)
   for i = 1, k do
     capbuf[b + i - 1] = select(i, ...)
   end
+  cap_top = b + k
+  local h = ch_top + 1; ch_top = h
+  contFn[h] = fn; contBase[h] = b
+  return h
+end
+
+-- the captures arrive as one array: the wide translation of a continuation
+-- whose argument list alone would pass LuaJIT's 250-register frame limit.
+-- Same capbuf layout as newcontV; the table is not kept.
+function M.newcontT(fn, t)
+  local k = #t
+  ckroom(k)
+  local b = cap_top
+  for i = 1, k do capbuf[b + i - 1] = t[i] end
   cap_top = b + k
   local h = ch_top + 1; ch_top = h
   contFn[h] = fn; contBase[h] = b
