@@ -3,13 +3,12 @@
 --
 -- This is NOT the canonical kernel certification suite (run-kernel-tests.lua).
 --
--- NB on scope: the standard library is loaded at boot from the S-lineage
--- lib/StLib Shen sources (see boot.lua load_stdlib), so list functions like
+-- NB on scope: the standard library (precompiled klambda/stlib.kl, registered
+-- by (stlib.initialise) — see boot.lua load_stdlib) is present, so list functions like
 -- filter / take / drop are present and covered here alongside the kernel-core
 -- functions (map / reverse / append / element? / length / head / tail / sum /
 -- remove / occurrences / cons? / empty?). See also test/stdlib_spec.lua for
--- the (fn filter) / bare-(filter …) regression that motivated loading stdlib
--- from source.
+-- the (fn filter) / bare-(filter …) regression.
 --
 --   luajit test/library_spec.lua
 local shen = require("shen")
@@ -106,11 +105,10 @@ checkeq("(lib-spec-sumlist [1 2 3 4 5])", "15")
 checkeq("(lib-spec-sumlist [])", "0")
 
 -- ---------------------------------------------------------------------------
--- stdlib higher-order + list functions. These come from the S-lineage
--- lib/StLib sources (Lists/lists.shen etc.), loaded through the kernel's own
--- define pipeline at boot (see boot.lua load_stdlib). Before the stdlib was
--- loaded from source, filter/take/drop were absent and this block asserted a
--- clean "undefined" error; now they are present and we assert behaviour.
+-- stdlib higher-order + list functions, from klambda/stlib.kl registered by
+-- (stlib.initialise) at boot (see boot.lua load_stdlib). Before the stdlib was
+-- registered, filter/take/drop were absent and this block asserted a clean
+-- "undefined" error; now they are present and we assert behaviour.
 -- ---------------------------------------------------------------------------
 shen.eval("(define lib-spec-gt1 X -> (> X 1))")
 checkeq("(filter lib-spec-gt1 [1 2 3])", "(2 3)")

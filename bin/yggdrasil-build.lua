@@ -3,7 +3,7 @@
 --   luajit bin/yggdrasil-build.lua <shaken-dir> <out.lua> [--linked]
 --
 -- <shaken-dir> is a Yggdrasil stage-1 output directory: a tree-shaken
--- kernel (kernel.kl, ShenOSKernel-42 defuns in load order), the user
+-- kernel (kernel.kl, ShenOSKernel defuns in load order), the user
 -- program as KL (one or more user= files), and yggdrasil.manifest.txt.
 -- The builder compiles every KL form ahead of time with the port's own
 -- compiler (compiler.lua C.compile_top) and emits ONE runnable Lua
@@ -108,8 +108,8 @@ end
 assert(man.kernel, MANIFEST .. ": missing kernel=")
 assert(man.init, MANIFEST .. ": missing init=")
 assert(#man.user > 0, MANIFEST .. ": no user= entries")
-if man["kernel-version"] ~= "42" then
-  io.stderr:write(("yggdrasil-build: warning: manifest kernel-version=%s, this port is certified against 42\n")
+if man["kernel-version"] ~= "42.2" then
+  io.stderr:write(("yggdrasil-build: warning: manifest kernel-version=%s, this port is certified against 42.2\n")
     :format(tostring(man["kernel-version"])))
 end
 
@@ -121,9 +121,11 @@ local P = require("prims")    -- registers primitive arities into C.ARITY
 -- Contract check: every primitive the manifest expects must be provided by
 -- this port — a prims.lua F-table entry, a compiler special form, a global
 -- the generated lib boot sets, or a name that is guarded-dead here (the
--- kernel only calls it behind a port predicate this port answers false to:
--- shen.char-stoutput?/shen.char-stinput? are hardwired false in prims.lua,
--- so the shen.write-string / shen.read-unit-string branches never run).
+-- kernel only calls it behind a port predicate this port answers false to).
+-- shen.write-string and shen.read-unit-string are prims.lua entries now
+-- (shen.char-stoutput? is true so pr writes UTF-8 strings whole, issue #80;
+-- shen.char-stinput? stays false); they remain listed below so a manifest
+-- from an older stage 1 that names them never warns.
 local SPECIAL = {
   ["if"]=true, ["cond"]=true, ["let"]=true, ["do"]=true, ["trap-error"]=true,
   ["and"]=true, ["or"]=true, ["lambda"]=true, ["freeze"]=true, ["defun"]=true,
@@ -162,7 +164,7 @@ end
 -- 42 kernel (klambda/*.kl) is BACKFILLED into the kernel chunk — with a
 -- loud warning, because each backfill is a stage-1 shaker bug that should be
 -- fixed in yggdrasil.shen. Names found nowhere are warn-only (they may be
--- guarded-dead, like shen.write-string behind shen.char-stoutput?).
+-- guarded-dead, like shen.read-unit-string behind shen.char-stinput?).
 -- Limitation (same one stage 1 has): only head-position references are
 -- traced; a function passed by bare name in argument position is invisible.
 local function walk_calls(form, bound, called)

@@ -291,23 +291,218 @@ defprim("cn", 2, function(a,b)
   if type(a)~="string" or type(b)~="string" then ERR("cn: not strings") end
   return a..b
 end)
+-- ---- strings are sequences of Unicode code points, held as UTF-8 ----------
+-- (issue #80). A Shen string is a Lua string of UTF-8 bytes; the character
+-- primitives (pos, tlstr, string->n, n->string, hdstr, explode, hash, the
+-- reader) count CODE POINTS, not bytes. Pure-ASCII text stays on the old byte
+-- fast path: every helper below first checks for a byte >= 0x80 and only then
+-- walks the string as UTF-8. The checks are plain string.byte loops on
+-- purpose: string.find with a pattern is not JIT-compiled by LuaJIT 2.1 and
+-- aborts every trace that reaches it, which made an ASCII pos loop ~1000x
+-- slower in testing. pos remembers the last string it scanned (first_high),
+-- so a loop indexing one string scans it once.
+--
+-- INVALID UTF-8 is never an error and never loses data. Decoding is lenient:
+-- any byte that does not begin a well-formed sequence -- a stray continuation
+-- byte, a 0xC0/0xC1/0xF5..0xFF lead, a truncated sequence, an overlong form,
+-- an encoded surrogate, anything above U+10FFFF -- is ONE character on its
+-- own, consisting of that raw byte, whose code (string->n) is the byte value
+-- 0x80..0xFF (the Latin-1 reading of that byte). pos/tlstr/explode keep the
+-- raw byte, so (cn (hdstr S) (tlstr S)) == S always holds. The one thing that
+-- does not round-trip is (n->string (string->n B)) for such a byte B: it
+-- yields the UTF-8 encoding of U+0080..U+00FF, a different (valid) string.
+-- The reader decodes source text the same way, so a stray Latin-1 byte in a
+-- source string literal reads as the character of the same code.
+--
+-- n->string accepts integral 0..0x10FFFF except the surrogates
+-- U+D800..U+DFFF and errors on anything else. Everything here is plain Lua
+-- 5.1 string/arith code (no `utf8` library), so it runs identically on
+-- LuaJIT 2.1 and PUC Lua 5.1..5.4.
+local sbyte, ssub, schar = string.byte, string.sub, string.char
+local mfloor = math.floor
+
+-- first_high(s): byte index of the first byte >= 0x80 in s, or false if s is
+-- pure ASCII. One-entry memo: strings are interned, so the hit test is a
+-- pointer compare, and a loop calling pos on the same string scans it once.
+local FH_S, FH_H = nil, false
+local function first_high(s)
+  if s == FH_S then return FH_H end
+  local h = false
+  for i = 1, #s do
+    if sbyte(s, i) >= 0x80 then h = i; break end
+  end
+  FH_S, FH_H = s, h
+  return h
+end
+
+-- u8dec(s, i) -> code point, byte length of the character at byte index i
+-- (i <= #s). Lenient: an ill-formed sequence decodes as its first byte alone.
+local function u8dec(s, i)
+  local c = sbyte(s, i)
+  if c < 0x80 then return c, 1 end
+  if c < 0xC2 then return c, 1 end
+  if c < 0xE0 then
+    local c2 = sbyte(s, i + 1)
+    if c2 and c2 >= 0x80 and c2 < 0xC0 then return (c - 0xC0) * 64 + (c2 - 0x80), 2 end
+    return c, 1
+  end
+  if c < 0xF0 then
+    local c2, c3 = sbyte(s, i + 1, i + 2)
+    if c3 and c2 >= 0x80 and c2 < 0xC0 and c3 >= 0x80 and c3 < 0xC0 then
+      local cp = (c - 0xE0) * 4096 + (c2 - 0x80) * 64 + (c3 - 0x80)
+      if cp >= 0x800 and (cp < 0xD800 or cp > 0xDFFF) then return cp, 3 end
+    end
+    return c, 1
+  end
+  if c < 0xF5 then
+    local c2, c3, c4 = sbyte(s, i + 1, i + 3)
+    if c4 and c2 >= 0x80 and c2 < 0xC0 and c3 >= 0x80 and c3 < 0xC0
+       and c4 >= 0x80 and c4 < 0xC0 then
+      local cp = (c - 0xF0) * 262144 + (c2 - 0x80) * 4096 + (c3 - 0x80) * 64 + (c4 - 0x80)
+      if cp >= 0x10000 and cp <= 0x10FFFF then return cp, 4 end
+    end
+  end
+  return c, 1
+end
+
+-- u8enc(n) -> UTF-8 encoding of code point n, or nil if n is not an integral
+-- Unicode scalar value (0..0x10FFFF minus the surrogates).
+local function u8enc(n)
+  if type(n) ~= "number" or n ~= mfloor(n) or n < 0 then return nil end
+  if n < 0x80 then return schar(n) end
+  if n < 0x800 then return schar(0xC0 + mfloor(n / 64), 0x80 + n % 64) end
+  if n < 0x10000 then
+    if n >= 0xD800 and n <= 0xDFFF then return nil end
+    return schar(0xE0 + mfloor(n / 4096), 0x80 + mfloor(n / 64) % 64, 0x80 + n % 64)
+  end
+  if n <= 0x10FFFF then
+    return schar(0xF0 + mfloor(n / 262144), 0x80 + mfloor(n / 4096) % 64,
+                 0x80 + mfloor(n / 64) % 64, 0x80 + n % 64)
+  end
+  return nil
+end
+
+-- u8len(s): number of characters (code points / lone invalid bytes).
+local function u8len(s)
+  local h = first_high(s)
+  if not h then return #s end
+  local n, i, len = h - 1, h, #s
+  while i <= len do
+    local _, l = u8dec(s, i)
+    i = i + l; n = n + 1
+  end
+  return n
+end
+
+-- u8pos(s, n): the n-th (0-based) character of s as a string, or nil when n
+-- is out of range. ASCII prefix -> one byte substring.
+local function u8pos(s, n)
+  local len = #s
+  if n >= len then return nil end            -- chars <= bytes
+  local h = first_high(s)
+  if not h or h > n + 1 then return ssub(s, n + 1, n + 1) end
+  local i, k = h, h - 1                       -- k = index of char at byte i
+  while i <= len do
+    local _, l = u8dec(s, i)
+    if k == n then return ssub(s, i, i + l - 1) end
+    i = i + l; k = k + 1
+  end
+  return nil
+end
+
+-- u8tl(s): s without its first character (s non-empty).
+local function u8tl(s)
+  local c = sbyte(s, 1)
+  if c < 0xC2 then return ssub(s, 2) end
+  local _, l = u8dec(s, 1)
+  return ssub(s, l + 1)
+end
+
+-- u8hd(s): the first character of s as a string (s non-empty).
+local function u8hd(s)
+  local c = sbyte(s, 1)
+  if c < 0xC2 then return ssub(s, 1, 1) end
+  local _, l = u8dec(s, 1)
+  return ssub(s, 1, l)
+end
+
+-- u8explode(s): KL list of the characters of s.
+local function u8explode(s)
+  local acc = NIL
+  local i = #s
+  while i >= 1 do                     -- ASCII fast path, back to front
+    local b = sbyte(s, i)
+    if b >= 0x80 then break end
+    acc = cons(schar(b), acc)
+    i = i - 1
+  end
+  if i == 0 then return acc end
+  acc = NIL
+  local chars, len = {}, #s
+  i = 1
+  while i <= len do
+    local _, l = u8dec(s, i)
+    chars[#chars + 1] = ssub(s, i, i + l - 1)
+    i = i + l
+  end
+  for j = #chars, 1, -1 do acc = cons(chars[j], acc) end
+  return acc
+end
+
+-- u8codes(s): KL list of the character codes of s (string->n of each char).
+local function u8codes(s)
+  local acc = NIL
+  local i = #s
+  while i >= 1 do                     -- ASCII fast path, back to front
+    local b = sbyte(s, i)
+    if b >= 0x80 then break end
+    acc = cons(b, acc)
+    i = i - 1
+  end
+  if i == 0 then return acc end
+  acc = NIL
+  local cps, len = {}, #s
+  i = 1
+  while i <= len do
+    local cp, l = u8dec(s, i)
+    cps[#cps + 1] = cp
+    i = i + l
+  end
+  for j = #cps, 1, -1 do acc = cons(cps[j], acc) end
+  return acc
+end
+
+P.utf8 = { first_high = first_high, dec = u8dec, enc = u8enc, len = u8len,
+           pos = u8pos, tl = u8tl, hd = u8hd, explode = u8explode, codes = u8codes }
+
+local function nstr_error(n)
+  local shown = type(n) == "number" and numToStr(n) or tostring(n)
+  ERR("n->string: " .. shown .. " is not a Unicode code point (0..1114111, excluding surrogates)")
+end
+
 defprim("pos", 2, function(s,n)
   if type(s)~="string" then ERR("pos: not a string") end
-  if n < 0 or n >= #s then ERR("pos: index out of range") end
-  return string.sub(s, n+1, n+1)
+  if type(n)~="number" or n < 0 or n ~= mfloor(n) then ERR("pos: index out of range") end
+  local c = u8pos(s, n)
+  if c == nil then ERR("pos: index out of range") end
+  return c
 end)
 defprim("tlstr", 1, function(s)
   if type(s)~="string" then ERR("tlstr: not a string") end
   if #s == 0 then ERR("tlstr: empty string") end
-  return string.sub(s, 2)
+  return u8tl(s)
 end)
 defprim("string->n", 1, function(s)
   if type(s) ~= "string" or #s == 0 then ERR("string->n: empty or non-string") end
-  return string.byte(s,1)
+  local c = sbyte(s, 1)
+  if c < 0xC2 then return c end
+  return (u8dec(s, 1))
 end)
 defprim("n->string", 1, function(n)
   if type(n) ~= "number" then ERR("n->string: not a number") end
-  return string.char(n)
+  local ch = u8enc(n)
+  if ch == nil then nstr_error(n) end
+  return ch
 end)
 defprim("string->symbol", 1, function(s) return intern(s) end)
 
@@ -342,7 +537,19 @@ defprim("absvector", 1, function(n)
   return setmetatable(v, Vmt)
 end)
 defprim("absvector?", 1, function(x) return getmetatable(x)==Vmt end)
-defprim("<-address", 2, function(v, i) return v[i+2] end)
+-- An out-of-range read is an error (every in-range slot holds a value: the
+-- fail object until written), so kernel code that probes past the end under
+-- trap-error -- the vector printer's shen.iter-vector, shen.dict? -- sees
+-- the boundary instead of a Lua nil.
+local function addr_oob(v, i)
+  ERR(R.to_str and (tostring(i) .. " is not a valid index") or "invalid index")
+end
+P.addr_oob = addr_oob
+defprim("<-address", 2, function(v, i)
+  local w = v[i+2]
+  if w == nil then addr_oob(v, i) end
+  return w
+end)
 defprim("address->", 3, function(v, i, x) v[i+2]=x; return v end)
 
 -- freeze/thaw : thunks are 0-arity functions (kernel: (defun thaw (V) (V)))
@@ -388,11 +595,20 @@ end
 P.mk_out_stream, P.mk_in_stream = mk_out_stream, mk_in_stream
 
 -- shen.char-stoutput? : port-specific predicate referenced by `pr` to choose
--- between a fast (write-string) and a fallback (write-chars) path. Our streams
--- are byte streams, so we return false and the `write-chars` path is used.
-defprim("shen.char-stoutput?", 1, function(_st) return false end)
+-- between a fast (write-string) and a fallback (write-chars) path. write-chars
+-- writes (string->n (pos S I)) per character with write-byte, which cannot
+-- carry a code point above 0x7F (issue #80), so every output stream here is a
+-- CHARACTER stream for pr: shen.write-string writes the string's UTF-8 bytes
+-- as they are. write-byte stays a raw byte primitive.
+defprim("shen.char-stoutput?", 1, function(_st) return true end)
+defprim("shen.write-string", 2, function(s, st)
+  if not is_stream(st) or st.kind~="out" then ERR("pr: not an output stream") end
+  if type(s) ~= "string" then ERR("pr: not a string") end
+  st.write(s)
+  return s
+end)
 -- shen.char-stinput? : input-side counterpart used by `read-byte` callers.
--- Our streams are byte streams.
+-- Our streams are byte streams: (read-byte S) returns raw bytes.
 defprim("shen.char-stinput?", 1, function(_st) return false end)
 
 -- write-byte (N STREAM) -> N : write a single byte to an output stream
@@ -402,13 +618,57 @@ defprim("write-byte", 2, function(n, st)
   return n
 end)
 
--- read-byte (STREAM) -> N | -1 at EOF
-defprim("read-byte", 1, function(st)
-  if not is_stream(st) or st.kind~="in" then ERR("read-byte: not an input stream") end
+-- raw next byte of an input stream, honouring one byte of pushback (used by
+-- the UTF-8 decoder below when a sequence turns out to be ill-formed).
+local function stream_byte(st)
+  local pb = st.pb
+  if pb then st.pb = nil; return pb end
   if st.eof then return -1 end
   local b = st.readbyte()
   if b == nil then st.eof = true; return -1 end
   return b
+end
+
+-- read-byte (STREAM) -> N | -1 at EOF
+defprim("read-byte", 1, function(st)
+  if not is_stream(st) or st.kind~="in" then ERR("read-byte: not an input stream") end
+  return stream_byte(st)
+end)
+
+-- stream_char(st) -> code point of the next character of st, or -1 at EOF.
+-- Lenient like u8dec: an ill-formed sequence yields its lead byte's value and
+-- the offending byte is pushed back to start the next character.
+local function stream_char(st)
+  local c = stream_byte(st)
+  if c < 0xC2 or c > 0xF4 then return c end      -- ASCII, EOF, or lone byte
+  local need = c < 0xE0 and 1 or (c < 0xF0 and 2 or 3)
+  local cp = c < 0xE0 and c - 0xC0 or (c < 0xF0 and c - 0xE0 or c - 0xF0)
+  for _ = 1, need do
+    local b = stream_byte(st)
+    if b < 0x80 or b > 0xBF then
+      if b ~= -1 then st.pb = b end
+      return c
+    end
+    cp = cp * 64 + (b - 0x80)
+  end
+  if (need == 2 and (cp < 0x800 or (cp >= 0xD800 and cp <= 0xDFFF)))
+     or (need == 3 and (cp < 0x10000 or cp > 0x10FFFF)) then
+    return c        -- overlong / surrogate / out of range: lead byte alone
+  end
+  return cp
+end
+
+-- shen.my-read-byte (reader.kl) feeds the reader behind `read` and `lineread`.
+-- The reader consumes character codes (it rebuilds text with n->string), so
+-- the native override (install_native_stdlib) reads one UTF-8 character with
+-- stream_char and returns its code point; read-byte on the same stream still
+-- sees raw bytes.
+-- shen.read-unit-string: one character as a string ("" at EOF).
+defprim("shen.read-unit-string", 1, function(st)
+  if not is_stream(st) or st.kind~="in" then ERR("read-unit-string: not an input stream") end
+  local cp = stream_char(st)
+  if cp == -1 then return "" end
+  return u8enc(cp) or schar(cp)
 end)
 
 -- open (NAME DIRECTION) -> stream ; DIRECTION is symbol `in` or `out`
@@ -923,29 +1183,44 @@ function P.install_native_stdlib()
   -- hash (sys.kl:117) drives EVERY dict operation — get/put and the whole
   -- property system (arities, source, types, ...). The kernel computes it as
   --   (shen.mod (shen.prodbutzero (map string->n (explode V)) 1) Bound)
-  -- i.e. explode V into its printed characters, take each char's first BYTE
-  -- (string->n = string.byte), and fold them with prodbutzero: multiply while
-  -- the accumulator stays <= 1e10, switch to ADD once it exceeds (the kernel's
-  -- own overflow guard — so the key never leaves the double-exact range), then
-  -- reduce mod Bound with 0 mapped to 1. For a symbol explode yields the bytes
-  -- of its name; for a string, the bytes of the string (tlstr/pos/string->n
-  -- are all byte-based here) — verified identical to the compiled-KL hash over
-  -- every kernel F-name x 5 bounds plus edge strings (empty, embedded NUL,
-  -- UTF-8, >1e10-triggering lengths): 0 mismatches. Any other value type
-  -- delegates to the original so its exact printed form is never second-guessed.
-  -- Boot alone calls hash ~800 times (all on symbol keys); a native fold there
-  -- and at runtime avoids the per-call explode list + map + KL recursion.
+  -- i.e. explode V into its printed characters, take each character's code
+  -- (string->n: its Unicode code point, issue #80), and fold them with
+  -- prodbutzero: multiply while the accumulator stays <= 1e10, switch to ADD
+  -- once it exceeds (the kernel's own overflow guard — so the key never
+  -- leaves the double-exact range), then reduce mod Bound with 0 mapped to 1.
+  -- For a symbol explode yields the characters of its name; for a string,
+  -- the characters of the string. ASCII text folds bytes directly (byte ==
+  -- code point); text with a byte >= 0x80 folds code points, exactly as the
+  -- kernel definition does over the code-point primitives, so the result
+  -- agrees with the compiled-KL hash and with = (equal strings, equal hash).
+  -- Any other value type delegates to the original so its exact printed form
+  -- is never second-guessed. Boot alone calls hash ~800 times (all on symbol
+  -- keys); a native fold there and at runtime avoids the per-call explode
+  -- list + map + KL recursion.
   local orig_hash = F["hash"]
-  local sbyte = string.byte
   local function hashkey_bytes(s)
     local acc = 1
-    for i = 1, #s do
+    local len = #s
+    for i = 1, len do
       local b = sbyte(s, i)
+      if b >= 0x80 then acc = nil; break end
       if b ~= 0 then
         if acc > 10000000000 then acc = acc + b else acc = acc * b end
       end
     end
-    return acc
+    if acc then return acc end
+    do                                -- non-ASCII: fold code points
+      acc = 1
+      local i = 1
+      while i <= len do
+        local b, l = u8dec(s, i)
+        if b ~= 0 then
+          if acc > 10000000000 then acc = acc + b else acc = acc * b end
+        end
+        i = i + l
+      end
+      return acc
+    end
   end
   local function hash(v, bound)
     local s
@@ -960,7 +1235,8 @@ function P.install_native_stdlib()
   -- fn (reader.kl): the 42 shen->kl translator compiles every call to a
   -- function whose arity is unknown at translation time (forward references
   -- within a file, mainly) as ((fn name) args...), and the kernel `fn` pays
-  -- an arity property get PLUS an assoc over the whole shen.*lambdatable*
+  -- an arity property get PLUS a shen.lambda-form property get (a
+  -- trap-error'd dict lookup on 42.2; an assoc over shen.*lambdatable* on S42)
   -- on EVERY such call — measured at ~35% of urdr's software-SHA-256 suite
   -- (jit.p F3: is_cons/equal < assoc < fn). Fast path: for a symbol naming
   -- a live function with known positive arity, verify the lambdatable entry
@@ -970,19 +1246,25 @@ function P.install_native_stdlib()
   -- curried lambda. APP dispatches a raw function with recorded arity
   -- identically to the curried chain (exact call, partial application,
   -- over-application), but without one MKFUN closure allocation per applied
-  -- argument. Every (set shen.*lambdatable* ...) builds a fresh cons spine,
-  -- so table identity is the correct invalidation key; arity-0 and
+  -- argument. Every write of a shen.lambda-form property (native put/unput,
+  -- i.e. update-lambda-table / shen.set-lambda-form-entry) bumps
+  -- P.LAMBDA_FORM_GEN, which is the invalidation key (the 42.0 requirement:
+  -- a redefinition must drop the cached callable form); arity-0 and
   -- unknown-arity names always take the original path (kernel `fn` CALLS an
   -- arity-0 function rather than returning it).
   local orig_fn = F["fn"]
-  local fn_seen, fn_seen_lt = {}, nil
+  local fn_seen, fn_seen_lt, fn_seen_lt2 = {}, nil, nil
   local function fn_fast(v)
     if is_symbol(v) then
       local f = F[v.name]
       local ar = f ~= nil and FA[f] or nil
       if ar and ar > 0 then
-        local lt = GLOBALS["shen.*lambdatable*"]
-        if lt ~= fn_seen_lt then fn_seen = {}; fn_seen_lt = lt end
+        -- (an S42-lineage kernel via SHEN_KL_DIR or a Yggdrasil slice keeps
+        -- its lambda table in shen.*lambdatable*: a fresh spine per update)
+        local lt, lt2 = P.LAMBDA_FORM_GEN, GLOBALS["shen.*lambdatable*"]
+        if lt ~= fn_seen_lt or lt2 ~= fn_seen_lt2 then
+          fn_seen = {}; fn_seen_lt = lt; fn_seen_lt2 = lt2
+        end
         if fn_seen[v.name] then return f end
         orig_fn(v)               -- errors exactly like the kernel on a miss
         fn_seen[v.name] = true
@@ -1179,16 +1461,45 @@ function P.install_native_stdlib()
     elseif type(v) == "boolean" then s = v and "true" or "false"
     elseif type(v) == "number" then s = numToStr(v)
     else return orig_explode(v) end
-    local acc = NIL
-    for i = #s, 1, -1 do acc = cons(string.sub(s, i, i), acc) end
-    return acc
+    return u8explode(s)
   end
+  -- shen.string->bytes / shen.str->bytes: despite the names, the kernel
+  -- builds both from string->n, i.e. character CODES (code points), which is
+  -- also what the reader consumes (read-from-string = str->bytes + <s-exprs>).
   local orig_s2b = F["shen.string->bytes"]
   local function string_to_bytes(s)
     if type(s) ~= "string" then return orig_s2b(s) end
-    local acc = NIL
-    for i = #s, 1, -1 do acc = cons(string.byte(s, i), acc) end
-    return acc
+    return u8codes(s)
+  end
+  local orig_str2b = F["shen.str->bytes"]
+  local function str_to_bytes(s)
+    if type(s) ~= "string" then return orig_str2b(s) end
+    return u8codes(s)
+  end
+
+  -- read-file: the kernel reads the file as a BYTE list and feeds it to the
+  -- reader, whose <notdbq>/<alpha> rules rebuild text with n->string. With
+  -- code-point strings that would re-encode every byte of a UTF-8 sequence
+  -- as its own character (mojibake), so read-file instead decodes the file
+  -- as UTF-8 into code points (lenient: an invalid byte reads as the code of
+  -- that byte). read-file-as-bytelist itself keeps returning raw bytes. The
+  -- body below is the kernel's read-file (reader.kl) over that code list.
+  local orig_my_read_byte = F["shen.my-read-byte"]
+  local function my_read_byte(st)
+    if not is_stream(st) or st.kind ~= "in" then return orig_my_read_byte(st) end
+    return stream_char(st)
+  end
+  local orig_read_file = F["read-file"]
+  local function read_file(name)
+    if type(name) ~= "string" then return orig_read_file(name) end
+    local fh = io.open(name, "rb")
+    if not fh then return orig_read_file(name) end   -- same open error
+    local data = fh:read("*a") or ""
+    fh:close()
+    local codes = u8codes(data)
+    local ok, parsed = pcall(F["compile"], F["shen.<s-exprs>"], codes)
+    if not ok then parsed = F["shen.reader-error"](GLOBALS["shen.*residue*"]) end
+    return F["shen.process-sexprs"](parsed)
   end
 
   -- concat: (intern (cn (str A) (str B))) — intern("true") is boolean true.
@@ -1229,7 +1540,7 @@ function P.install_native_stdlib()
   local orig_hdstr = F["hdstr"]
   local function hdstr(s)
     if type(s) ~= "string" or #s == 0 then return orig_hdstr(s) end
-    return string.sub(s, 1, 1)
+    return u8hd(s)
   end
   local function byte_to_digit(n) return n - 48 end
   local function limit(v) return v[2] end
@@ -1376,78 +1687,99 @@ function P.install_native_stdlib()
     return data
   end
 
-  -- Property store (get/put/unput/arity). Kernel does hash + trap-error
-  -- <-vector + assoc; empty buckets are the fail object, which <-vector
-  -- turns into an exception. Same layout, no pcall.
+  -- Property store (get/put/unput/arity) over the ShenOSKernel 42.2 dict
+  -- (dict.kl). A dict is an absvector
+  --   address 0: shen.dictionary   1: capacity   2: entry count
+  --   address 3+i: bucket i  — an assoc list of (Key . Props)
+  -- where Props is itself an assoc list of (Prop . Value). In the pure-array
+  -- layout address a lives at v[a + 2]. The kernel's get/put/unput go through
+  -- trap-error around shen.<-dict plus shen.assoc-set/shen.assoc-rm; these
+  -- natives build exactly the same bucket and entry lists (assoc-set replaces
+  -- in place keeping the stored key, else appends; assoc-rm drops the first
+  -- match) without the pcall. Anything that is not a well-formed dict, and
+  -- every error path, delegates to the compiled original so messages match.
   local orig_get = F["get"]
   local orig_put = F["put"]
   local orig_unput = F["unput"]
   local orig_arity = F["arity"]
-  local orig_change = F["shen.change-pointer-value"]
-  local orig_remove = F["shen.remove-pointer"]
   local arity_sym = intern("arity")
+  local dict_sym = intern("shen.dictionary")
+  local lambda_form_sym = intern("shen.lambda-form")
+  -- bucket address of `key` in dict `vec`: returns bucket, slot index (v[]).
   local function bucket_at(vec, key)
-    if getmetatable(vec) ~= Vmt then return nil, nil end
-    local lim = vec[2]
-    if type(lim) ~= "number" or lim <= 0 then return nil, nil end
-    local h = hash(key, lim)
+    if getmetatable(vec) ~= Vmt or vec[2] ~= dict_sym then return nil, nil end
+    local cap = vec[3]
+    if type(cap) ~= "number" or cap <= 0 then return nil, nil end
+    local h = hash(key, cap)
     if type(h) ~= "number" then return nil, nil end
-    local slot = vec[h + 2]
-    if slot == fail_sym or slot == nil then return NIL, h end
-    return slot, h
+    local slot = h + 5
+    local b = vec[slot]
+    if b == nil or b == fail_sym then return nil, nil end
+    return b, slot
   end
-  local function pointer_match(pair, key, prop)
-    if not is_cons(pair) then return false end
-    local kp = pair[1]
-    if not is_cons(kp) then return false end
-    local rest = kp[2]
-    return is_cons(rest) and rest[2] == NIL
-       and equal(kp[1], key) and equal(rest[1], prop)
-  end
-  local function change_pointer(key, prop, val, lst)
-    local orig = lst
+  -- shen.assoc-set, iteratively; nil on an improper list (caller delegates).
+  local function assoc_set(k, v, l)
     local head, last
     while true do
-      if lst == NIL then
-        local cell = cons(cons(cons(key, cons(prop, NIL)), val), NIL)
-        if last then last[2] = cell; return head end
-        return cell
+      if l == NIL then
+        local cell = cons(cons(k, v), NIL)
+        if last then last[2] = cell; return head, true end
+        return cell, true
       end
-      if not is_cons(lst) then return orig_change(key, prop, val, orig) end
-      local pair = lst[1]
-      if pointer_match(pair, key, prop) then
-        local cell = cons(cons(pair[1], val), lst[2])
-        if last then last[2] = cell; return head end
-        return cell
+      if not is_cons(l) then return nil end
+      local pair = l[1]
+      if is_cons(pair) and equal(k, pair[1]) then
+        local cell = cons(cons(pair[1], v), l[2])
+        if last then last[2] = cell; return head, false end
+        return cell, false
       end
       local cell = cons(pair, NIL)
       if last then last[2] = cell else head = cell end
       last = cell
-      lst = lst[2]
+      l = l[2]
     end
   end
-  local function remove_pointer(key, prop, lst)
-    local orig = lst
+  -- shen.assoc-rm, iteratively; nil on an improper list.
+  local function assoc_rm(k, l)
     local head, last
     while true do
-      if lst == NIL then
-        if last then return head else return NIL end
+      if l == NIL then
+        if last then return head end
+        return NIL
       end
-      if not is_cons(lst) then return orig_remove(key, prop, orig) end
-      if pointer_match(lst[1], key, prop) then
-        if last then last[2] = lst[2]; return head end
-        return lst[2]
+      if not is_cons(l) then return nil end
+      local pair = l[1]
+      if is_cons(pair) and equal(k, pair[1]) then
+        if last then last[2] = l[2]; return head end
+        return l[2]
       end
-      local cell = cons(lst[1], NIL)
+      local cell = cons(pair, NIL)
       if last then last[2] = cell else head = cell end
       last = cell
-      lst = lst[2]
+      l = l[2]
     end
+  end
+  -- (key . props) entry of `key` in a bucket, or nil.
+  local function find_entry(bucket, key)
+    while is_cons(bucket) do
+      local e = bucket[1]
+      if is_cons(e) and equal(key, e[1]) then return e end
+      bucket = bucket[2]
+    end
+    return nil
+  end
+  local function find_prop(props, prop)
+    while is_cons(props) do
+      local p = props[1]
+      if is_cons(p) and equal(prop, p[1]) then return p end
+      props = props[2]
+    end
+    return nil
   end
   -- Sidecar Lua table for *property-vector* (port-performance.md: property
   -- access). Kernel keys are almost always interned symbols, so identity
-  -- table lookup beats hash+assoc. The absvector remains the observable
-  -- store; the cache is a write-through index.
+  -- table lookup beats hash+assoc. The dict remains the observable store;
+  -- the cache is a write-through index.
   local PGET = {}
   local function cacheable(x)
     local t = type(x)
@@ -1472,32 +1804,61 @@ function P.install_native_stdlib()
     if t then t[prop] = nil end
   end
   local pv_of = function() return GLOBALS["*property-vector*"] end
+  -- Bumped on every write of a shen.lambda-form property (update-lambda-table,
+  -- shen.set-lambda-form-entry, unput): fn_fast's invalidation key. 42.0
+  -- requires a cached callable form to be dropped when a function is
+  -- redefined (in particular to zero or unknown arity).
+  P.LAMBDA_FORM_GEN = 0
+  local function lookup(key, prop, vec)
+    local bucket = bucket_at(vec, key)
+    if bucket == nil then return nil end
+    local e = find_entry(bucket, key)
+    if e == nil then return nil end
+    local p = find_prop(e[2], prop)
+    if p == nil then return nil end
+    return p[2]
+  end
   local function get(key, prop, vec)
-    if vec == pv_of() then
+    local is_pv = vec == pv_of()
+    if is_pv then
       local v, ok = cache_get(key, prop)
       if ok then return v end
     end
-    local bucket, h = bucket_at(vec, key)
-    if h == nil then return orig_get(key, prop, vec) end
-    if bucket == NIL then return orig_get(key, prop, vec) end
-    local pair = assoc(cons(key, cons(prop, NIL)), bucket)
-    if pair == NIL or not is_cons(pair) then return orig_get(key, prop, vec) end
-    local val = pair[2]
-    if vec == pv_of() then cache_put(key, prop, val) end
+    local val = lookup(key, prop, vec)
+    if val == nil then return orig_get(key, prop, vec) end
+    if is_pv then cache_put(key, prop, val) end
     return val
   end
   local function put(key, prop, val, vec)
-    local bucket, h = bucket_at(vec, key)
-    if h == nil then return orig_put(key, prop, val, vec) end
-    vec[h + 2] = change_pointer(key, prop, val, bucket)
-    if vec == pv_of() then cache_put(key, prop, val) end
+    local bucket, slot = bucket_at(vec, key)
+    if slot == nil then return orig_put(key, prop, val, vec) end
+    local e = find_entry(bucket, key)
+    local props, _ = assoc_set(prop, val, e and e[2] or NIL)
+    if props == nil then return orig_put(key, prop, val, vec) end
+    local nb, added = assoc_set(key, props, bucket)
+    if nb == nil then return orig_put(key, prop, val, vec) end
+    vec[slot] = nb
+    if added then vec[4] = vec[4] + 1 end
+    if vec == pv_of() then
+      cache_put(key, prop, val)
+      if prop == lambda_form_sym then P.LAMBDA_FORM_GEN = P.LAMBDA_FORM_GEN + 1 end
+    end
     return val
   end
   local function unput(key, prop, vec)
-    local bucket, h = bucket_at(vec, key)
-    if h == nil then return orig_unput(key, prop, vec) end
-    vec[h + 2] = remove_pointer(key, prop, bucket)
-    if vec == pv_of() then cache_rm(key, prop) end
+    local bucket, slot = bucket_at(vec, key)
+    if slot == nil then return orig_unput(key, prop, vec) end
+    local e = find_entry(bucket, key)
+    local props = assoc_rm(prop, e and e[2] or NIL)
+    if props == nil then return orig_unput(key, prop, vec) end
+    local nb, added = assoc_set(key, props, bucket)
+    if nb == nil then return orig_unput(key, prop, vec) end
+    vec[slot] = nb
+    if added then vec[4] = vec[4] + 1 end
+    if vec == pv_of() then
+      cache_rm(key, prop)
+      if prop == lambda_form_sym then P.LAMBDA_FORM_GEN = P.LAMBDA_FORM_GEN + 1 end
+    end
     return key
   end
   local function arity(name)
@@ -1505,30 +1866,30 @@ function P.install_native_stdlib()
     if ok then return v end
     local pv = pv_of()
     if pv == nil then return -1 end
-    local bucket, h = bucket_at(pv, name)
-    if h == nil or bucket == NIL then return -1 end
-    local pair = assoc(cons(name, cons(arity_sym, NIL)), bucket)
-    if pair == NIL or not is_cons(pair) then return -1 end
-    cache_put(name, arity_sym, pair[2])
-    return pair[2]
+    if bucket_at(pv, name) == nil then return orig_arity(name) end
+    local val = lookup(name, arity_sym, pv)
+    if val == nil then return -1 end
+    cache_put(name, arity_sym, val)
+    return val
   end
   local function get_or(key, prop, vec, default)
-    if vec == pv_of() then
+    local is_pv = vec == pv_of()
+    if is_pv then
       local v, ok = cache_get(key, prop)
       if ok then return v end
     end
-    local bucket, h = bucket_at(vec, key)
-    if h == nil or bucket == NIL then
+    local val
+    if bucket_at(vec, key) == nil then
+      local ok, v = pcall(orig_get, key, prop, vec)
+      if ok then val = v end
+    else
+      val = lookup(key, prop, vec)
+    end
+    if val == nil then
       if type(default) == "function" then return default() end
       return default
     end
-    local pair = assoc(cons(key, cons(prop, NIL)), bucket)
-    if pair == NIL or not is_cons(pair) then
-      if type(default) == "function" then return default() end
-      return default
-    end
-    local val = pair[2]
-    if vec == pv_of() then cache_put(key, prop, val) end
+    if is_pv then cache_put(key, prop, val) end
     return val
   end
   P.ENV.GET_OR = get_or
@@ -1716,6 +2077,9 @@ function P.install_native_stdlib()
   install("shen.length-h", length_h, 2)
   install("explode", explode, 1)
   install("shen.string->bytes", string_to_bytes, 1)
+  install("shen.str->bytes", str_to_bytes, 1)
+  install("read-file", read_file, 1)
+  install("shen.my-read-byte", my_read_byte, 1)
   install("concat", concat, 2)
   install("nth", nth, 2)
   install("sum", sum, 1)
@@ -1741,8 +2105,6 @@ function P.install_native_stdlib()
   install("put", put, 4)
   install("unput", unput, 3)
   install("arity", arity, 1)
-  install("shen.change-pointer-value", change_pointer, 4)
-  install("shen.remove-pointer", remove_pointer, 3)
   install("vector?", vector_q, 1)
   install("<-vector", vref, 2)
   install("vector->", vset, 3)
@@ -1995,11 +2357,12 @@ local ENV = {
     return w
   end,
   ADDR_OR = function(v, n, default)
-    if type(v) ~= "table" or type(n) ~= "number" then
+    local w = (type(v) == "table" and type(n) == "number") and v[n + 2] or nil
+    if w == nil then
       if type(default) == "function" then return default() end
       return default
     end
-    return v[n + 2]
+    return w
   end,
   -- Placeholder: trap-error (get ...) during kernel load, before native get.
   -- install_native_stdlib replaces this with a pcall-free lookup.
@@ -2013,28 +2376,61 @@ local ENV = {
     if type(a) == "string" and type(b) == "string" then return a .. b end
     return F["cn"](a, b)
   end,
+  -- Inline string helpers (compiler.lua lowers pos/tlstr/string->n/n->string/
+  -- hdstr to these). Fast path: the bytes involved are ASCII (< 0x80, or
+  -- < 0xC2 for a lone first byte, which can never start a multi-byte
+  -- character), so one byte is one character. Otherwise fall back to the
+  -- code-point primitive (issue #80).
   POS = function(s, n)
     if type(s) == "string" and type(n) == "number" and n >= 0 and n < #s then
-      return string.sub(s, n + 1, n + 1)
+      if n == 0 then
+        if sbyte(s, 1) < 0xC2 then return ssub(s, 1, 1) end
+      else
+        local h = first_high(s)           -- first non-ASCII byte, if any
+        if not h or h > n + 1 then return ssub(s, n + 1, n + 1) end
+      end
     end
     return F["pos"](s, n)
   end,
   TLSTR = function(s)
-    if type(s) == "string" and #s > 0 then return string.sub(s, 2) end
+    if type(s) == "string" then
+      local c = sbyte(s, 1)
+      if c and c < 0xC2 then return ssub(s, 2) end
+    end
     return F["tlstr"](s)
   end,
   STRN = function(s)
-    if type(s) == "string" and #s > 0 then return string.byte(s, 1) end
+    if type(s) == "string" then
+      local c = sbyte(s, 1)
+      if c and c < 0xC2 then return c end
+    end
     return F["string->n"](s)
   end,
+  -- (string->n (pos S N)) fused by compiler.lua: the code of the N-th
+  -- character without allocating the one-character string.
+  STRNPOS = function(s, n)
+    if type(s) == "string" and type(n) == "number" and n >= 0 and n < #s then
+      local c = sbyte(s, n + 1)
+      if n == 0 then
+        if c < 0xC2 then return c end
+      elseif c < 0x80 then
+        local h = first_high(s)
+        if not h or h > n + 1 then return c end
+      end
+    end
+    return F["string->n"](F["pos"](s, n))
+  end,
   NSTR = function(n)
-    if type(n) == "number" then
-      local ok, ch = pcall(string.char, n)
-      if ok then return ch end
+    if type(n) == "number" and n >= 0 and n < 128 and n == mfloor(n) then
+      return schar(n)
     end
     return F["n->string"](n)
   end,
-  ADDR = function(v, i) return v[i + 2] end,
+  ADDR = function(v, i)
+    local w = v[i + 2]
+    if w == nil then return F["<-address"](v, i) end
+    return w
+  end,
   ADSET = function(v, i, x) v[i + 2] = x; return v end,
   VMT = Vmt,
   -- allow compiled code to reach a few Lua builtins safely

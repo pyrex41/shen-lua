@@ -1,8 +1,8 @@
 # shen-lua
 
 [Shen](https://shenlanguage.org) on **LuaJIT 2.1**: pattern matching, optional
-sequent types, and Prolog, compiled to Lua. Shen 42, **134/134** official
-kernel tests. Embeds in any Lua host. Plain Lua 5.1/5.4/5.5 works too (slower,
+sequent types, and Prolog, compiled to Lua. ShenOSKernel 42.2, **143/143**
+official kernel tests. Embeds in any Lua host. Plain Lua 5.1/5.4/5.5 works too (slower,
 still correct).
 
 ```sh
@@ -15,8 +15,9 @@ luajit examples/hello_embed.lua     # embed in Lua, ~25 lines
 
 LuaJIT 2.1 is the primary host (`brew install luajit` /
 `apt-get install luajit`); the source checkout also supports plain Lua as
-described below. First boot compiles the kernel and loads the Shen-source
-standard library; subsequent boots use bytecode and standard-library caches.
+described below. First boot compiles the kernel (including the precompiled
+standard library, `stlib.kl`); subsequent boots use the bytecode and
+standard-library signature caches.
 Loaded programs are cached fasl-style. Cross-port agreement lives in
 [Bifrost](https://github.com/pyrex41/bifrost). New to Shen?
 [shenlanguage.org](https://shenlanguage.org).
@@ -41,6 +42,28 @@ the Kλ boundary — type *checking* is the kernel’s own Shen, unchanged.
 
 Numbers, strings, and booleans are Lua’s. Symbols are interned (identity `==`).
 `()` is a unique `NIL`. Cons is `{h,t}`; vectors are array tables.
+
+### Strings and Unicode
+
+A Shen string is a sequence of Unicode code points, held as a UTF-8 Lua
+string. `pos`, `tlstr`, `hdstr`, `string->n`, `explode`, `hash` (and anything
+built on them, such as `string.length`) count characters, not bytes.
+`(n->string N)` returns the UTF-8 encoding of any code point 0..U+10FFFF
+except the surrogates U+D800..U+DFFF, and raises an error for anything else.
+The reader decodes source files, `read-from-string`, and `(read Stream)` as
+UTF-8, so `"Zürich"` reads as six characters and prints back unchanged. `pr`
+writes UTF-8. `read-byte`, `write-byte`, and `read-file-as-bytelist` stay raw
+byte operations. ASCII text stays on a byte-indexed fast path.
+
+Invalid UTF-8 never raises an error and never loses data. Each byte that does
+not start a well-formed sequence counts as one character on its own: a stray
+continuation byte, a 0xC0/0xC1/0xF5–0xFF lead byte, a truncated, overlong, or
+surrogate sequence, or a value above U+10FFFF. `pos`, `tlstr`, and `explode`
+return that raw byte, so `(cn (hdstr S) (tlstr S))` is always `S`.
+`string->n` returns the byte's value (0x80–0xFF), so such a byte in source text
+reads as the character with that code (Latin-1). One thing does not round-trip:
+`(n->string (string->n B))` gives the valid two-byte encoding of that code, not
+the original byte.
 
 ## CLI
 
@@ -124,11 +147,11 @@ More under [`examples/`](examples/README.md). A full tour:
 
 ```sh
 make test                      # port specs (test/*_spec.lua)
-luajit run-kernel-tests.lua    # official 42 suite → 134/134
+luajit run-kernel-tests.lua    # official 42.2 suite → 143/143
 ```
 
 The kernel suite is vendored in `tests/`. Port specs cover primitives, REPL,
-interop, tail-call lowering, boot caches.
+interop, tail-call lowering, boot caches, UTF-8 strings.
 
 ## Install
 
@@ -137,8 +160,8 @@ luarocks install shen                       # launcher + modules
 luarocks make --local shen-scm-1.rockspec   # this tree
 ```
 
-LuaJIT required (`lua == 5.1`). Release **0.11.1** uses kernel **42**; **0.9.0**
-was 41.1. Or grab `shen-bundle.lua` from
+LuaJIT required (`lua == 5.1`). This tree uses ShenOSKernel **42.2**; release
+**0.11.1** uses Tarver's S42 kernel; **0.9.0** was 41.1. Or grab `shen-bundle.lua` from
 [Releases](https://github.com/pyrex41/shen-lua/releases/latest) — one file,
 `require("shen-bundle")`.
 
@@ -168,7 +191,7 @@ LuaJIT trace logs, run `luajit -jv bin/shen ...`.
 
 Prolog and the typechecker run on a native engine (`prolog_engine.lua`); the
 portable kernel predicates that show up on compile and execution paths are
-overridden in `prims.lua`. Caches (kernel bytecode, stdlib image, user fasl)
+overridden in `prims.lua`. Caches (kernel bytecode, stdlib signatures, user fasl)
 are content-keyed and safe to delete. Internals:
 [`doc/PERF-HANDOFF.md`](doc/PERF-HANDOFF.md),
 [`doc/BENCHMARKS.md`](doc/BENCHMARKS.md).
@@ -179,7 +202,7 @@ LuaJIT 2.1. Kernel sources are in `klambda/` (see
 [`klambda/PROVENANCE.md`](klambda/PROVENANCE.md)). `SHEN_KL_DIR` can point at
 another tree.
 
-**PUC Lua 5.1/5.4/5.5:** same 134/134. No FFI → legacy Prolog engine; no `bit`
+**PUC Lua 5.1/5.4/5.5:** same 143/143 (checked on 5.4.7). No FFI → legacy Prolog engine; no `bit`
 → caches off. Lua 5.3+ arithmetic is forced to floats so it matches LuaJIT.
 
 **Old LuaJIT on aarch64** (2.1.0-beta3): boot-time JIT crash, fixed upstream.

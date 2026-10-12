@@ -1,0 +1,65 @@
+{
+  "name": "shen-lua-unicode",
+  "root": ".",
+  "programs_dir": "programs",
+  "default_cwd": ".",
+  "cases": [
+    {
+      "name": "unicode-n->string-252",
+      "mode": "eval",
+      "expr": "(n->string 252)",
+      "expect": "output",
+      "golden": "ü",
+      "doc": "issue #80: U+00FC as UTF-8 (C3 BC). shen-lua <= 0.11.1 printed a lone 0xFC byte"
+    },
+    {
+      "name": "unicode-n->string-8364",
+      "mode": "eval",
+      "expr": "(n->string 8364)",
+      "expect": "output",
+      "golden": "€",
+      "doc": "issue #80: code points above 255. shen-lua <= 0.11.1 raised bad argument to NSTR"
+    },
+    {
+      "name": "unicode-string->n-roundtrip",
+      "mode": "eval",
+      "expr": "(string->n (n->string 8364))",
+      "expect": "output",
+      "golden": "8364"
+    },
+    {
+      "name": "unicode-explode-length",
+      "mode": "eval",
+      "expr": "(length (explode (cn \"Z\" (cn (n->string 252) \"rich\"))))",
+      "expect": "output",
+      "golden": "6",
+      "doc": "explode counts characters, not UTF-8 bytes"
+    },
+    {
+      "name": "unicode-hash-codepoint",
+      "mode": "eval",
+      "expr": "(hash (n->string 252) 1000)",
+      "expect": "output",
+      "golden": "252",
+      "doc": "hash folds string->n (code points) per the kernel's sys.kl definition: 252 for U+00FC on shen-lua and Tarver's S42 SBCL build. shen-go hashes strings natively with a different function (874), so this golden is kernel-definition, not cross-port",
+      "known_divergence": "shen-go-native-string-hash"
+    },
+    {
+      "name": "unicode-codepoints",
+      "mode": "script",
+      "program": "unicode-codepoints.shen",
+      "expect": "output",
+      "golden": "n->string-252-is-one-char ok\nn->string-8364-is-one-char ok\nn->string-128512-is-one-char ok\nstring->n-252 ok\nstring->n-8364 ok\nstring->n-1114111 ok\npos-1 ok\npos-5 ok\ntlstr ok\nhdstr ok\nexplode-length ok\nexplode-codes ok\nhash-built-twice ok\nhash-agrees-with-= ok\nequal-built ok\nnot-equal-bytes ok\nput-get ok\nat-s-pattern ok",
+      "doc": "code-point string primitives over strings built with n->string, so no port's reader is involved"
+    },
+    {
+      "name": "unicode-literals",
+      "mode": "script",
+      "program": "unicode-literals.shen",
+      "expect": "output",
+      "golden": "literal-length ok\nliteral-string->n ok\nliteral-euro ok\nliteral-equals-built ok\nliteral-pos ok\nliteral-tlstr ok\nliteral-hash ok\ncontrol-escape ok\nGrüße, Zoë: 5 €",
+      "known_divergence": "latin1-source-reader",
+      "doc": "UTF-8 source literals read as code points. Tarver's S42 SBCL build, shen-cl (file loads) and shen-go read source BYTES and rebuild text with n->string per byte, i.e. they decode source as Latin-1: \"ü\" becomes the two characters U+00C3 U+00BC and prints as mojibake. shen-lua decodes UTF-8 (issue #80)"
+    }
+  ]
+}

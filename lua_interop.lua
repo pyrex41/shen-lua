@@ -402,18 +402,16 @@ M.map_new, M.map_find, M.map_put, M.map_remove =
 -- ---- install: the Shen-side surface -----------------------------------------
 
 -- Shen-LEVEL registration of name/arity: the `arity` property plus the
--- shen.*lambdatable* entry that (fn name) and Shen's evaluator consult.
+-- callable lambda form that (fn name) and Shen's evaluator consult.
 --
--- The S42 (2026-07-11 refresh) kernel dropped shen.set-lambda-form-entry
--- (and the whole lambda-FORM property the pre-refresh kernel keyed on). Its
--- lambda table is now the assoc list shen.*lambdatable*, whose entries are
--- (name . curried-fn) exactly as returned by shen.lambda-entry, and (fn name)
--- resolves by `assoc` into it. The kernel's own update-lambda-table does
--- precisely the pair of writes we need — (put name arity …) then cons
--- (shen.lambda-entry name) onto shen.*lambdatable* — and stores the CURRIED
--- FUNCTION as the value (not a cons), so the old "apply a non-function" hazard
--- at tc+ call sites is gone. Route through it. The internal put goes through
--- the LIVE F entry so the fasl "p" wrapper still sees it when outside a chunk.
+-- On ShenOSKernel 42.2 the lambda form is the shen.lambda-form property
+-- (sys.kl `fn` reads it); on Tarver's S42 kernel it was an entry in the
+-- shen.*lambdatable* assoc list. Either way the kernel's own
+-- update-lambda-table does precisely the writes we need — (put name arity …)
+-- then the lambda form built by shen.lambda-entry, whose value is the CURRIED
+-- FUNCTION (not a cons), so the old "apply a non-function" hazard at tc+ call
+-- sites is gone. Route through it. The internal puts go through the LIVE F
+-- entry so the fasl "p"/"lf" wrappers still see them when outside a chunk.
 local function shen_register(nm, arity)
   F["update-lambda-table"](nm, arity)
 end
