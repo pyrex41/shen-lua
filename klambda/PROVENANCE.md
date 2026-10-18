@@ -1,22 +1,20 @@
 # Provenance of the vendored KLambda kernel
 
-## Current: ShenOSKernel 42.2 (community `shen-sources` line)
+## Current: ShenOSKernel 43.1 (community `shen-sources` line)
 
 The whole `klambda/` tree (23 `.kl` files) and the kernel test suite under
-`../tests/` are vendored **byte-identical** from the ShenOSKernel 42.2 release —
+`../tests/` are vendored **byte-identical** from the ShenOSKernel 43.1 release —
 the kernel that upstream [shen-scheme 0.50](https://github.com/tizoc/shen-scheme/tree/v0.50)
 (2026-10-01) ships:
 
 - **Repository**: [`Shen-Language/shen-sources`](https://github.com/Shen-Language/shen-sources)
-  - Tag: `shen-42.2`
-  - Commit: `73507e069fe147aefb728d632c4ce40bc6a7b314`
-    ("Prepare Shen kernel 42.2 release", 2026-10-01)
-- **Release asset**: `ShenOSKernel-42.2.tar.gz`
-  - SHA-256: `1d02273003654d34ec020ae67cb214ecec410dee3350419ff807d82b652678d8`
-    (the checksum pinned in shen-scheme 0.50's Makefile)
+  - Tag: `shen-43.1`
+  - Commit: `715824a52b55e9c81a9501df8548ff3edd8411f1`
+- **Release asset**: `ShenOSKernel-43.1.tar.gz`
+  - SHA-256: `900eedef44f440af78f9395ed06e689ce1604546fc309f5bc7c8bc84cc651920`
   - `klambda/*.kl` and `tests/` verified against the extracted archive with
     `cmp` / `diff -r`.
-- `(version)` reports `"42.2"` (set by `shen.initialise-environment` in
+- `(version)` reports `"43.1"` (set by `shen.initialise-environment` in
   `init.kl`).
 
 Files:
