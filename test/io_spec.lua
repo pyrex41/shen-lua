@@ -92,6 +92,40 @@ end
 -- ---------------------------------------------------------------------------
 -- get-time: unix wall clock and run-time both return numbers.
 -- ---------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- Relative file names resolve against *home-directory*, which `cd` sets
+-- (issue #86): open, read-file, read-file-as-string/-bytelist and load. A
+-- file of the same name in the process cwd must not shadow the one in the
+-- home directory (the native fast paths used to try the cwd first).
+-- ---------------------------------------------------------------------------
+do
+  local dir = os.tmpname(); os.remove(dir)
+  os.execute("mkdir -p '" .. dir .. "'")
+  local base = dir:match("[^/]*$") .. "-io86.shen"
+  local function put(path, s) local f = io.open(path, "w"); f:write(s); f:close() end
+  put(dir .. "/" .. base, "(+ 1 2)")
+  put(base, "(cwd copy)")                         -- the shadow in the cwd
+  put(dir .. "/loadme.shen", "(define io86-loaded -> home)")
+  shen.eval(string.format('(cd "%s")', dir))
+  check(evs(string.format('(read-file "%s")', base)) == "((+ 1 2))",
+        "#86: read-file resolves against *home-directory*")
+  check(shen.eval(string.format('(read-file-as-string "%s")', base)) == "(+ 1 2)",
+        "#86: read-file-as-string resolves against *home-directory*")
+  check(evs(string.format('(length (read-file-as-bytelist "%s"))', base)) == "7",
+        "#86: read-file-as-bytelist resolves against *home-directory*")
+  check(evs(string.format('(let S (open "%s" in) (let B (read-byte S) (do (close S) B)))', base))
+        == "40", "#86: open resolves against *home-directory*")
+  shen.eval('(trap-error (load "loadme.shen") (/. E skip))')
+  check(evs("(io86-loaded)") == "home", "#86: load resolves against *home-directory*")
+  check(shen.eval(string.format('(read-file-as-string "%s/%s")', dir, base)) == "(+ 1 2)",
+        "#86: an absolute name is used as given after cd")
+  shen.eval('(cd "")')
+  check(shen.eval(string.format('(read-file-as-string "%s")', base)) == "(cwd copy)",
+        "#86: (cd \"\") resolves against the process cwd again")
+  os.remove(base)
+  os.remove(dir .. "/" .. base); os.remove(dir .. "/loadme.shen"); os.remove(dir)
+end
+
 check(type(shen.eval("(get-time run)")) == "number", "get-time run returns a number")
 check(type(shen.eval("(get-time unix)")) == "number", "get-time unix returns a number")
 

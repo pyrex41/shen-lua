@@ -39,6 +39,12 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ### Fixed
 
+- `open`, `read-file`, `read-file-as-string`, `read-file-as-bytelist` and
+  `load` resolve a relative file name against `*home-directory*`, which `cd`
+  sets, as shen-go and shen-scheme do; they used the process cwd. Absolute
+  names are used as given. The native fast paths no longer try the cwd first,
+  so a same-named file there cannot shadow the one `open` means
+  (pyrex41/shen-lua#86).
 - `<-address` past the end of an absvector raises instead of returning `nil`,
   so the kernel's vector printer stops at the end: `(vector 3)` prints
   `<... ... ...>` (it printed stray `funex…` entries).

@@ -675,10 +675,24 @@ defprim("shen.char-stinput?", 1, function(st) return is_stream(st) end)
 defprim("shen.write-string", 2, function(s, st) return F["write-string"](s, st) end)
 defprim("shen.read-unit-string", 1, function(st) return F["read-unit-string"](st) end)
 
+-- A file name as `open` sees it: relative to *home-directory*, which `cd`
+-- sets (sys.kl). Absolute names are used as given. Every native path that
+-- reads a user file (read-file, read-file-as-*, the fasl `load`) resolves
+-- through this too, so it opens the same file `open` would.
+local function home_path(name)
+  local home = GLOBALS["*home-directory*"]
+  if type(home) ~= "string" or home == "" or name:sub(1, 1) == "/" then
+    return name
+  end
+  return home .. name
+end
+P.home_path = home_path
+
 -- open (NAME DIRECTION) -> stream ; DIRECTION is symbol `in` or `out`
 defprim("open", 2, function(name, dir)
   if type(name)~="string" then ERR("open: filename not a string") end
   local d = is_symbol(dir) and dir.name or tostring(dir)
+  name = home_path(name)
   if d == "in" then
     local fh, e = io.open(name, "rb")
     if not fh then ERR("open: cannot open "..name.." ("..tostring(e)..")") end
@@ -1496,7 +1510,7 @@ function P.install_native_stdlib()
   local orig_read_file = F["read-file"]
   local function read_file(name)
     if type(name) ~= "string" then return orig_read_file(name) end
-    local fh = io.open(name, "rb")
+    local fh = io.open(home_path(name), "rb")
     if not fh then return orig_read_file(name) end   -- same open error
     local data = fh:read("*a") or ""
     fh:close()
@@ -1669,12 +1683,12 @@ function P.install_native_stdlib()
 
   -- read-file-as-bytelist / read-file-as-string: kernel is per-byte read-byte
   -- + reverse / cn (quadratic). Same path semantics as the `open` primitive
-  -- (filename as given; no *home-directory* prepend).
+  -- (relative to *home-directory*, see home_path).
   local orig_rfab = F["read-file-as-bytelist"]
   local orig_rfas = F["read-file-as-string"]
   local function read_file_as_bytelist(name)
     if type(name) ~= "string" then return orig_rfab(name) end
-    local fh = io.open(name, "rb")
+    local fh = io.open(home_path(name), "rb")
     if not fh then return orig_rfab(name) end
     local data = fh:read("*a") or ""
     fh:close()
@@ -1684,7 +1698,7 @@ function P.install_native_stdlib()
   end
   local function read_file_as_string(name)
     if type(name) ~= "string" then return orig_rfas(name) end
-    local fh = io.open(name, "rb")
+    local fh = io.open(home_path(name), "rb")
     if not fh then return orig_rfas(name) end
     local data = fh:read("*a") or ""
     fh:close()

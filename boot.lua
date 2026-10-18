@@ -1319,14 +1319,16 @@ local function install_fasl()
   local orig_load = F["load"]
   F["load"] = function(fname)
     if type(fname) ~= "string" then return orig_load(fname) end
-    local fh = io.open(fname, "rb")
+    -- the file the kernel's load would read: open resolves *home-directory*
+    local fpath = P.home_path(fname)
+    local fh = io.open(fpath, "rb")
     if not fh then return orig_load(fname) end   -- let the kernel error
     local content = fh:read("*a"); fh:close()
     -- Every file a recorded span loads is an input to that span's cache key;
     -- the boot image stores them so it can verify them all on the next boot.
     local outer = FASL_STACK[#FASL_STACK]
     if outer and outer.deps then
-      outer.deps[#outer.deps + 1] = { path = fname, content = content }
+      outer.deps[#outer.deps + 1] = { path = fpath, content = content }
     end
     local key = fasl_key(content)
     local path = dir .. "/" .. key .. ".fasl"
