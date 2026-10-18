@@ -10,9 +10,9 @@ interfaces are implemented by the native Lua stream layer.
 
 ## Files
 
-There are 24 official ShenOSKernel 43.1 `.kl` files.
+There are 23 official ShenOSKernel 43.1 `.kl` files.
 
-**Kernel (17):** compiler, core, declarations, dict, init, load, macros, prolog, reader,
+**Kernel (16):** core, declarations, dict, init, load, macros, prolog, reader,
 sequent, sys, t-star, toplevel, track, types, writer, yacc
 
 **Standard library (1):** stlib — precompiled from 43.1's `lib/stlib`, registered

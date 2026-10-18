@@ -2,7 +2,7 @@
 
 ## Current: ShenOSKernel 43.1 (community `shen-sources` line)
 
-All 24 `.kl` files and the kernel test suite under `../tests/` are vendored
+All 23 official `.kl` files and the kernel test suite under `../tests/` are vendored
 **byte-identical** from the ShenOSKernel 43.1 release.
 
 - **Repository**: [`Shen-Language/shen-sources`](https://github.com/Shen-Language/shen-sources)
@@ -10,7 +10,7 @@ All 24 `.kl` files and the kernel test suite under `../tests/` are vendored
   - Commit: `715824a52b55e9c81a9501df8548ff3edd8411f5`
 - **Release asset**: `ShenOSKernel-43.1.tar.gz`
   - SHA-256: `900eedef44f440af78f9395ed06e689ce1604546fc309f5bc7c8bc84cc651920`
-  - All 24 `.kl` files and `tests/` are verified against the extracted archive
+  - All 23 official `.kl` files and `tests/` are verified against the extracted archive
     with `cmp` / `diff -r`.
 - `(version)` reports `"43.1"` (set by `shen.initialise-environment` in
   `init.kl`).
