@@ -46,6 +46,7 @@ local specs = {
   "test/numeric_render_spec.lua",
   "test/primitives_spec.lua",
   "test/prolog_semantics_spec.lua",
+  "test/reader_native_spec.lua",
   "test/reader_spec.lua",
   "test/repl_spec.lua",
   "test/stdlib_spec.lua",
