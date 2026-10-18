@@ -39,6 +39,13 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ### Fixed
 
+- The kernel bytecode cache and its stdlib-signature sidecar default to
+  `${XDG_CACHE_HOME:-$HOME/.cache}/shen-lua/kernel-<build>.bin` (directory
+  created on first write; an unwritable location just skips caching). They
+  were written into the current directory, one ~1.8 MB copy per directory
+  shen ran from. `SHEN_KERNEL_CACHE` still overrides; old
+  `.shen-kernel-cache.*` files in project directories can be deleted
+  (pyrex41/shen-lua#87).
 - `open`, `read-file`, `read-file-as-string`, `read-file-as-bytelist` and
   `load` resolve a relative file name against `*home-directory*`, which `cd`
   sets, as shen-go and shen-scheme do; they used the process cwd. Absolute
