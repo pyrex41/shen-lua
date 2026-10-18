@@ -594,22 +594,19 @@ local function mk_in_stream(readfn, closefn, name)
 end
 P.mk_out_stream, P.mk_in_stream = mk_out_stream, mk_in_stream
 
--- shen.char-stoutput? : port-specific predicate referenced by `pr` to choose
+-- 43.1 public character-stream interfaces. `pr` uses char-stream? to choose
 -- between a fast (write-string) and a fallback (write-chars) path. write-chars
 -- writes (string->n (pos S I)) per character with write-byte, which cannot
 -- carry a code point above 0x7F (issue #80), so every output stream here is a
 -- CHARACTER stream for pr: shen.write-string writes the string's UTF-8 bytes
 -- as they are. write-byte stays a raw byte primitive.
-defprim("shen.char-stoutput?", 1, function(_st) return true end)
-defprim("shen.write-string", 2, function(s, st)
+defprim("char-stream?", 1, function(st) return is_stream(st) end)
+defprim("write-string", 2, function(s, st)
   if not is_stream(st) or st.kind~="out" then ERR("pr: not an output stream") end
   if type(s) ~= "string" then ERR("pr: not a string") end
   st.write(s)
   return s
 end)
--- shen.char-stinput? : input-side counterpart used by `read-byte` callers.
--- Our streams are byte streams: (read-byte S) returns raw bytes.
-defprim("shen.char-stinput?", 1, function(_st) return false end)
 
 -- write-byte (N STREAM) -> N : write a single byte to an output stream
 defprim("write-byte", 2, function(n, st)
@@ -663,13 +660,20 @@ end
 -- the native override (install_native_stdlib) reads one UTF-8 character with
 -- stream_char and returns its code point; read-byte on the same stream still
 -- sees raw bytes.
--- shen.read-unit-string: one character as a string ("" at EOF).
-defprim("shen.read-unit-string", 1, function(st)
+-- read-unit-string: one character as a string ("" at EOF).
+defprim("read-unit-string", 1, function(st)
   if not is_stream(st) or st.kind~="in" then ERR("read-unit-string: not an input stream") end
   local cp = stream_char(st)
   if cp == -1 then return "" end
   return u8enc(cp) or schar(cp)
 end)
+
+-- Keep the pre-43 hook names available to older user code. The 43.1 kernel
+-- itself uses only the public names above.
+defprim("shen.char-stoutput?", 1, function(st) return is_stream(st) end)
+defprim("shen.char-stinput?", 1, function(st) return is_stream(st) end)
+defprim("shen.write-string", 2, function(s, st) return F["write-string"](s, st) end)
+defprim("shen.read-unit-string", 1, function(st) return F["read-unit-string"](st) end)
 
 -- open (NAME DIRECTION) -> stream ; DIRECTION is symbol `in` or `out`
 defprim("open", 2, function(name, dir)

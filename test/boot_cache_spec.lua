@@ -111,9 +111,9 @@ do
   local kwarm = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d1))
   local kwarm2 = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d2))
 
-  -- 163 kernel + 3 features + 2 pattern-matching + 4 checked-integer + 290
-  -- stdlib (shen-scheme 0.50 reports 458: the same minus checked-integer)
-  check(ref:find("sigf 462 ", 1, true) ~= nil,
+  -- ShenOSKernel 43.1 plus extensions, checked-integer, and the 290 stdlib
+  -- signatures. The public stream APIs add three signatures over 42.2.
+  check(ref:find("sigf 465 ", 1, true) ~= nil,
         "#46: uncached boot registers kernel, extension, checked-integer and stdlib signatures")
   check(ref:find("typecheck 49", 1, true) ~= nil,
         "#46: uncached boot typechecks a user definition")

@@ -1,7 +1,7 @@
 # shen-lua
 
 [Shen](https://shenlanguage.org) on **LuaJIT 2.1**: pattern matching, optional
-sequent types, and Prolog, compiled to Lua. ShenOSKernel 42.2, **143/143**
+sequent types, and Prolog, compiled to Lua. ShenOSKernel 43.1, **154/154**
 official kernel tests. Embeds in any Lua host. Plain Lua 5.1/5.4/5.5 works too (slower,
 still correct).
 
@@ -147,7 +147,7 @@ More under [`examples/`](examples/README.md). A full tour:
 
 ```sh
 make test                      # port specs (test/*_spec.lua)
-luajit run-kernel-tests.lua    # official 42.2 suite → 143/143
+luajit run-kernel-tests.lua    # official 43.1 suite → 154/154
 ```
 
 The kernel suite is vendored in `tests/`. Port specs cover primitives, REPL,
@@ -160,7 +160,7 @@ luarocks install shen                       # launcher + modules
 luarocks make --local shen-scm-1.rockspec   # this tree
 ```
 
-LuaJIT required (`lua == 5.1`). This tree uses ShenOSKernel **42.2**; release
+LuaJIT required (`lua == 5.1`). This tree uses ShenOSKernel **43.1**; release
 **0.11.1** uses Tarver's S42 kernel; **0.9.0** was 41.1. Or grab `shen-bundle.lua` from
 [Releases](https://github.com/pyrex41/shen-lua/releases/latest) — one file,
 `require("shen-bundle")`.
