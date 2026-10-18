@@ -217,6 +217,68 @@ local function thawH(h)
 end
 M.thawH = thawH
 
+-- Stack segments (pyrex41/shen-lua#85). The engine is CPS on the Lua stack:
+-- a successful proof returns only once the whole query has succeeded, so its
+-- depth is the Lua stack depth. LuaJIT's stack is a fixed ~65500 slots per
+-- coroutine, which capped a typecheck at ~375 nested rule applications. But
+-- every coroutine has its own stack, so a deep proof continues in a fresh
+-- coroutine (a segment) and depth becomes bounded by memory instead.
+--
+-- The trigger counts the engine's own NON-tail continuation calls -- the
+-- thaws in unify, bind1 and cut, which must stay non-tail because they undo
+-- bindings / set the lock when the continuation fails. Every rule
+-- application on a proof path passes through at least one of them, and the
+-- generated predicate frames between two of them are bounded by the clause
+-- shapes. Tail-called thaws never count, so a loop that runs in constant
+-- stack never opens a segment.
+local SEG_FRAMES = 96        -- counted frames per segment: a typecheck
+                             -- overflowed one stack after ~750 of them
+local SEG_MAX = 1000         -- nested segments per query before giving up
+local seg_depth, seg_count = 0, 0
+local seg_total = 0          -- segments ever opened (M.segments, diagnostics)
+local co_create, co_resume, co_status, co_yield =
+  coroutine.create, coroutine.resume, coroutine.status, coroutine.yield
+local unpack = unpack or table.unpack
+
+-- Thaw `cont` on a fresh coroutine stack and return its value. Errors are
+-- rethrown unchanged (Shen exception objects included); a yield from inside
+-- (an embedding host's) is passed through to the enclosing coroutine.
+local function thaw_segment(cont)
+  if seg_count >= SEG_MAX then
+    ERRFN("Prolog depth limit exceeded (" .. SEG_MAX .. " stack segments)")
+  end
+  local saved = seg_depth
+  seg_count = seg_count + 1; seg_depth = 0
+  seg_total = seg_total + 1
+  local co = co_create(thawH)
+  local res = { co_resume(co, cont) }
+  while res[1] and co_status(co) ~= "dead" do
+    res = { co_resume(co, co_yield(unpack(res, 2))) }
+  end
+  seg_count = seg_count - 1; seg_depth = saved
+  if not res[1] then error(res[2], 0) end
+  return res[2]
+end
+
+-- thawH for a non-tail site: counts the frame, or opens a segment. The
+-- translated predicates call it (THAWN) wherever a thaw is not their return
+-- value. unify, bind1 and cut write the same lines out inline instead, so
+-- the counting costs them no extra frame:
+--   local d = seg_depth
+--   local r
+--   if d < SEG_FRAMES then seg_depth = d + 1; r = thawH(cont); seg_depth = d
+--   else r = thaw_segment(cont) end
+local function thawN(h)
+  local d = seg_depth
+  if d >= SEG_FRAMES then return thaw_segment(h) end
+  seg_depth = d + 1
+  local r
+  if type(h) == "number" then r = contFn[h](contBase[h], h) else r = h() end
+  seg_depth = d
+  return r
+end
+M.thawN = thawN
+
 local function ckroom(n)
   if cap_top + n > kcap then capbuf, kcap = grown(capbuf, kcap, cap_top + n) end
 end
@@ -463,7 +525,10 @@ local function unify_core(rootA, rootB, cont, oc)
   end
   if ok then
     trail_top = tn
-    local r = thawH(cont)
+    local d = seg_depth
+    local r
+    if d < SEG_FRAMES then seg_depth = d + 1; r = thawH(cont); seg_depth = d
+    else r = thaw_segment(cont) end
     if r == false then
       for i = tn - 1, tmark, -1 do vbind[trail[i]] = -1 end
       trail_top = tmark
@@ -487,7 +552,10 @@ function M.bind1(varv, val, cont)
   if trail_top >= tcap then trail, tcap = grown(trail, tcap, trail_top + 1) end
   trail[trail_top] = idx
   trail_top = trail_top + 1
-  local r = thawH(cont)
+  local d = seg_depth
+  local r
+  if d < SEG_FRAMES then seg_depth = d + 1; r = thawH(cont); seg_depth = d
+  else r = thaw_segment(cont) end
   if r == false then
     vbind[idx] = -1
     trail_top = trail_top - 1
@@ -503,7 +571,10 @@ function M.lock_is_open() return lock_open end
 
 -- shen.cut: thaw; on failure with an open lock, lock at depth n.
 function M.cut(n, cont)
-  local r = thawH(cont)
+  local d = seg_depth
+  local r
+  if d < SEG_FRAMES then seg_depth = d + 1; r = thawH(cont); seg_depth = d
+  else r = thaw_segment(cont) end
   if r == false and lock_open then
     lock_open = false
     lock_depth = n
@@ -667,7 +738,7 @@ function M.query_begin()
   local q = {
     cell_top, var_top, trail_top, cap_top, ch_top,
     lock_open, lock_depth, opq_top,
-    var_base, var_limit,
+    var_base, var_limit, seg_depth,
   }
   lock_open, lock_depth = true, 0
   -- Fresh bindings vector for this query, exactly as shen.call-prolog does:
@@ -699,6 +770,9 @@ function M.query_end(q)
   end
   opq_top = q[8]
   var_base, var_limit = q[9], q[10]
+  -- an error unwinds past the decrements in unify/bind1/cut; a nested query
+  -- shares its caller's stack, so it continues the caller's count
+  seg_depth = q[11]
   -- the import memo references cells that are no longer valid
   if next(import_memo) ~= nil then
     for k in pairs(import_memo) do import_memo[k] = nil end
@@ -708,6 +782,7 @@ end
 -- full reset (tests / benchmarks only)
 function M.reset_all()
   cell_top, var_top, trail_top, cap_top, ch_top = 0, 0, 0, 0, 0
+  seg_depth, seg_count = 0, 0
   lock_open, lock_depth = true, 0
   var_base, var_limit = 0, math.huge
   infs = 0
@@ -719,6 +794,15 @@ end
 -- expose tops read-only for tests/diagnostics
 function M.tops()
   return cell_top, var_top, trail_top, cap_top, ch_top
+end
+
+-- stack segments: ever opened, currently nested, counted frames in this one
+function M.segments() return seg_total, seg_count, seg_depth end
+-- set the segment size / nesting cap (tests); returns the previous values
+function M.segment_limits(frames, max)
+  local f0, m0 = SEG_FRAMES, SEG_MAX
+  SEG_FRAMES, SEG_MAX = frames or f0, max or m0
+  return f0, m0
 end
 
 -- ---------------------------------------------------------------------------

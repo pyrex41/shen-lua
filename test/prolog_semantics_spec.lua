@@ -166,6 +166,72 @@ check("var? failure backtracks into the next clause",
       q("(prolog? (is X 1) (tvarness X R) (return R))"), "bound")
 
 -- ---------------------------------------------------------------------------
+-- Proof depth (pyrex41/shen-lua#85). The native engine is CPS on the Lua
+-- stack, and LuaJIT's stack is a fixed ~65500 slots: a typecheck overflowed
+-- at ~375 nested peano rules (legacy engine ~1000; shen-go has no limit). A
+-- deep proof now continues on fresh coroutine stacks ("segments"). These
+-- check the depth, that backtracking and cut undo bindings across segment
+-- boundaries, and that errors cross them unchanged.
+-- ---------------------------------------------------------------------------
+do
+  local E = require("prolog_engine")
+  local seg0 = E.segments()
+  shen.eval([==[
+(datatype dpeano
+  ____________
+  z : dpeano;
+
+  N : dpeano;
+  ____________
+  [s N] : dpeano;)
+(define dmk N Acc -> (if (= N 0) Acc (dmk (- N 1) [cons s [cons Acc []]])))
+(define dlist N Acc -> (if (= N 0) Acc (dlist (- N 1) [cons N Acc])))
+(defprolog dchain
+  0 R <-- (is R bottom) (when false);
+  N R <-- (when (> N 0)) (is M (- N 1)) (dchain M R);
+  _ R <-- (is R top);)
+(defprolog dcut
+  0 <-- ! (when false);
+  0 <--;
+  N <-- (when (> N 0)) (is M (- N 1)) ! (dcut M);)
+(defprolog derr
+  0 <-- (when (= (/ 1 0) 0));
+  N <-- (when (> N 0)) (is M (- N 1)) (derr M);)]==])
+  check("#85: typecheck of a 1500-deep peano term",
+        R.to_str(shen.eval("(shen.typecheck (dmk 1500 z) dpeano)")), "dpeano")
+  check("#85: typecheck of a 3000-element (list number)",
+        R.to_str(shen.eval("(shen.typecheck (dlist 3000 []) [list number])")), "(list number)")
+  check("#85: the deep typechecks ran on more than one stack segment",
+        E.segments() > seg0, true)
+  local seg1 = E.segments()
+  check("#85: a shallow typecheck opens no segment",
+        R.to_str(shen.eval("(shen.typecheck (dmk 3 z) dpeano)")) == "dpeano"
+        and E.segments() == seg1, true)
+  -- the leaf binds R, fails, and every level's next clause is tried on the
+  -- way back up: R must be unbound again before (is R top)
+  check("#85: backtracking out of a 3000-deep failing branch undoes its bindings",
+        q("(prolog? (dchain 3000 R) (return R))"), "top")
+  check("#85: cut 3000 levels deep still prunes (no second clause for 0)",
+        q("(prolog? (dcut 3000))"), "failed")
+  local shallow = shen.eval("(trap-error (prolog? (derr 1)) (/. E (error-to-string E)))")
+  local deep = shen.eval("(trap-error (prolog? (derr 3000)) (/. E (error-to-string E)))")
+  check("#85: an error 3000 levels deep crosses segments unchanged",
+        type(deep) == "string" and deep == shallow, true)
+  check("#85: the engine is usable after an error inside a segment",
+        q("(prolog? (dchain 50 R) (return R))"), "top")
+  local _, nested = E.segments()
+  check("#85: no segment is left open", nested, 0)
+  -- past the cap: a trappable Shen error, not a crash
+  local f0, m0 = E.segment_limits(8, 2)
+  local capped = shen.eval("(trap-error (prolog? (dchain 3000 R) (return R)) (/. E (error-to-string E)))")
+  E.segment_limits(f0, m0)
+  check("#85: past the segment cap the query raises a Shen error",
+        type(capped) == "string" and capped:find("Prolog depth limit exceeded", 1, true) ~= nil, true)
+  check("#85: and the next query runs normally",
+        q("(prolog? (dchain 3000 R) (return R))"), "top")
+end
+
+-- ---------------------------------------------------------------------------
 -- D-3: per-query variable capacity
 --
 -- shen.*prolog-memory* is the size of the bindings vector the kernel's
