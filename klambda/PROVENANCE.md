@@ -2,18 +2,18 @@
 
 ## Current: ShenOSKernel 43.1 (community `shen-sources` line)
 
-The whole `klambda/` tree (23 `.kl` files) and the kernel test suite under
-`../tests/` are vendored **byte-identical** from the ShenOSKernel 43.1 release —
-the kernel that upstream [shen-scheme 0.50](https://github.com/tizoc/shen-scheme/tree/v0.50)
-(2026-10-01) ships:
+The 23 release `.kl` files and the kernel test suite under `../tests/` are
+vendored **byte-identical** from the ShenOSKernel 43.1 release. The checkout
+also carries `compiler.kl` as a separate port compiler artifact; it is not in
+the 23-file boot kernel set.
 
 - **Repository**: [`Shen-Language/shen-sources`](https://github.com/Shen-Language/shen-sources)
   - Tag: `shen-43.1`
-  - Commit: `715824a52b55e9c81a9501df8548ff3edd8411f1`
+  - Commit: `715824a52b55e9c81a9501df8548ff3edd8411f5`
 - **Release asset**: `ShenOSKernel-43.1.tar.gz`
   - SHA-256: `900eedef44f440af78f9395ed06e689ce1604546fc309f5bc7c8bc84cc651920`
-  - `klambda/*.kl` and `tests/` verified against the extracted archive with
-    `cmp` / `diff -r`.
+  - The 23 release `.kl` files and `tests/` are verified against the extracted
+    archive with `cmp` / `diff -r`; `compiler.kl` is retained separately.
 - `(version)` reports `"43.1"` (set by `shen.initialise-environment` in
   `init.kl`).
 
@@ -32,16 +32,15 @@ This is a **lineage switch**. Releases up to 0.11.x vendored Mark Tarver's
 **S42.0** kernel (`S42.zip` from shenlanguage.org, 2026-08-25, mirrored as
 `pyrex41/shen-upstream` tag `s42-pristine-20260825`, zip SHA-256
 `30abdc7e5a1e27b7a20109c1ed141e4712885e31f24d9710d16415fbbd4dfb23`) plus the
-community 42 extensions and the S-lineage `Lib/StLib` Shen sources. 42.1 and
-42.2 are releases of the **community** line only, which differs structurally,
+community 42 extensions and the S-lineage `Lib/StLib` Shen sources. 42.1,
+42.2, and 43.1 are releases of the **community** line only, which differs structurally,
 so per the cross-port decision (pyrex41/bifrost#26, pyrex41/yggdrasil#32) the
-42.2 kernel is adopted **wholesale** rather than porting its changes onto the
-S42.0 base. Every port that Bifrost and Yggdrasil drive therefore runs the
-same kernel as shen-scheme 0.50, byte for byte.
+43.1 kernel is adopted **wholesale** rather than porting its changes onto the
+S42.0 base.
 
 What that means structurally, relative to the S42.0 tree it replaces:
 
-- **`init.kl` and `shen.initialise` are back.** Every 42.2 file is pure
+- **`init.kl` and `shen.initialise` are back.** Every 43.1 release file is pure
   defuns; nothing initialises at load time. `boot.lua` loads all modules and
   then calls `(shen.initialise)` (environment, `*property-vector*`, arity
   table, lambda forms, kernel signatures), the extension initialisers, and
@@ -58,34 +57,33 @@ What that means structurally, relative to the S42.0 tree it replaces:
   unknown arity is met by the native `fn` fast path keying its cache on a
   generation counter that every `shen.lambda-form` write bumps.
 - **`stlib.kl` is back** as the standard library: the precompiled output of
-  42.2's `lib/stlib` sources (upstream `make-stlib.shen`). The S-lineage
+  43.1's `lib/stlib` sources (upstream `make-stlib.shen`). The S-lineage
   `lib/StLib` sources that 0.11.x loaded at boot were removed; see
   "Standard library" below.
-- **`backend.kl`** (S42's `cl.*` Common Lisp backend) is not part of 42.2 and
+- **`backend.kl`** (S42's `cl.*` Common Lisp backend) is not part of 43.1 and
   was removed.
-- **42.1 source-form handlers**: `shen.macroexpand-h` takes a 4th argument and
+- **Source-form handlers**: `shen.macroexpand-h` takes a 4th argument and
   `shen.try-parse` returns parsed forms that the read loop expands afterwards.
   shen-lua overrides none of `read`, `lineread`, `shen.read-loop`,
   `shen.try-parse`, `macroexpand` or `shen.macroexpand-h`, so the kernel's
   own order applies; `read`/`lineread` at EOF without a trailing newline
   behave like shen-scheme 0.50.
-- **42.2 namespaces**: `extension-namespaces.kl` is vendored from the release
-  as generated (it already carries the 42.2 `externals`/`with-externals`
+- **Namespaces**: `extension-namespaces.kl` is vendored from the release
+  as generated (it carries the 43.1 `externals`/`with-externals`
   change). It is not booted; a program loads the extension's Shen source
   (`extensions/namespaces.shen` in shen-sources) and calls
-  `(shen.x.namespaces.initialise)`, as the 42.2 extension tests do.
+  `(shen.x.namespaces.initialise)`, as the community extension tests do.
 
 ### Boot list
 
-`boot.lua` (`FILES`) boots the 16 kernel modules, `extension-features`,
+`boot.lua` (`FILES`) boots the 16 release kernel modules, `extension-features`,
 `extension-expand-dynamic`, `extension-launcher`,
-`extension-programmable-pattern-matching` and `stlib` — the same set
-shen-scheme 0.50 boots. After `(shen.initialise)` it calls
+`extension-programmable-pattern-matching` and `stlib`. After `(shen.initialise)` it calls
 `(shen.x.features.initialise …)` and
-`(shen.x.programmable-pattern-matching.initialise)` in that order (as
-shen-scheme does), registers the `lua.*` interop entries, then runs
-`(stlib.initialise)`. The resulting `shen.*sigf*` matches shen-scheme 0.50's
-458 signatures plus the four `lua.checked-*` signatures.
+`(shen.x.programmable-pattern-matching.initialise)` in that order, registers
+the `lua.*` interop entries, then runs `(stlib.initialise)`. The resulting
+`shen.*sigf*` contains 465 signatures in this port, including the four
+`lua.checked-*` signatures.
 
 ### Standard library
 

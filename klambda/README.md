@@ -10,10 +10,13 @@ interfaces are implemented by the native Lua stream layer.
 
 ## Files
 
-There are 23 `.kl` files.
+There are 24 `.kl` files: 23 release files plus the separate port compiler.
 
-**Kernel (17):** compiler, core, declarations, dict, init, load, macros, prolog, reader,
+**Kernel (16):** core, declarations, dict, init, load, macros, prolog, reader,
 sequent, sys, t-star, toplevel, track, types, writer, yacc
+
+**Port compiler (1):** compiler — used by the Lua host to compile user and
+kernel KLambda; it is separate from the release boot set.
 
 **Standard library (1):** stlib — precompiled from 43.1's `lib/stlib`, registered
 at boot by `(stlib.initialise)`.
