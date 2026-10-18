@@ -221,6 +221,30 @@ do
         q("(prolog? (dchain 50 R) (return R))"), "top")
   local _, nested = E.segments()
   check("#85: no segment is left open", nested, 0)
+  -- a host coroutine.yield from inside a segment reaches the host's
+  -- coroutine and the proof resumes where it left off
+  do
+    local P = shen.prims
+    P.F["dyield"] = function() return coroutine.yield("paused") == "go" end
+    P.FA[P.F["dyield"]] = 0
+    shen.eval([==[(defprolog dyc
+  0 R <-- (when (dyield)) (is R bottom);
+  N R <-- (when (> N 0)) (is M (- N 1)) (dyc M R);)]==])
+    local co = coroutine.create(function()
+      return shen.eval("(prolog? (dyc 3000 R) (return R))")
+    end)
+    local ok1, v1 = coroutine.resume(co)
+    local ok2, v2 = coroutine.resume(co, "go")
+    check("#85: a yield from 3000 levels deep reaches the host and resumes",
+          tostring(ok1) .. " " .. tostring(v1) .. " " .. tostring(ok2) .. " "
+          .. R.to_str(v2), "true paused true bottom")
+    -- with no host coroutine the yield is an error, and abandoning the
+    -- suspended segments must not leak the nesting count
+    local okn = pcall(shen.eval, "(prolog? (dyc 3000 R) (return R))")
+    local _, nested2 = E.segments()
+    check("#85: a yield with no host coroutine raises and leaves no segment open",
+          tostring(okn) .. " " .. nested2, "false 0")
+  end
   -- past the cap: a trappable Shen error, not a crash
   local f0, m0 = E.segment_limits(8, 2)
   local capped = shen.eval("(trap-error (prolog? (dchain 3000 R) (return R)) (/. E (error-to-string E)))")

@@ -239,6 +239,7 @@ local seg_total = 0          -- segments ever opened (M.segments, diagnostics)
 local co_create, co_resume, co_status, co_yield =
   coroutine.create, coroutine.resume, coroutine.status, coroutine.yield
 local unpack = unpack or table.unpack
+local function pack(...) return { n = select("#", ...), ... } end
 
 -- Thaw `cont` on a fresh coroutine stack and return its value. Errors are
 -- rethrown unchanged (Shen exception objects included); a yield from inside
@@ -247,15 +248,18 @@ local function thaw_segment(cont)
   if seg_count >= SEG_MAX then
     ERRFN("Prolog depth limit exceeded (" .. SEG_MAX .. " stack segments)")
   end
-  local saved = seg_depth
+  local saved, saved_count = seg_depth, seg_count
   seg_count = seg_count + 1; seg_depth = 0
   seg_total = seg_total + 1
   local co = co_create(thawH)
-  local res = { co_resume(co, cont) }
+  local res = pack(co_resume(co, cont))
   while res[1] and co_status(co) ~= "dead" do
-    res = { co_resume(co, co_yield(unpack(res, 2))) }
+    local up = pack(pcall(co_yield, unpack(res, 2, res.n)))
+    if not up[1] then res = up; break end   -- no coroutine to yield to
+    res = pack(co_resume(co, unpack(up, 2, up.n)))
   end
-  seg_count = seg_count - 1; seg_depth = saved
+  -- assign, not decrement: segments abandoned while suspended never return
+  seg_count, seg_depth = saved_count, saved
   if not res[1] then error(res[2], 0) end
   return res[2]
 end
@@ -738,7 +742,7 @@ function M.query_begin()
   local q = {
     cell_top, var_top, trail_top, cap_top, ch_top,
     lock_open, lock_depth, opq_top,
-    var_base, var_limit, seg_depth,
+    var_base, var_limit, seg_depth, seg_count,
   }
   lock_open, lock_depth = true, 0
   -- Fresh bindings vector for this query, exactly as shen.call-prolog does:
@@ -772,7 +776,7 @@ function M.query_end(q)
   var_base, var_limit = q[9], q[10]
   -- an error unwinds past the decrements in unify/bind1/cut; a nested query
   -- shares its caller's stack, so it continues the caller's count
-  seg_depth = q[11]
+  seg_depth, seg_count = q[11], q[12]
   -- the import memo references cells that are no longer valid
   if next(import_memo) ~= nil then
     for k in pairs(import_memo) do import_memo[k] = nil end
