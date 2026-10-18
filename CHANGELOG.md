@@ -39,6 +39,13 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ### Fixed
 
+- Generated Lua no longer exceeds LuaJIT's 200-locals limit for a datatype
+  rule whose conclusion pattern nests 16 or more levels deep, or for a
+  `define` that returns a list literal of 200 or more elements; both failed
+  to load with `function at line 1 has more than 200 local variables`. The
+  fix is the let-splitting and wide-mode compilation from #78 (sequent rules
+  with up to 194 premises); `test/wide_compile_spec.lua` now pins the two
+  shapes from the issue (pyrex41/shen-lua#84).
 - `<-address` past the end of an absvector raises instead of returning `nil`,
   so the kernel's vector printer stops at the end: `(vector 3)` prints
   `<... ... ...>` (it printed stray `funex…` entries).

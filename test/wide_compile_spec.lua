@@ -163,5 +163,40 @@ do
         "curried chain: a shallow chain keeps nested closures")
 end
 
+-- 5) the two shapes from pyrex41/shen-lua#84, through the full Shen front end:
+--    a datatype rule whose conclusion pattern nests 16+ deep (one let per
+--    sub-term in <name>#type), and a define returning a 200+-element list
+--    literal (one flattened call-chain local per element). Both exceeded
+--    200 locals; both engines must load the datatype.
+do
+  local function nest(n)
+    local p = "X"
+    for _ = 1, n do p = "[t " .. p .. "]" end
+    return p
+  end
+  for _, n in ipairs({ 16, 30, 60 }) do
+    local ok, err = pcall(shen.eval, "(datatype wc-nest" .. n
+      .. "\n ____\n " .. nest(n) .. " : wc-k" .. n .. ";)")
+    check(ok, "#84: datatype with a " .. n .. "-deep conclusion pattern loads "
+          .. (ok and "" or tostring(R.to_str(err))))
+    if ok then
+      -- shen.typecheck takes the expression as a value: build its cons form
+      local term = "a"
+      for _ = 1, n do term = "[cons t [cons " .. term .. " []]]" end
+      eq(R.to_str(shen.eval("(shen.typecheck " .. term .. " wc-k" .. n .. ")")),
+         "wc-k" .. n, "#84: and typechecks a " .. n .. "-deep term")
+    end
+  end
+  for _, n in ipairs({ 200, 250, 1000 }) do
+    local ok, err = pcall(shen.eval, "(define wc-big" .. n .. " -> [" .. nums(1, n) .. "])")
+    check(ok, "#84: define returning a " .. n .. "-element list literal loads "
+          .. (ok and "" or tostring(R.to_str(err))))
+    if ok then
+      eq(R.to_str(shen.eval("(length (wc-big" .. n .. "))")), tostring(n),
+         "#84: and returns all " .. n .. " elements")
+    end
+  end
+end
+
 print(string.format("wide_compile_spec: %d pass, %d fail", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)
