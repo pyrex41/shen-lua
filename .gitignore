@@ -1,4 +1,5 @@
 .claude/
+_build/
 .shen-kernel-cache*.bin
 .shen-kernel-cache*.bin.tmp
 .shen-kernel-cache*.bin.stlib
