@@ -39,6 +39,17 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ### Fixed
 
+- The native Prolog engine no longer overflows the Lua stack on deep
+  proofs: a typecheck died with `stack overflow` at ~375 nested rule
+  applications (`(shen.typecheck (mk 400) peano)`, an 800-element
+  `[list number]`), well short of the legacy engine's ~1000. The engine runs
+  in continuation-passing style on the Lua stack, and LuaJIT's stack is a
+  fixed ~65500 slots per coroutine, so a deep proof now continues on a fresh
+  coroutine stack every 96 counted non-tail continuation calls. Depth is
+  bounded by memory; past 1000 nested segments a query raises the trappable
+  `Prolog depth limit exceeded`. Typechecks of 1000-20000-deep terms now stop
+  at the kernel's own recursive preprocessing (`shen.curry`, ~2000 nested
+  `[s N]` levels or ~4600 list elements) instead (pyrex41/shen-lua#85).
 - The kernel bytecode cache and its stdlib-signature sidecar default to
   `${XDG_CACHE_HOME:-$HOME/.cache}/shen-lua/kernel-<build>.bin` (directory
   created on first write; an unwritable location just skips caching). They
