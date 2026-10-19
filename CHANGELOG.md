@@ -39,6 +39,11 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ### Fixed
 
+- A warm fasl hit no longer runs a nested `load` twice. When a loaded file
+  loaded another file, from a top-level `(load ...)` form or from a function
+  that loads, the nested file's output printed twice on every cached run.
+  The fasl format is now `SHENFASL7`, so caches written by older builds are
+  recompiled once rather than replayed (pyrex41/shen-lua#92).
 - The reader reads list literals of any length: `shen.<s-exprs>` recursed
   once per token, so past ~1550 elements LuaJIT's fixed stack overflowed and
   `read-file` reported it as `reader error near here:` with no context. The

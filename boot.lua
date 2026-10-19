@@ -800,7 +800,9 @@ end
 -- Known: (destroy ...) at the REPL between loads is not in the key.
 -- SHEN_FASL=off disables; SHEN_FASL_DIR overrides ~/.cache/shen-lua-fasl;
 -- SHEN_FASL_DEBUG=1 logs hits/misses to stderr.
-local FASL_FORMAT = "SHENFASL6"  -- 6: "dv" (shen.*datatypes* by name) replaces
+local FASL_FORMAT = "SHENFASL7"  -- 7: a nested load run inside a chunk is no
+                                 -- longer spliced into the outer fasl (#92);
+                                 -- 6: "dv" (shen.*datatypes* by name) replaces
                                  -- "dt" (re-run shen.process-datatype);
                                  -- 5: "lt" (shen.*lambdatable* delta by name);
                                  -- 4: "e" (per-form value/type echo)
@@ -1320,17 +1322,24 @@ local function install_fasl()
   -- on a miss — so the outer stream stays a complete description of everything
   -- the outer span did, in order. An inner recording that could not be
   -- serialized poisons the outer one for the same reason.
+  --
+  -- Only a load made OUTSIDE the outer span's chunks has a hole to fill (one
+  -- run at macroexpansion time, say). A load made while one of the outer
+  -- chunks executes — a top-level (load ...) form, or a function that loads —
+  -- is already in the outer stream as that chunk, and replaying the chunk
+  -- runs the load again; splicing it as well replays it twice (issue #92).
   local function splice_into_outer(recs, uncacheable, deps)
     local outer = FASL_STACK[#FASL_STACK]
     if not outer then return end
+    if outer.deps and deps then
+      for _, d in ipairs(deps) do outer.deps[#outer.deps + 1] = d end
+    end
+    if outer.in_chunk then return end
     for _, r in ipairs(recs) do
       outer.n = outer.n + 1
       outer[outer.n] = r
     end
     if uncacheable then outer.uncacheable = outer.uncacheable or uncacheable end
-    if outer.deps and deps then
-      for _, d in ipairs(deps) do outer.deps[#outer.deps + 1] = d end
-    end
   end
 
   local orig_load = F["load"]
