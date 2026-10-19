@@ -43,6 +43,33 @@ local C = require("compiler")
 local unpack = table.unpack or unpack
 local loadstring = loadstring or load
 
+-- A value in return position: `THAWN(x)` (a counted, non-tail thaw) as the
+-- whole expression becomes `THAW(x)`, a proper tail call that neither grows
+-- the stack nor counts toward a segment (prolog_engine.lua, #85).
+local function tail_return(val)
+  if val:sub(1, 6) ~= "THAWN(" then return val end
+  local depth, i, n = 0, 6, #val
+  while i <= n do
+    local c = val:sub(i, i)
+    if c == '"' then
+      i = i + 1
+      while i <= n and val:sub(i, i) ~= '"' do
+        if val:sub(i, i) == "\\" then i = i + 1 end
+        i = i + 1
+      end
+    elseif c == "(" then depth = depth + 1
+    elseif c == ")" then
+      depth = depth - 1
+      if depth == 0 then
+        if i == n then return "THAW(" .. val:sub(7) end
+        return val
+      end
+    end
+    i = i + 1
+  end
+  return val
+end
+
 local M = {}
 
 local E, P, F            -- bound in install()
@@ -540,7 +567,9 @@ compile_value = function(ctx, e, env, out, d)
         return ctx:callstatic(b, {}, env, out, d)
       end
     end
-    return "THAW(" .. compile_value(ctx, x, env, out, d) .. ")"
+    -- THAWN counts the frame toward the engine's stack segments (#85);
+    -- tail_return turns it back into a plain THAW in return position
+    return "THAWN(" .. compile_value(ctx, x, env, out, d) .. ")"
   end
 
   -- (shen.gc B E): LIFO-pop the var allocated by the paired shen.newpv when
@@ -645,7 +674,7 @@ compile_value = function(ctx, e, env, out, d)
         local k = compile_cont(ctx, a[an], env, out, d)
         local r = newlocal(ctx)
         out[#out + 1] = indent(d) .. "local " .. r .. " = false"
-        out[#out + 1] = indent(d) .. "if " .. tl .. " then " .. r .. " = THAW(" .. k .. ") end"
+        out[#out + 1] = indent(d) .. "if " .. tl .. " then " .. r .. " = THAWN(" .. k .. ") end"
         return r
       elseif nm == "is" or nm == "is!" or nm == "bind" then
         local x = compile_term(ctx, a[1], env, out, d)
@@ -824,7 +853,7 @@ function CtxMT.lift_static(ctx, name, params, body, env, fvs, implicit)
   ctx.fnloc = saved_loc
   local def = { fname .. " = function(" .. table.concat(sig, ", ") .. ")" }
   for _, l in ipairs(fbuf) do def[#def + 1] = l end
-  def[#def + 1] = "  return " .. fval
+  def[#def + 1] = "  return " .. tail_return(fval)
   def[#def + 1] = "end"
   ctx.buf[#ctx.buf + 1] = table.concat(def, "\n")
   return st
@@ -901,7 +930,7 @@ function CtxMT.lift_cont(ctx, body, env, out, d)
   local def = { fname .. " = function(base, h)" }
   for _, l in ipairs(decls) do def[#def + 1] = "  " .. l end
   for _, l in ipairs(fbuf) do def[#def + 1] = l end
-  def[#def + 1] = "  return " .. fval
+  def[#def + 1] = "  return " .. tail_return(fval)
   def[#def + 1] = "end"
   ctx.buf[#ctx.buf + 1] = table.concat(def, "\n")
 
@@ -948,7 +977,7 @@ local CONS, CAR, CDR, LZD = E.cons, E.car, E.cdr, E.lazyderef
 local NEWVAR, POPVAR = E.newvar, E.popvar
 local UNIFY, UNIFYOC, BIND1 = E.unify, E.unify_oc, E.bind1
 local CUT, UNLOCK, LOCKOPEN = E.cut, E.unlock, E.lock_is_open
-local INCINFS, THAW, CAPREF = E.incinfs, E.thawH, E.capref
+local INCINFS, THAW, THAWN, CAPREF = E.incinfs, E.thawH, E.thawN, E.capref
 local GVAR, GCALL, GFINDALL = E.g_var, E.g_call, E.g_findall
 local NEWCONT0, NEWCONT1, NEWCONT2, NEWCONT3, NEWCONT4 =
   E.newcont0, E.newcont1, E.newcont2, E.newcont3, E.newcont4
@@ -1017,7 +1046,7 @@ local function translate_once(name, allparams, body, mode)
   for _, def in ipairs(ctx.buf) do src[#src + 1] = def end
   src[#src + 1] = "return function(" .. table.concat(sig, ", ") .. ")"
   for _, l in ipairs(mainbuf) do src[#src + 1] = l end
-  src[#src + 1] = "  return " .. val
+  src[#src + 1] = "  return " .. tail_return(val)
   src[#src + 1] = "end"
   local source = table.concat(src, "\n")
 
