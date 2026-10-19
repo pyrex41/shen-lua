@@ -234,14 +234,38 @@ end
 -- invalidate + rewrite each other's cache, recompiling the kernel every time.
 -- The filename suffix is a hash of the same version/arch fingerprint that
 -- cache_key() folds into the content key.
+--
+-- The default lives in the per-user cache directory,
+-- ${XDG_CACHE_HOME:-$HOME/.cache}/shen-lua/ (issue #87: it used to be a
+-- relative path, so every directory shen ran from got its own ~1.8 MB copy
+-- and recompiled the kernel). With neither variable set there is no default
+-- and the kernel is compiled on every boot, as with SHEN_KERNEL_CACHE=off.
 local function cache_path()
   if not bit then return nil end   -- PUC Lua: no `bit` -> no cache keys
   local p = os.getenv("SHEN_KERNEL_CACHE")
   if p == "off" or p == "0" then return nil end
   if p and p ~= "" then return p end
-  return ".shen-kernel-cache."
+  local dir = os.getenv("XDG_CACHE_HOME")
+  if not dir or dir == "" then
+    local home = os.getenv("HOME")
+    if not home or home == "" then return nil end
+    dir = home .. "/.cache"
+  end
+  return dir .. "/shen-lua/kernel-"
       .. bit.tohex(fnv1a(jit and (jit.version .. jit.arch) or _VERSION))
       .. ".bin"
+end
+
+-- io.open(path, "wb"), creating path's directory on the first write. Returns
+-- nil when it still cannot be opened (read-only location): callers then skip
+-- caching.
+local function open_for_write(path)
+  local fh = io.open(path, "wb")
+  if fh then return fh end
+  local dir = path:match("^(.*)/[^/]*$")
+  if not dir or dir == "" then return nil end
+  os.execute("mkdir -p '" .. dir:gsub("'", "'\\''") .. "' 2>/dev/null")
+  return io.open(path, "wb")
 end
 
 local function read_file(path)
@@ -349,18 +373,11 @@ local function write_cache(path, key, chunks, arity, counters)
   end
   parts[#parts+1] = tostring(counters.gensym) .. "\n" .. tostring(counters.infs) .. "\n"
   local tmp = path .. ".tmp"
-  local fh = io.open(tmp, "wb")
+  local fh = open_for_write(tmp)
   if not fh then return end  -- read-only dir: silently skip caching
   fh:write(table.concat(parts)); fh:close()
   os.remove(path)
   os.rename(tmp, path)
-  -- Writing a per-build default cache obsoletes the old shared-path file from
-  -- pre-per-build versions (it would sit stale forever otherwise). Only the
-  -- default path triggers this — an explicit SHEN_KERNEL_CACHE never does.
-  if path:match("^%.shen%-kernel%-cache%.%x+%.bin$") then
-    os.remove(".shen-kernel-cache.bin")
-    os.remove(".shen-kernel-cache.bin.tmp")
-  end
 end
 
 -- Parse a write_cache blob. key == nil skips the key check (used for the
@@ -1319,14 +1336,16 @@ local function install_fasl()
   local orig_load = F["load"]
   F["load"] = function(fname)
     if type(fname) ~= "string" then return orig_load(fname) end
-    local fh = io.open(fname, "rb")
+    -- the file the kernel's load would read: open resolves *home-directory*
+    local fpath = P.home_path(fname)
+    local fh = io.open(fpath, "rb")
     if not fh then return orig_load(fname) end   -- let the kernel error
     local content = fh:read("*a"); fh:close()
     -- Every file a recorded span loads is an input to that span's cache key;
     -- the boot image stores them so it can verify them all on the next boot.
     local outer = FASL_STACK[#FASL_STACK]
     if outer and outer.deps then
-      outer.deps[#outer.deps + 1] = { path = fname, content = content }
+      outer.deps[#outer.deps + 1] = { path = fpath, content = content }
     end
     local key = fasl_key(content)
     local path = dir .. "/" .. key .. ".fasl"
@@ -1413,7 +1432,7 @@ local function write_sigs(path, key, decl, counters)
   end
   parts[#parts+1] = tostring(counters.gensym) .. "\n" .. tostring(counters.infs) .. "\n"
   local tmp = path .. ".tmp"
-  local fh = io.open(tmp, "wb")
+  local fh = open_for_write(tmp)
   if not fh then return end
   fh:write(table.concat(parts)); fh:close()
   os.remove(path)
