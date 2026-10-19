@@ -117,8 +117,8 @@ do
         == "40", "#86: open resolves against *home-directory*")
   shen.eval('(trap-error (load "loadme.shen") (/. E skip))')
   check(evs("(io86-loaded)") == "home", "#86: load resolves against *home-directory*")
-  check(shen.eval(string.format('(read-file-as-string "%s/%s")', dir, base)) == "(+ 1 2)",
-        "#86: an absolute name is used as given after cd")
+  check(shen.eval(string.format('(trap-error (read-file-as-string "%s/%s") (/. E "joined"))', dir, base)) == "joined",
+        "#86: *home-directory* is prepended to an absolute name too, as in shen-scheme")
   shen.eval('(cd "")')
   check(shen.eval(string.format('(read-file-as-string "%s")', base)) == "(cwd copy)",
         "#86: (cd \"\") resolves against the process cwd again")

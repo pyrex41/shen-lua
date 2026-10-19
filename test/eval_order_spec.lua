@@ -168,6 +168,51 @@ do
 end
 
 -- ---------------------------------------------------------------------------
+-- long let chains: past a local budget the rest of the chain continues in a
+-- separate KC function (Lua caps a function at 200 locals). Order, value and
+-- tail calls must be unaffected. Each binding feeds the next, as in the
+-- kernel's pattern-matching code, so few are live across a split point.
+-- ---------------------------------------------------------------------------
+do
+  -- past Lua's 200-local cap; kept shallow otherwise, since the Shen reader
+  -- recurses several frames per nesting level
+  local n = 210
+  -- L1 = Z + log(1), Li = L(i-1) + log(i); every binding is a local
+  local function chain(step, final)
+    local src = final
+    for i = n, 2, -1 do
+      src = "(let L" .. i .. " (+ L" .. (i - 1) .. " " .. step(i) .. ") " .. src .. ")"
+    end
+    return "(let L1 (+ Z " .. step(1) .. ") " .. src .. ")"
+  end
+  local logged = function(i) return "(eo-log " .. i .. ")" end
+  local Ln = "L" .. n
+  local total = n * (n + 1) / 2
+
+  local kl = R.read_all("(defun eo-lets-kl (Z) " .. chain(logged, Ln) .. ")")[1]
+  check((loadstring or load)(C.cdefun(kl)) ~= nil, "210-let KL defun compiles to loadable Lua")
+
+  shen.eval("(define eo-lets Z -> " .. chain(logged, Ln) .. ")")
+  eq(trace("(eo-lets 0)"), upto(n), "210-let chain evaluates in source order")
+  eq(shen.eval("(eo-lets 0)"), total, "210-let chain value")
+  -- a binding from before the split, read after it
+  shen.eval("(define eo-lets-early Z -> " .. chain(logged, "(+ L1 " .. Ln .. ")") .. ")")
+  eq(shen.eval("(eo-lets-early 5)"), 5 + 1 + 5 + total, "binding from before a let split is visible after it")
+
+  -- the same chain in value position (hoisted as a control form first)
+  shen.eval("(define eo-lets-val Z -> (+ 1 " .. chain(logged, Ln) .. "))")
+  eq(shen.eval("(eo-lets-val 0)"), total + 1, "210-let chain in value position")
+
+  -- a self-tail call that ends up in the split-off part stays a tail call
+  local plain = function(i) return tostring(i) end
+  shen.eval("(define eo-lets-rec 0 Acc -> Acc N Acc -> "
+            .. chain(plain, "(eo-lets-rec (- N 1) (+ Acc " .. Ln .. "))")
+            :gsub("%(%+ Z ", "(+ 0 ") .. ")")
+  eq(shen.eval("(eo-lets-rec 20000 0)"), 20000 * total,
+     "self tail call past a let split does not grow the stack")
+end
+
+-- ---------------------------------------------------------------------------
 -- collateral: constructs whose order must NOT have changed.
 -- ---------------------------------------------------------------------------
 do

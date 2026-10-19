@@ -675,13 +675,14 @@ defprim("shen.char-stinput?", 1, function(st) return is_stream(st) end)
 defprim("shen.write-string", 2, function(s, st) return F["write-string"](s, st) end)
 defprim("shen.read-unit-string", 1, function(st) return F["read-unit-string"](st) end)
 
--- A file name as `open` sees it: relative to *home-directory*, which `cd`
--- sets (sys.kl). Absolute names are used as given. Every native path that
+-- A file name as `open` sees it: *home-directory*, which `cd` sets (sys.kl),
+-- prepended as a plain string, as shen-scheme and shen-go do, so an absolute
+-- name after a non-empty cd is joined too. Every native path that
 -- reads a user file (read-file, read-file-as-*, the fasl `load`) resolves
 -- through this too, so it opens the same file `open` would.
 local function home_path(name)
   local home = GLOBALS["*home-directory*"]
-  if type(home) ~= "string" or home == "" or name:sub(1, 1) == "/" then
+  if type(home) ~= "string" or home == "" then
     return name
   end
   return home .. name
@@ -1400,6 +1401,172 @@ function P.install_native_stdlib()
     return comb_skip(rest)
   end
 
+  -- shen.<s-exprs> (reader.kl): the reader's token-sequence rule.
+  --
+  -- Like the comment scanners above, the KL recurses once per TOKEN without
+  -- a tail call (every alternative but <e> is `<token> <s-exprs>`), so a list
+  -- literal past ~1550 elements overflowed the Lua stack and read-file's
+  -- trap-error reported it as "reader error near here:" (issue #88). This
+  -- version keeps the grammar's ordered choice but walks the input in a loop
+  -- with an explicit stack of open brackets. The single-token rules (<atom>,
+  -- <lsb>, <comment>, ...) are still the kernel's, called through F, so
+  -- token syntax is untouched. Grammar, in the KL's order:
+  --
+  --   <s-exprs> ::= <lsb> <s-exprs1> <rsb> <s-exprs2>  -> [cons-form(S1) | S2]
+  --               | <lrb> <s-exprs1> <rrb> <s-exprs2>  -> add-sexpr(S1, S2)
+  --               | <lcurly> <s-exprs> | <rcurly> <s-exprs> | <bar> <s-exprs>
+  --               | <semicolon> <s-exprs> | <colon> <equal> <s-exprs>
+  --               | <colon> <s-exprs> | <comma> <s-exprs>   -> [Token | S]
+  --               | <comment> <s-exprs> | <whitespaces> <s-exprs> -> S
+  --               | <atom> <s-exprs>                        -> [Atom | S]
+  --               | <e>                                     -> []
+  --
+  -- <s-exprs1>/<s-exprs2> are <s-exprs>, and <s-exprs> never fails (<e>), so
+  -- once a token matches, its alternative succeeds -- except a bracket whose
+  -- closer is missing. Then, as in the KL, the inner sequence has already
+  -- been built and the remaining alternatives are tried at the bracket.
+  -- Values are built in the KL's order: a sequence is folded right to left
+  -- when it ends, so cons-form/add-sexpr (cons-form can raise "misapplication
+  -- of |") run in the same order the KL's nested lets run them.
+  local SX_LSB, SX_LRB = 1, 2   -- alternative numbers of the bracket rules
+  local sx_tokens = {           -- alternatives 3.., after the bracket rules
+    { "shen.<lcurly>", intern("{") },
+    { "shen.<rcurly>", intern("}") },
+    { "shen.<bar>", intern("bar!") },
+    { "shen.<semicolon>", intern(";") },
+    { "shen.<colon>", intern(":="), "shen.<equal>" },
+    { "shen.<colon>", intern(":") },
+    { "shen.<comma>", intern(",") },
+    { "shen.<comment>" },
+    { "shen.<atom>", true },
+    { "shen.<whitespaces>" },
+  }
+  -- try the alternatives from number `from` on at v: returns the kind
+  -- ("open", "item", "skip", or nil for <e>), the rest, and the value
+  local function sx_step(v, from)
+    if from <= SX_LSB then
+      local r = F["shen.<lsb>"](v)
+      if r ~= fail_sym then return "open", r[1], SX_LSB end
+    end
+    if from <= SX_LRB then
+      local r = F["shen.<lrb>"](v)
+      if r ~= fail_sym then return "open", r[1], SX_LRB end
+    end
+    for i = math.max(from - SX_LRB, 1), #sx_tokens do
+      local t = sx_tokens[i]
+      local r = F[t[1]](v)
+      if r ~= fail_sym and t[3] then r = F[t[3]](r[1]) end
+      if r ~= fail_sym then
+        if t[2] == true then return "item", r[1], r[2][1] end
+        if t[2] then return "item", r[1], t[2] end
+        return "skip", r[1]
+      end
+    end
+    return nil
+  end
+  local function s_exprs(v)
+    -- frame: the items of one sequence; frame.alt/frame.pos record the
+    -- bracket in the PARENT sequence that opened it
+    local frame = { n = 0 }
+    local stack, sp = {}, 0
+    local from = 1
+    while true do
+      local kind, rest, val = sx_step(v, from)
+      from = 1
+      if kind == "open" then
+        sp = sp + 1; stack[sp] = frame
+        frame = { n = 0, alt = val, pos = v }
+        v = rest
+      elseif kind == "item" then
+        frame.n = frame.n + 1; frame[frame.n] = { val }
+        v = rest
+      elseif kind == "skip" then
+        v = rest
+      else
+        -- <e>: this sequence ends at v; fold it right to left
+        local acc = NIL
+        for i = frame.n, 1, -1 do
+          local it = frame[i]
+          if it.alt == SX_LSB then acc = cons(F["shen.cons-form"](it.inner), acc)
+          elseif it.alt == SX_LRB then acc = F["shen.add-sexpr"](it.inner, acc)
+          else acc = cons(it[1], acc) end
+        end
+        if sp == 0 then return cons(v, cons(acc, NIL)) end
+        local closed = frame
+        frame = stack[sp]; stack[sp] = nil; sp = sp - 1
+        local r = F[closed.alt == SX_LSB and "shen.<rsb>" or "shen.<rrb>"](v)
+        if r ~= fail_sym then
+          frame.n = frame.n + 1
+          frame[frame.n] = { alt = closed.alt, inner = acc }
+          v = r[1]
+        else
+          -- no closer: the bracket alternative fails; try the next ones there
+          v = closed.pos
+          from = closed.alt + 1
+        end
+      end
+    end
+  end
+
+  -- shen.<strcontents> / shen.<alphanums> (reader.kl): `<one> <self> | <e>`,
+  -- joined with cn, so a string literal (or symbol) recursed once per
+  -- character: a ~7 KB string such as (read-from-string "[1 2 ... 1600]")
+  -- overflowed. Strings concatenate associatively, so one table.concat of
+  -- the pieces is the KL's right-nested cn.
+  local function cn_star(one)
+    return function(v)
+      local parts, n = {}, 0
+      while true do
+        local r = F[one](v)
+        if r == fail_sym then break end
+        n = n + 1; parts[n] = r[2][1]; v = r[1]
+      end
+      return cons(v, cons(table.concat(parts, "", 1, n), NIL))
+    end
+  end
+  local strcontents = cn_star("shen.<strc>")
+  local alphanums = cn_star("shen.<alphanum>")
+  -- shen.<whitespaces>: <whitespace> <whitespaces> | <whitespace>
+  local function whitespaces(v)
+    local r = F["shen.<whitespace>"](v)
+    if r == fail_sym then return fail_sym end
+    repeat
+      v = r[1]
+      r = F["shen.<whitespace>"](v)
+    until r == fail_sym
+    return comb_skip(v)
+  end
+
+  -- shen.cons-form (reader.kl): [a b c] -> (cons a (cons b (cons c ()))),
+  -- [a | b] -> (cons a b). The KL recurses once per element; this builds
+  -- the same spine front to back. Anything the loop does not recognise is
+  -- handed to the kernel's version, which raises its own error.
+  local orig_cons_form = F["shen.cons-form"]
+  local cons_sym, bar_sym = intern("cons"), intern("bar!")
+  local function cons_form(x)
+    local head, hole = nil, nil   -- hole: the cell whose head is still open
+    while true do
+      local node, nxt
+      local t = is_cons(x) and x[2]
+      if x == NIL then
+        node = NIL
+      elseif is_cons(t) and t[1] == bar_sym and is_cons(t[2]) then
+        -- [a | b] ends the spine; [a | b c ...] is the kernel's error
+        if t[2][2] ~= NIL then return orig_cons_form(x) end
+        node = cons(cons_sym, cons(x[1], t[2]))
+      elseif is_cons(x) then
+        node = cons(cons_sym, cons(x[1], cons(NIL, NIL)))
+        nxt = t
+      else
+        return orig_cons_form(x)
+      end
+      if hole then hole[1] = node else head = node end
+      if nxt == nil then return head end
+      hole = node[2][2]
+      x = nxt
+    end
+  end
+
   -- ---- shen-scheme-style kernel overrides --------------------------------
   -- The kernel ships portable-but-slow defuns that overwrite the primitives
   -- of the same name (integer?, boolean?, empty?, not, thaw, symbol?, ...) and
@@ -1516,7 +1683,13 @@ function P.install_native_stdlib()
     fh:close()
     local codes = u8codes(data)
     local ok, parsed = pcall(F["compile"], F["shen.<s-exprs>"], codes)
-    if not ok then parsed = F["shen.reader-error"](GLOBALS["shen.*residue*"]) end
+    if not ok then
+      -- a Lua stack overflow is not a syntax error: say so (issue #88)
+      if type(parsed) == "string" and parsed:find("stack overflow", 1, true) then
+        error(parsed, 0)
+      end
+      parsed = F["shen.reader-error"](GLOBALS["shen.*residue*"])
+    end
     return F["shen.process-sexprs"](parsed)
   end
 
@@ -2066,6 +2239,11 @@ function P.install_native_stdlib()
   local function install(name, fn, arity) F[name] = fn; FA[fn] = arity end
   install("shen.<singleline>", singleline_p, 1)
   install("shen.<multiline>", multiline_p, 1)
+  install("shen.<s-exprs>", s_exprs, 1)
+  install("shen.cons-form", cons_form, 1)
+  install("shen.<strcontents>", strcontents, 1)
+  install("shen.<alphanums>", alphanums, 1)
+  install("shen.<whitespaces>", whitespaces, 1)
   install("fn", fn_fast, 1)
   install("hash", hash, 2)
   install("pr", pr, 2)
@@ -2250,6 +2428,26 @@ local ENV = {
       AP_SLOTS[nslots] = (AP_SLOTS[nslots] or 0) + 1
     end
     return setmetatable({ fn, ... }, Thunk)
+  end,
+  -- A wide-mode lambda (compiler.lua, WIDE): its body is the constant
+  -- function fn(x, T) with the captures in the table T.
+  UNPACK = unpack,
+  LAMW = function(fn, t)
+    return MKFUN(1, function(x) return fn(x, t) end)
+  end,
+  -- A curried lambda chain n deep (compiler.lua, CURRY_DEPTH): each
+  -- application returns a fresh closure over its own copy of the arguments
+  -- so far, exactly like the nested closures; the last calls fn(args).
+  CURRY = function(n, fn)
+    local function step(args, i)
+      return MKFUN(1, function(x)
+        local a = { unpack(args, 1, i - 1) }
+        a[i] = x
+        if i == n then return fn(a) end
+        return step(a, i + 1)
+      end)
+    end
+    return step({}, 1)
   end,
   -- MKTREE consumes a flat blueprint produced by the compiler for deep
   -- cons-trees. See compile_cons_tree in compiler.lua. ops is a sequence of
@@ -2531,8 +2729,30 @@ end
 -- WHILE one of those chunks executes (nested eval-kl, e.g. compile-prolog
 -- inside process-datatype) are not recorded — replaying the outer chunk
 -- regenerates them naturally.
-local function compile_and_load(luasrc, chunkname)
-  local fn = load_chunk(luasrc, chunkname)
+-- Lua limits the wide code shape avoids (compiler.lua, WIDE)
+local function is_width_error(msg)
+  msg = tostring(msg)
+  return msg:find("has more than %d+ local variables") ~= nil
+      or msg:find("has more than %d+ upvalues") ~= nil
+      or msg:find("function or expression too complex", 1, true) ~= nil
+end
+
+-- defun_form: when the ordinary code for this defun exceeds a Lua limit,
+-- recompile it in wide mode (loads that succeed never pay for this)
+local function compile_and_load(luasrc, chunkname, defun_form)
+  local fn
+  if defun_form then
+    local ok, res = pcall(load_chunk, luasrc, chunkname)
+    if ok then
+      fn = res
+    elseif is_width_error(res) then
+      fn = load_chunk(require("compiler").compile_top(defun_form, true), chunkname)
+    else
+      error(res, 0)
+    end
+  else
+    fn = load_chunk(luasrc, chunkname)
+  end
   local rec = P.FASL_REC
   if rec and not rec.in_chunk then
     rec.n = rec.n + 1
@@ -2586,7 +2806,7 @@ function P.eval(form)
     -- error positions and debug.traceback frames identify the Shen function
     -- (the REPL's Shen-level backtrace filters on this prefix; repl.lua).
     local nm = is_cons(form[2]) and is_symbol(form[2][1]) and form[2][1].name or "defun"
-    compile_and_load(C.compile_top(form), "shen:" .. nm)
+    compile_and_load(C.compile_top(form), "shen:" .. nm, form)
     return form[2][1]   -- the function NAME symbol (car of cdr), as shen-c returns
   end
   return compile_and_load(C.compile_expr_chunk(form), "eval")
