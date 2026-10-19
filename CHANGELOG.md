@@ -48,8 +48,8 @@ Notable changes to shen-lua. Release notes for earlier versions are under
   (pyrex41/shen-lua#87).
 - `open`, `read-file`, `read-file-as-string`, `read-file-as-bytelist` and
   `load` resolve a relative file name against `*home-directory*`, which `cd`
-  sets, as shen-go and shen-scheme do; they used the process cwd. Absolute
-  names are used as given. The native fast paths no longer try the cwd first,
+  sets, as shen-go and shen-scheme do; they used the process cwd. As there,
+  the prefix is a plain string join, applied to absolute names too. The native fast paths no longer try the cwd first,
   so a same-named file there cannot shadow the one `open` means
   (pyrex41/shen-lua#86).
 - `<-address` past the end of an absvector raises instead of returning `nil`,

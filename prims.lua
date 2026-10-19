@@ -675,13 +675,14 @@ defprim("shen.char-stinput?", 1, function(st) return is_stream(st) end)
 defprim("shen.write-string", 2, function(s, st) return F["write-string"](s, st) end)
 defprim("shen.read-unit-string", 1, function(st) return F["read-unit-string"](st) end)
 
--- A file name as `open` sees it: relative to *home-directory*, which `cd`
--- sets (sys.kl). Absolute names are used as given. Every native path that
+-- A file name as `open` sees it: *home-directory*, which `cd` sets (sys.kl),
+-- prepended as a plain string, as shen-scheme and shen-go do, so an absolute
+-- name after a non-empty cd is joined too. Every native path that
 -- reads a user file (read-file, read-file-as-*, the fasl `load`) resolves
 -- through this too, so it opens the same file `open` would.
 local function home_path(name)
   local home = GLOBALS["*home-directory*"]
-  if type(home) ~= "string" or home == "" or name:sub(1, 1) == "/" then
+  if type(home) ~= "string" or home == "" then
     return name
   end
   return home .. name
