@@ -12,6 +12,8 @@
 -- machinery is reimplemented.
 
 local R = require("runtime")
+-- restores the stack-segment count on a caught error (runtime.lua, #93)
+local pcall = R.seg.pcall
 local P = require("boot")   -- boot.lua returns the prims module P, fully wired
 local checked_integer = require("checked_integer")
 
@@ -79,8 +81,7 @@ end
 -- with the kernel's own reader (read-from-string -> list of forms) and (eval)
 -- each form through the real macroexpand/shen->kl pipeline. Returns the value
 -- of the last form (a Shen value: number/string/boolean/symbol/cons/...).
-function shen.eval(src)
-  ensure_boot()
+local function eval_forms(src)
   local forms = P.F["read-from-string"](src)
   local last
   while R.is_cons(forms) do
@@ -88,6 +89,11 @@ function shen.eval(src)
     forms = forms[2]
   end
   return last
+end
+
+function shen.eval(src)
+  ensure_boot()
+  return R.seg.call(eval_forms, src)
 end
 
 -- ---- call / fn ------------------------------------------------------------
@@ -99,7 +105,7 @@ function shen.call(name, ...)
   ensure_boot()
   local fn = P.F[name]
   if fn == nil then error("shen.call: undefined function: " .. tostring(name), 2) end
-  return P.APP(fn, ...)
+  return R.seg.call(P.APP, fn, ...)
 end
 
 -- A plain Lua callable for the Shen function `name`. The F-table lookup is

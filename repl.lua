@@ -324,7 +324,8 @@ function M.run(opts)
     end
     if buf:match("%S") then
       ed.remember(buf)
-      local ok, r = xpcall(function() return eval_input(buf) end, handler)
+      -- the runtime's xpcall restores the stack-segment count (#93)
+      local ok, r = require("runtime").seg.xpcall(function() return eval_input(buf) end, handler)
       if not ok then
         -- r is the handler capture, unless something threw inside the
         -- handler itself (then r is whatever Lua gives us).

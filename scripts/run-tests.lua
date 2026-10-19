@@ -47,6 +47,7 @@ local specs = {
   "test/prolog_semantics_spec.lua",
   "test/reader_spec.lua",
   "test/repl_spec.lua",
+  "test/stack_segments_spec.lua",
   "test/stdlib_spec.lua",
   "test/tailcall_spec.lua",
   "test/typecheck_api_spec.lua",

@@ -317,6 +317,85 @@ local cexpr, ctail  -- forward
 -- a symbol used as a *value* (self-evaluating) -> intern at runtime
 local function symlit(name) return 'S(' .. qstr(name) .. ')' end
 
+-- Counted non-tail calls (runtime.lua stack segments, #93). LuaJIT's Lua
+-- stack is fixed per coroutine, so the runtime counts the calls that keep a
+-- frame on the stack and continues on a fresh coroutine stack every
+-- SEG_FRAMES of them: deep non-tail recursion is then bounded by memory.
+--
+-- A defun whose body makes a non-tail call to anything that may run Shen
+-- code counts ITSELF: impl opens with
+--   local dN = SD[1]; if dN >= SEG_FRAMES then return SEG(impl, ...) end;
+--   SD[1] = dN + 1
+-- and every `return` of impl restores SD[1] = dN first. A tail call stays a
+-- tail call: its arguments are evaluated first (hoisted into locals when
+-- they make counted calls themselves), then the count is restored, then the
+-- call -- so a constant-stack loop never opens a segment. A lambda body in
+-- a defun counts itself the same way (counted_body). Counting in the callee
+-- costs no extra Lua frame: a trampoline around every non-tail call
+-- measured 15-25% slower on capcov's c-untyped workload.
+--
+-- The rest -- freeze bodies, TRMC step functions, lambdas outside a defun,
+-- top-level chunks -- sends its non-tail calls through a vararg trampoline:
+-- NT, one copy per defun (NT_SRC; a single shared one makes every nested
+-- call look like recursion through one prototype to the trace recorder),
+-- or the runtime's NTV outside a defun. KL primitives and system functions
+-- that never call back into Shen code (LEAF) are not counted.
+local SEG_FRAMES = 160   -- runtime.lua M.seg.FRAMES
+C.SEG_FRAMES = SEG_FRAMES
+local NT_SRC = "local NT = function(f, ...) "
+  .. "local d = SD[1]; if d < " .. SEG_FRAMES .. " then SD[1] = d + 1; "
+  .. "local r = f(...); SD[1] = d; return r end; return SEG(f, ...) end; "
+-- NTCOUNT: counted non-tail calls compiled so far (to ask whether a piece of
+-- code made any). CNT: nil where calls go through the trampoline; otherwise
+-- { owner = <the counting defun>, ret = <its returns restore the count> }
+-- (ret is false in a value-position control form's KC body, which runs
+-- inside the defun's frame but returns to it).
+local NTCOUNT = 0
+local CNT = nil
+-- TCOUNT: tail calls compiled so far that may run Shen code. A KC body
+-- making one is still a frame held by its caller (see the control-form case
+-- of cexpr).
+local TCOUNT = 0
+local LEAF = {}
+for _, n in ipairs({
+  "cons", "hd", "tl", "cons?", "+", "-", "*", "/", ">", "<", ">=", "<=",
+  "number?", "string?", "symbol?", "boolean?", "empty?", "absvector?",
+  "absvector", "<-address", "address->", "intern", "str", "cn", "pos",
+  "tlstr", "string->n", "n->string", "value", "set", "simple-error",
+  "error-to-string", "get-time", "@p", "@s", "@v", "fst", "snd", "tuple?",
+  "integer?", "vector", "variable?", "shen.incinfs", "=",
+  -- system functions (protected from redefinition) that take no function
+  -- argument; one that recurses deeply in KL counts its own frames
+  "hash", "<-vector", "vector->", "length", "append", "reverse", "element?",
+  "assoc", "explode", "concat", "nth", "sum", "head", "tail", "limit",
+  "difference", "union", "intersection", "occurrences", "subst", "==",
+  "fail", "get", "put", "unput", "hdstr", "string->symbol", "pr",
+}) do LEAF[n] = true end
+local function nt_call(fexpr, argstr, n)
+  NTCOUNT = NTCOUNT + 1
+  if CNT then
+    CNT.owner.used = true
+    return fexpr .. "(" .. (n > 0 and argstr or "") .. ")"
+  end
+  local nt = "NTV("
+  if CTX then CTX.nt = true; nt = "NT(" end
+  return nt .. fexpr .. (n > 0 and (", " .. argstr) or "") .. ")"
+end
+
+-- `return EXPR` of the Lua function being compiled. In a counting defun the
+-- count is restored first; `calls` (EXPR made counted calls) evaluates EXPR
+-- before the restore.
+local function ret(expr, calls)
+  if not (CNT and CNT.ret) then return "return " .. expr end
+  if calls then
+    return "do local r = " .. expr .. "; " .. CNT.owner.tok .. "return r end"
+  end
+  return CNT.owner.tok .. "return " .. expr
+end
+
+-- set by ccall for a tail call whose arguments were hoisted (see ccall)
+local TAILPRE = nil
+
 -- A call (NAME a1..an) whose callee arity is unknown at compile time -- in
 -- practice a forward reference to a function defined later in the same file,
 -- since each toplevel `define` is compiled on its own. The generic form,
@@ -330,11 +409,15 @@ local function symlit(name) return 'S(' .. qstr(name) .. ')' end
 -- partial / over-application, redefinition and "not a function" errors are
 -- unchanged. Fixed arity, no varargs: LuaJIT traces it.
 local MAX_CALLN = 8
-local function unknown_call(name, argstr, n)
+local function unknown_call(name, argstr, n, tail)
   if n <= MAX_CALLN then
+    if not tail then
+      return nt_call("CALL" .. n, qstr(name) .. (n > 0 and (", " .. argstr) or ""), n + 1)
+    end
     if n == 0 then return "CALL0(" .. qstr(name) .. ")" end
     return "CALL" .. n .. "(" .. qstr(name) .. ", " .. argstr .. ")"
   end
+  if not tail then return nt_call("APP", symlit(name) .. ", " .. argstr, n + 1) end
   if n == 0 then return "APP(" .. symlit(name) .. ")" end
   return "APP(" .. symlit(name) .. ", " .. argstr .. ")"
 end
@@ -773,11 +856,13 @@ local function try_flatten_call_chain(form, env)
     -- We don't actually need the AST; emit a direct F[...] call using ARITY.
     local ar = C.ARITY[hname]
     local call_str
+    -- not the outermost frame: a non-tail call (counted, see nt_call)
     if ar and #prev_strs + 1 == ar then
-      call_str = callee_ref(hname) .. "(" .. arg_list .. ")"
+      call_str = LEAF[hname] and (callee_ref(hname) .. "(" .. arg_list .. ")")
+                 or nt_call(callee_ref(hname), arg_list, ar)
     else
       -- fall back to APP for mismatched arity; late-bound for unknown
-      call_str = ar and ("APP(" .. symlit(hname) .. ", " .. arg_list .. ")")
+      call_str = ar and nt_call("APP", symlit(hname) .. ", " .. arg_list, #prev_strs + 2)
                  or unknown_call(hname, arg_list, #prev_strs + 1)
     end
     stmts[#stmts+1] = "local " .. next_name .. " = " .. call_str .. ";"
@@ -796,9 +881,10 @@ local function try_flatten_call_chain(form, env)
     call_str = callee_ref(hname) .. "(" .. arg_list .. ")"
   else
     call_str = ar and ("APP(" .. symlit(hname) .. ", " .. arg_list .. ")")
-               or unknown_call(hname, arg_list, #prev_strs + 1)
+               or unknown_call(hname, arg_list, #prev_strs + 1, true)
   end
-  stmts[#stmts+1] = "return " .. call_str
+  TCOUNT = TCOUNT + 1
+  stmts[#stmts+1] = ret(call_str)
   return table.concat(stmts, " ")
 end
 
@@ -830,7 +916,7 @@ local function order_free(form, env)
   return true   -- number/string/boolean/(), symbol literal or local variable
 end
 
-local function curried_call(form, env)
+local function curried_call(form, env, tail)
   local args = {}
   local cur = form
   while is_cons(cur) and is_cons(car(cur)) do
@@ -856,16 +942,62 @@ local function curried_call(form, env)
   local fnref = callee_ref("fn")
   local cargs = {}
   for i = 1, n do cargs[i] = cexpr(args[i], env) end
+  if not tail then
+    return nt_call("CUR" .. n, fnref .. "(" .. symlit(sym.name) .. "), "
+                   .. table.concat(cargs, ", "), n + 1)
+  end
   return "CUR" .. n .. "(" .. fnref .. "(" .. symlit(sym.name) .. "), "
          .. table.concat(cargs, ", ") .. ")"
 end
 
--- compile a call (F a1..an) in expression position
-local function ccall(form, env)
+-- The form whose call cexpr_tail is compiling: the body of a lambda or
+-- freeze, whose call is a Lua tail call and so is not counted (nt_call).
+local TAIL_FORM = nil
+local function cexpr_tail(form, env)
+  local saved = TAIL_FORM
+  TAIL_FORM = form
+  local s = cexpr(form, env)
+  TAIL_FORM = saved
+  return s
+end
+
+-- compile a call (F a1..an) in expression position; `tail`: it is the
+-- value of a Lua `return` (ctail), so it is not counted (nt_call)
+local function ccall(form, env, tail)
+  -- a counting defun's own tail call: arguments that make counted calls are
+  -- hoisted into TAILPRE, to run before the count is restored (ret)
+  local hoist = tail and CNT and CNT.ret
+  tail = tail or form == TAIL_FORM
+  if tail and not (is_symbol(car(form)) and not env[car(form).name]
+                   and LEAF[car(form).name]) then
+    TCOUNT = TCOUNT + 1
+  end
+  local n0 = NTCOUNT
   local head = car(form)
   local args = to_array(cdr(form))
   local cargs = {}
   for i=1,#args do cargs[i] = cexpr(args[i], env) end
+  local function hoist_args(hv)
+    local vs = {}
+    if hv then vs[1] = hv end
+    for i = 1, #cargs do vs[#vs + 1] = cargs[i] end
+    local ts = {}
+    if #vs > 40 then
+      -- one local, not one per argument (Lua's 200-locals cap)
+      local t = gen("t")
+      for i = 1, #vs do ts[i] = t .. "[" .. i .. "]" end
+      TAILPRE = "local " .. t .. " = {" .. table.concat(vs, ", ") .. "}; "
+    else
+      for i = 1, #vs do ts[i] = gen("t") end
+      TAILPRE = "local " .. table.concat(ts, ", ") .. " = " .. table.concat(vs, ", ") .. "; "
+    end
+    local k = hv and 1 or 0
+    for i = 1, #cargs do cargs[i] = ts[i + k] end
+    return hv and ts[1]
+  end
+  if hoist and NTCOUNT ~= n0 and is_symbol(head) and not env[head.name] then
+    hoist_args(nil)
+  end
   local argstr = table.concat(cargs, ", ")
   -- Chain-hoist purity: this application runs after its args; anything the
   -- statement evaluates after it may no longer be hoisted ahead of it unless
@@ -950,6 +1082,7 @@ local function ccall(form, env)
           return "TL(" .. argstr .. ")"
         end
         if name == "thaw" and ar == 1 then
+          if not tail then return nt_call("THAW", argstr, 1) end
           return "THAW(" .. argstr .. ")"
         end
         -- `(intern "foo")` is a compile-time intern (shen-scheme: quote).
@@ -999,6 +1132,9 @@ local function ccall(form, env)
         if name == "absvector?" and ar == 1 then
           return "getmetatable(" .. argstr .. ")==VMT"
         end
+        if not tail and not LEAF[name] then
+          return nt_call(callee_ref(name), argstr, #args)
+        end
         return callee_ref(name) .. "(" .. argstr .. ")"
       else
         -- Arity mismatch at compile time: route through APP so dispatch uses
@@ -1013,19 +1149,29 @@ local function ccall(form, env)
         -- redefining `depth` from 3 to 4 args). Baking the stale arity into
         -- PARTIAL / over-app expressions would silently produce wrong-arity
         -- residual closures.
+        if not tail then
+          return nt_call("APP", symlit(name) .. (#args > 0 and (", " .. argstr) or ""), #args + 1)
+        end
         if #args == 0 then return "APP(" .. symlit(name) .. ")" end
         return "APP(" .. symlit(name) .. ", " .. argstr .. ")"
       end
     else
       -- unknown arity (typically a forward reference: a function defined
       -- later in the same file) -> late-bound fixed-arity dispatch
-      return unknown_call(name, argstr, #args)
+      return unknown_call(name, argstr, #args, tail)
     end
   else
-    local cur = curried_call(form, env)
-    if cur then return cur end
+    local cur = curried_call(form, env, tail)
+    if cur and not (hoist and NTCOUNT ~= n0) then return cur end
     -- head is a bound variable or a compound expression -> generic apply
     local hv = cexpr(head, env)
+    if hoist and NTCOUNT ~= n0 then
+      hv = hoist_args(hv)
+      argstr = table.concat(cargs, ", ")
+    end
+    if not tail then
+      return nt_call("APP", hv .. (#args > 0 and (", " .. argstr) or ""), #args + 1)
+    end
     if #args == 0 then return "APP(" .. hv .. ")" end
     return "APP(" .. hv .. ", " .. argstr .. ")"
   end
@@ -1602,6 +1748,29 @@ local function push_inline_cont()
   return saved
 end
 
+-- The statements of a lambda body (`params`: its parameter list), compiled
+-- as a function of its own that counts itself like a defun's impl (see
+-- NT_SRC): a lambda called by a tail call holds no counted caller frame.
+-- On the segment path it finds itself with debug.getinfo (SEGSELF).
+local function counted_body(form, env, params)
+  local saved_self, saved_h, saved_cc, saved_fnl = SELF, HOIST, CCACHE, FNL
+  local saved_cont = push_inline_cont()
+  local saved_impl, saved_cnt = IN_IMPL, CNT
+  SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true); IN_IMPL = false
+  local owner = { used = false, tok = "\1" .. gen("k") .. "\1" }
+  CNT = { owner = owner, ret = true }
+  local body = ctail(form, env)
+  if FNL.pt then body = "local PT = {}; " .. body end
+  SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
+  CONT = saved_cont; IN_IMPL = saved_impl; CNT = saved_cnt
+  if not owner.used then return (body:gsub(owner.tok, "")) end
+  CTX.sd = true
+  local dv = gen("d")
+  return "local " .. dv .. " = SD[1]; if " .. dv .. " >= " .. SEG_FRAMES
+    .. " then local r = SEGSELF(" .. params .. "); return r end; SD[1] = "
+    .. dv .. " + 1; " .. (body:gsub(owner.tok, "SD[1] = " .. dv .. "; "))
+end
+
 -- ------------------------------------------------------------------
 -- cexpr : value position (returns a Lua expression string)
 -- ------------------------------------------------------------------
@@ -1679,17 +1848,23 @@ function cexpr(form, env)
         local saved_self = SELF
         local saved_h, saved_cc, saved_fnl = HOIST, CCACHE, FNL
         local saved_cont = push_inline_cont()
-        local saved_impl = IN_IMPL
+        local saved_impl, saved_cnt = IN_IMPL, CNT
         SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true); IN_IMPL = false
+        -- runs inside the enclosing frame: its calls count for the defun
+        CNT = CNT and { owner = CNT.owner, ret = false }
+        local n0, t0 = NTCOUNT, TCOUNT
         local body_stmts = ctail(form, env)
         if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
         SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
-        CONT = saved_cont; IN_IMPL = saved_impl
+        CONT = saved_cont; IN_IMPL = saved_impl; CNT = saved_cnt
         local idx = #CTX.cbodies + 1
         CTX.cbodies[idx] = "function(" .. params .. ") " .. body_stmts .. " end"
         -- The KC call itself may raise or side-effect: later siblings in the
         -- enclosing statement must not hoist chains ahead of it.
         if HOIST then HOIST.pure = false end
+        if (NTCOUNT ~= n0 or TCOUNT ~= t0) and form ~= TAIL_FORM then
+          return nt_call("KC[" .. idx .. "]", params, #lnames)
+        end
         return "KC[" .. idx .. "](" .. params .. ")"
       end
       -- No per-defun context (top-level eval chunk): fall back to the IIFE.
@@ -1717,10 +1892,14 @@ function cexpr(form, env)
       local e2 = extend(env, v.name, ln)
       -- Deferred body: nothing inside may be hoisted to the creation site.
       -- Not impl-scope: `fN` locals live in impl, not this nested function.
-      local saved_h, saved_impl = HOIST, IN_IMPL
-      HOIST = nil; IN_IMPL = false
-      local bodyc = cexpr(body, e2)
-      HOIST = saved_h; IN_IMPL = saved_impl
+      if CTX then
+        -- a function of its own that counts itself, like a defun's impl
+        return "MKFUN(1, function(" .. ln .. ") " .. counted_body(body, e2, ln) .. " end)"
+      end
+      local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
+      HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
+      local bodyc = cexpr_tail(body, e2)
+      HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
       return "MKFUN(1, function(" .. ln .. ") return " .. bodyc .. " end)"
     elseif op == "freeze" then
       local body = car(cdr(form))
@@ -1737,20 +1916,20 @@ function cexpr(form, env)
         for kname in pairs(fv) do lnames[#lnames+1] = env[kname] end
         table.sort(lnames)  -- stable order for caller / body
         -- Deferred body: nothing inside may be hoisted to the creation site.
-        local saved_h, saved_impl = HOIST, IN_IMPL
-        HOIST = nil; IN_IMPL = false
-        local body_str = cexpr(body, env)
-        HOIST = saved_h; IN_IMPL = saved_impl
+        local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
+        HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
+        local body_str = cexpr_tail(body, env)
+        HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
         local idx = #CTX.cbodies + 1
         CTX.cbodies[idx] = "function(" .. table.concat(lnames, ", ") .. ") return "
                            .. body_str .. " end"
         local call_args = (#lnames == 0) and "" or (", " .. table.concat(lnames, ", "))
         return "BIND(KC[" .. idx .. "]" .. call_args .. ")"
       end
-      local saved_h, saved_impl = HOIST, IN_IMPL
-      HOIST = nil; IN_IMPL = false
-      local bodyc = cexpr(body, env)
-      HOIST = saved_h; IN_IMPL = saved_impl
+      local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
+      HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
+      local bodyc = cexpr_tail(body, env)
+      HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
       return "MKFUN(0, function() return " .. bodyc .. " end)"
     elseif op == "defun" then
       error("defun in expression position")
@@ -1825,7 +2004,7 @@ end
 -- ------------------------------------------------------------------
 function ctail(form, env)
   if not is_cons(form) then
-    return "return " .. (type(form)=="number" and cnum(form) or catom(form, env))
+    return ret(type(form)=="number" and cnum(form) or catom(form, env))
   end
   local head = car(form)
   if is_symbol(head) and not env[head.name] then
@@ -1850,7 +2029,7 @@ function ctail(form, env)
         -- truthiness, which is what the old `if (test)` dispatched on)
         local saved_cc = CCACHE
         CCACHE = child_cache()
-        local els = el and ctail(el, env) or "return false"
+        local els = el and ctail(el, env) or ret("false")
         CCACHE = saved_cc
         return pre .. "if not (" .. testc .. ") then " .. els .. " end "
                .. ctail(th, env)
@@ -1918,24 +2097,33 @@ function ctail(form, env)
       -- semantically identical and costs O(1) nesting per link.
       local a = car(cdr(form)); local b = car(cdr(cdr(form)))
       local pre, ac = cstmt_expr(a, env)
-      return pre .. "if not (" .. ac .. ") then return false end " .. ctail(b, env)
+      return pre .. "if not (" .. ac .. ") then " .. ret("false") .. " end " .. ctail(b, env)
     elseif op == "or" then
       local a = car(cdr(form)); local b = car(cdr(cdr(form)))
       local pre, ac = cstmt_expr(a, env)
-      return pre .. "if (" .. ac .. ") then return true end " .. ctail(b, env)
+      return pre .. "if (" .. ac .. ") then " .. ret("true") .. " end " .. ctail(b, env)
     elseif op == "trap-error" then
+      local n0 = NTCOUNT
       local opt = try_trap_opt(form, env)
-      if opt then return "return " .. opt end
+      if opt then return ret(opt, NTCOUNT ~= n0) end
       local expr = car(cdr(form))
       local handler = car(cdr(cdr(form)))
       -- (trap-error E H): if E raises a Shen exception, apply H to it.
+      n0 = NTCOUNT
       local hc = cexpr(handler, env)
+      local apply
+      TCOUNT = TCOUNT + 1
+      if NTCOUNT ~= n0 and CNT and CNT.ret then
+        apply = "do local h = " .. hc .. "; " .. ret("APP(h, TOEXCN(res))") .. " end"
+      else
+        apply = ret("APP(" .. hc .. ", TOEXCN(res))")
+      end
       return "local ok,res = pcall(function() return " .. cexpr(expr, env)
-             .. " end); if ok then return res else return APP(" .. hc .. ", TOEXCN(res)) end"
+             .. " end); if ok then " .. ret("res") .. " else " .. apply .. " end"
     elseif op == "type" then
       return ctail(car(cdr(form)), env)
     elseif op == "lambda" or op == "freeze" then
-      return "return " .. cexpr(form, env)
+      return ret(cexpr(form, env))
     else
       local ct = try_cont_thaw(form, env, true)
       if ct then return ct end
@@ -1965,10 +2153,15 @@ function ctail(form, env)
         HOIST = saved_h
         return pre .. selfjump
       end
-      local callc = ccall(form, env)
+      TAILPRE = nil
+      local callc = ccall(form, env, true)
       local pre = table.concat(HOIST.out)
       HOIST = saved_h
-      return pre .. "return " .. callc
+      if TAILPRE then
+        pre = pre .. "do " .. TAILPRE; TAILPRE = nil
+        return pre .. ret(callc) .. " end"
+      end
+      return pre .. ret(callc)
     end
   else
     local floated = try_let_float(form, env)
@@ -1977,10 +2170,15 @@ function ctail(form, env)
     if flat then return flat end
     local saved_h = HOIST
     HOIST = { out = {}, pure = true }
-    local callc = ccall(form, env)
+    TAILPRE = nil
+    local callc = ccall(form, env, true)
     local pre = table.concat(HOIST.out)
     HOIST = saved_h
-    return pre .. "return " .. callc
+    if TAILPRE then
+      pre = pre .. "do " .. TAILPRE; TAILPRE = nil
+      return pre .. ret(callc) .. " end"
+    end
+    return pre .. ret(callc)
   end
 end
 
@@ -2040,7 +2238,17 @@ local function cdefun(form)
   local saved_in, saved_dn = IN_IMPL, DEFUN_NAME
   local saved_fl, saved_fm = FREF_LIST, FREF_MAP
   IN_IMPL, DEFUN_NAME, FREF_LIST, FREF_MAP = true, name, {}, {}
+  -- counted non-tail calls (see NT_SRC): impl counts itself, except a TRMC
+  -- step function, whose calls go through the trampoline
+  local saved_cnt = CNT
+  local owner = nil
+  if trmc then CNT = nil
+  else
+    owner = { used = false, tok = "\1" .. gen("k") .. "\1" }
+    CNT = { owner = owner, ret = true }
+  end
   local body_src = ctail(body, env)
+  CNT = saved_cnt
   local fref_decls = {}
   for i, r in ipairs(FREF_LIST) do
     fref_decls[i] = "local " .. r.ln .. " = F[" .. qstr(r.name) .. "];"
@@ -2066,6 +2274,15 @@ local function cdefun(form)
     -- to a label at the end of an enclosing block is the sanctioned
     -- "continue" idiom).
     body_src = "while true do do " .. body_src .. " end ::tco:: end"
+  end
+  if owner and owner.used then
+    local dv = gen("d")
+    body_src = (body_src:gsub(owner.tok, "SD[1] = " .. dv .. "; "))
+    body_src = "local " .. dv .. " = SD[1]; if " .. dv .. " >= " .. SEG_FRAMES
+      .. " then return SEG(impl" .. (#lnames > 0 and (", " .. table.concat(lnames, ", ")) or "")
+      .. ") end; SD[1] = " .. dv .. " + 1; " .. body_src
+  elseif owner then
+    body_src = (body_src:gsub(owner.tok, ""))
   end
   -- chain-hoist spill table (only when the local budget was exceeded);
   -- declared outside the tco loop: every PT slot is written before it is read
@@ -2094,6 +2311,10 @@ local function cdefun(form)
     parts[#parts+1] = "};"
     kc_init = table.concat(parts, " ") .. " "
   end
+  local nt_init = ""
+  if CTX.nt or CTX.sd or (owner and owner.used) then
+    nt_init = "local SD, SEG, SEGSELF = SD, SEG, SEGSELF; " .. (CTX.nt and NT_SRC or "")
+  end
   CTX = saved
   local plist = table.concat(lnames, ", ")
   local src
@@ -2102,7 +2323,7 @@ local function cdefun(form)
     local tl = {}
     for i = 1, #lnames do tl[i] = "T" .. i end
     local tlist = table.concat(tl, ", ")
-    src = "do " .. kc_init
+    src = "do " .. nt_init .. kc_init
       .. "local impl, TSTEP, TLOOP, TH" .. cm .. tlist .. "; "
       .. "TSTEP = function(" .. trmc_mode .. cm .. plist .. ") " .. body_src .. " end; "
       .. "TLOOP = function(h" .. cm .. plist .. ") "
@@ -2118,7 +2339,7 @@ local function cdefun(form)
       .. "impl = function(" .. plist .. ") return TSTEP(false" .. cm .. plist .. ") end; "
       .. "F[" .. qstr(name) .. "] = impl; FA[impl] = " .. #params .. " end"
   else
-    src = "do " .. kc_init
+    src = "do " .. nt_init .. kc_init
             .. "local function impl(" .. plist .. ") "
             .. body_src .. " end "
             .. "F[" .. qstr(name) .. "] = impl; FA[impl] = " .. #params .. " end"
@@ -2143,7 +2364,8 @@ end
 C.cexpr = cexpr
 C.ctail = ctail
 function C.compile_expr_chunk(form)
-  return "return (" .. cexpr(form, {}) .. ")"
+  -- the chunk's one call is not counted (nt_call): a single frame
+  return "return (" .. cexpr_tail(form, {}) .. ")"
 end
 
 -- compile any top-level form to a Lua statement string

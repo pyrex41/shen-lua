@@ -629,7 +629,8 @@ function M.call(name, ...)
   local n = select("#", ...)
   local a = { ... }
   for i = 1, n do a[i] = to_shen(a[i]) end
-  return to_lua(P.APP(fn, unpack(a, 1, n)))
+  -- R.seg.call: a caught error leaves the stack-segment count intact (#93)
+  return to_lua(R.seg.call(P.APP, fn, unpack(a, 1, n)))
 end
 
 function M.fn(name)

@@ -41,6 +41,7 @@ if not ok_ffi then
   return { install = function() end }
 end
 local R = require("runtime")
+local SD, SEGRUN, SEG_FRAMES = R.seg.SD, R.seg.run, R.seg.FRAMES
 
 local loadstring = loadstring or load   -- 5.2+ shim (module is FFI-gated anyway)
 
@@ -236,10 +237,6 @@ local SEG_FRAMES = 96        -- counted frames per segment: a typecheck
 local SEG_MAX = 1000         -- nested segments per query before giving up
 local seg_depth, seg_count = 0, 0
 local seg_total = 0          -- segments ever opened (M.segments, diagnostics)
-local co_create, co_resume, co_status, co_yield =
-  coroutine.create, coroutine.resume, coroutine.status, coroutine.yield
-local unpack = unpack or table.unpack
-local function pack(...) return { n = select("#", ...), ... } end
 
 -- Thaw `cont` on a fresh coroutine stack and return its value. Errors are
 -- rethrown unchanged (Shen exception objects included); a yield from inside
@@ -251,17 +248,13 @@ local function thaw_segment(cont)
   local saved, saved_count = seg_depth, seg_count
   seg_count = seg_count + 1; seg_depth = 0
   seg_total = seg_total + 1
-  local co = co_create(thawH)
-  local res = pack(co_resume(co, cont))
-  while res[1] and co_status(co) ~= "dead" do
-    local up = pack(pcall(co_yield, unpack(res, 2, res.n)))
-    if not up[1] then res = up; break end   -- no coroutine to yield to
-    res = pack(co_resume(co, unpack(up, 2, up.n)))
-  end
+  -- the runtime's segment runner (runtime.lua, #93): its nesting cap covers
+  -- both kinds of segment, which share one C stack
+  local ok, r = pcall(SEGRUN, thawH, cont)
   -- assign, not decrement: segments abandoned while suspended never return
   seg_count, seg_depth = saved_count, saved
-  if not res[1] then error(res[2], 0) end
-  return res[2]
+  if not ok then error(r, 0) end
+  return r
 end
 
 -- thawH for a non-tail site: counts the frame, or opens a segment. The
@@ -621,7 +614,16 @@ local function import(x, varmap)
     end
     local tail = import(x, varmap)
     for i = sn, 1, -1 do
-      tail = mkcons(import(spine[i], varmap), tail)
+      local e = spine[i]
+      if getmt(e) == Cons then
+        -- car nesting recurses: count it (runtime.lua stack segments, #93)
+        local d = SD[1]
+        if d < SEG_FRAMES then SD[1] = d + 1; e = import(e, varmap); SD[1] = d
+        else e = SEGRUN(import, e, varmap) end
+      else
+        e = import(e, varmap)
+      end
+      tail = mkcons(e, tail)
     end
     return tail
   elseif getmt(x) == Vmt and x[2] == shen_pvar then
