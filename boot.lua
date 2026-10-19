@@ -800,7 +800,9 @@ end
 -- Known: (destroy ...) at the REPL between loads is not in the key.
 -- SHEN_FASL=off disables; SHEN_FASL_DIR overrides ~/.cache/shen-lua-fasl;
 -- SHEN_FASL_DEBUG=1 logs hits/misses to stderr.
-local FASL_FORMAT = "SHENFASL6"  -- 6: "dv" (shen.*datatypes* by name) replaces
+local FASL_FORMAT = "SHENFASL7"  -- 7: a nested load run inside a chunk is no
+                                 -- longer spliced into the outer fasl (#92);
+                                 -- 6: "dv" (shen.*datatypes* by name) replaces
                                  -- "dt" (re-run shen.process-datatype);
                                  -- 5: "lt" (shen.*lambdatable* delta by name);
                                  -- 4: "e" (per-form value/type echo)

@@ -39,6 +39,11 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ### Fixed
 
+- A warm fasl hit no longer runs a nested `load` twice. When a loaded file
+  loaded another file, from a top-level `(load ...)` form or from a function
+  that loads, the nested file's output printed twice on every cached run.
+  The fasl format is now `SHENFASL7`, so caches written by older builds are
+  recompiled once rather than replayed (pyrex41/shen-lua#92).
 - The kernel bytecode cache and its stdlib-signature sidecar default to
   `${XDG_CACHE_HOME:-$HOME/.cache}/shen-lua/kernel-<build>.bin` (directory
   created on first write; an unwritable location just skips caching). They
