@@ -39,6 +39,25 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ### Fixed
 
+- The reader reads list literals of any length: `shen.<s-exprs>` recursed
+  once per token, so past ~1550 elements LuaJIT's fixed stack overflowed and
+  `read-file` reported it as `reader error near here:` with no context. The
+  sequence rule, `shen.cons-form`, and the per-character
+  `shen.<strcontents>`/`<alphanums>`/`<whitespaces>` (a 14 KB string literal
+  overflowed the same way) are iterative in `prims.lua`; the single-token
+  rules are still the kernel's. `test/reader_native_spec.lua` checks them
+  against the kernel's own KL on every `.shen` file in `tests/` and
+  `examples/` plus edge cases. A Lua stack overflow inside `read-file` is now
+  reported as `stack overflow`. A list literal is still a nested `cons`
+  expression to the rest of the pipeline, whose tree walkers bound it at
+  about 3400 elements (pyrex41/shen-lua#88).
+- Generated Lua no longer exceeds LuaJIT's 200-locals limit for a datatype
+  rule whose conclusion pattern nests 16 or more levels deep, or for a
+  `define` that returns a list literal of 200 or more elements; both failed
+  to load with `function at line 1 has more than 200 local variables`. The
+  fix is the let-splitting and wide-mode compilation from #78 (sequent rules
+  with up to 194 premises); `test/wide_compile_spec.lua` now pins the two
+  shapes from the issue (pyrex41/shen-lua#84).
 - The native Prolog engine no longer overflows the Lua stack on deep
   proofs: a typecheck died with `stack overflow` at ~375 nested rule
   applications (`(shen.typecheck (mk 400) peano)`, an 800-element
