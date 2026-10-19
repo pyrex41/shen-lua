@@ -7,6 +7,11 @@ local cons, is_cons, NIL = R.cons, R.is_cons, R.NIL
 local Symbol, intern, is_symbol = R.Symbol, R.intern, R.is_symbol
 local Excn, mkexcn = R.Excn, R.mkexcn
 local Vmt = R.Vmt        -- absvector metatable (pure-array layout; shared with runtime.lua)
+-- counted non-tail calls (runtime.lua stack segments, #93), written inline
+-- where a native calls back into Shen code (a shared trampoline would look
+-- like recursion to the trace recorder)
+local SD, SEGRUN, SEG_FRAMES = R.seg.SD, R.seg.run, R.seg.FRAMES
+local pcall = R.seg.pcall  -- restores the segment count on a caught error
 
 local P = {}
 
@@ -1129,7 +1134,12 @@ function P.install_native_stdlib()
     while true do
       if lst == NIL then return reverse_help(acc, NIL) end
       if is_cons(lst) then
-        acc = cons(APP(f, lst[1]), acc); lst = lst[2]
+        -- a counted call: a walker that recurses through map nests here
+        local v
+        local d = SD[1]
+        if d < SEG_FRAMES then SD[1] = d + 1; v = APP(f, lst[1]); SD[1] = d
+        else v = SEGRUN(APP, f, lst[1]) end
+        acc = cons(v, acc); lst = lst[2]
       else
         return orig_maph(f, lst, acc)
       end
@@ -1812,7 +1822,10 @@ function P.install_native_stdlib()
         if last then return head else return NIL end
       end
       if not is_cons(lst) then return orig_mapcan(f, orig) end
-      local chunk = APP(f, lst[1])
+      local chunk
+      local d = SD[1]   -- a counted call (see map_h)
+      if d < SEG_FRAMES then SD[1] = d + 1; chunk = APP(f, lst[1]); SD[1] = d
+      else chunk = SEGRUN(APP, f, lst[1]) end
       if chunk ~= NIL then
         -- append copies the left spine; copy each chunk so we don't mutate
         -- a list the mapper returned that might be shared. A non-list chunk
@@ -2630,12 +2643,18 @@ local ENV = {
   ADSET = function(v, i, x) v[i + 2] = x; return v end,
   VMT = Vmt,
   -- allow compiled code to reach a few Lua builtins safely
-  pcall = pcall, select = select, error = error,
+  -- trap-error's pcall restores the stack-segment count (runtime.lua, #93)
+  pcall = R.seg.pcall, select = select, error = error,
   setmetatable = setmetatable, getmetatable = getmetatable,
   type = type,
   math = math, string = string, table = table,
 }
 P.ENV = ENV
+
+-- counted non-tail calls (runtime.lua stack segments, #93): the count slot,
+-- the segment runner and the trampoline for code outside a defun
+ENV.SD, ENV.SEG, ENV.SEGSELF, ENV.NTV = R.seg.SD, R.seg.run, R.seg.runself, R.seg.NTV
+R.seg.set_error(ERR)
 
 -- CALL0..CALLn: late-bound fixed-arity calls to a function NAMED at compile
 -- time whose arity was not yet known (forward references; see unknown_call

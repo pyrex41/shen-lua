@@ -83,7 +83,7 @@ if #actions == 0 then
     while not stin.eof do
       F["shen.initialise_environment"]()
       F["shen.prompt"]()
-      local okk, err = pcall(F["shen.read-evaluate-print"])
+      local okk, err = R.seg.pcall(F["shen.read-evaluate-print"])
       if not okk and not stin.eof then
         local e = getmetatable(err) == R.Excn and err or R.mkexcn(tostring(err))
         pcall(F["shen.toplevel-display-exception"], e)

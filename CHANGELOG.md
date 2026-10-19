@@ -39,6 +39,19 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ### Fixed
 
+- Deep non-tail recursion no longer overflows the Lua stack, in user code
+  or in the kernel's own tree walkers. `(depth 12000)` for a plain
+  `(+ 1 (depth (- N 1)))` recursion failed with `stack overflow` (it reached
+  ~8000), as did typechecking a 3000-deep `[s N]` term or a 10000-element
+  `[list number]` (`shen.curry`) and reading a 4000-element list literal
+  (`shen.find-types`, `shen.process-applications`). LuaJIT's stack is a
+  fixed ~65500 slots per coroutine (`LJ_STACK_MAX`, a compile-time
+  constant), so a compiled function that makes a non-tail call now counts
+  itself while it is on the stack, and every 160 of them the next call runs
+  on a fresh coroutine stack. Tail calls are not counted, so constant-stack
+  loops are unchanged. Depth is bounded by memory (`(depth 100000)` works);
+  past 10000 nested segments, shared with the Prolog engine's, a call raises
+  the trappable `Lua stack depth limit exceeded` (pyrex41/shen-lua#93).
 - A warm fasl hit no longer runs a nested `load` twice. When a loaded file
   loaded another file, from a top-level `(load ...)` form or from a function
   that loads, the nested file's output printed twice on every cached run.

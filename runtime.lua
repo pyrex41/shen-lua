@@ -292,4 +292,102 @@ M.to_str = to_str
 M.shortest_float = shortest_float
 M.num_to_str = num_to_str
 
+----------------------------------------------------------------------
+-- Lua stack segments (pyrex41/shen-lua#93)
+----------------------------------------------------------------------
+-- LuaJIT's Lua stack is a fixed ~65500 slots per coroutine (LJ_STACK_MAX,
+-- a compile-time constant), so non-tail recursion in compiled KL -- the
+-- kernel's own tree walkers (shen.curry, shen.find-types,
+-- shen.process-applications) and user code alike -- overflowed after about
+-- 12k frames, where shen-go grows its stack. Every coroutine has its own
+-- stack, so deep recursion continues on a fresh one (a segment), as the
+-- Prolog engine already does for deep proofs (#85).
+--
+-- SD[1] counts the compiled functions on the current stack that are waiting
+-- on a non-tail call (compiler.lua NT_SRC: such a function counts itself on
+-- entry and restores the count before it returns or tail-calls). Once
+-- SEG_FRAMES of them are open, the next one runs on a new coroutine instead
+-- (M.seg.run). Tail calls are never counted, so a loop that runs in constant
+-- stack never opens a segment. NTV is the trampoline form for code outside
+-- a defun; natives that call back into Shen code count inline.
+--
+-- An error unwinds past the restores, so the catch points restore the count
+-- by assignment: M.seg.pcall / .xpcall (the compiled trap-error and the
+-- runtime's own pcalls use them), M.seg.call (host entry points, so an error
+-- a host catches does not leak the count) and the segment runner itself.
+do
+  local co_create, co_resume, co_status, co_yield =
+    coroutine.create, coroutine.resume, coroutine.status, coroutine.yield
+  local unpack = unpack or table.unpack
+  local SEG_FRAMES = 160      -- counted calls per segment (C.SEG_FRAMES)
+  local SEG_MAX = 10000       -- nested segments: each costs ~200 bytes of C stack
+  local SD = { 0 }            -- counted calls open on the current stack
+  local nseg, total = 0, 0
+  local ERR = function(msg) error(msg, 0) end
+  local function pack(...) return { n = select("#", ...), ... } end
+  local S = { SD = SD, FRAMES = SEG_FRAMES }
+
+  -- Run f(...) on a fresh coroutine stack and return its value. Errors are
+  -- rethrown unchanged (Shen exception objects included); a yield from
+  -- inside (an embedding host's) is passed through to the enclosing
+  -- coroutine.
+  function S.run(f, ...)
+    if nseg >= SEG_MAX then
+      ERR("Lua stack depth limit exceeded (" .. SEG_MAX .. " stack segments)")
+    end
+    local saved, saved_n = SD[1], nseg
+    nseg = nseg + 1; SD[1] = 0
+    total = total + 1
+    local co = co_create(f)
+    local res = pack(co_resume(co, ...))
+    while res[1] and co_status(co) ~= "dead" do
+      local up = pack(pcall(co_yield, unpack(res, 2, res.n)))
+      if not up[1] then res = up; break end   -- no coroutine to yield to
+      res = pack(co_resume(co, unpack(up, 2, up.n)))
+    end
+    -- assign, not decrement: segments abandoned while suspended never return
+    SD[1], nseg = saved, saved_n
+    if not res[1] then error(res[2], 0) end
+    return res[2]
+  end
+  local run = S.run
+  -- S.run for the function that called it (a lambda has no name to pass)
+  local getinfo = debug and debug.getinfo
+  function S.runself(...)
+    return run(getinfo(2, "f").func, ...)
+  end
+
+  -- the trampoline outside a defun (vararg: a FUNCV entry never starts a
+  -- root trace of its own)
+  function S.NTV(f, ...)
+    local d = SD[1]
+    if d < SEG_FRAMES then SD[1] = d + 1; local r = f(...); SD[1] = d; return r end
+    return run(f, ...)
+  end
+
+  local function restore(d, ok, ...)
+    if not ok then SD[1] = d end
+    return ok, ...
+  end
+  local function rethrow(d, ok, ...)
+    if not ok then SD[1] = d; error((...), 0) end
+    return ...
+  end
+  function S.pcall(f, ...) return restore(SD[1], pcall(f, ...)) end
+  function S.xpcall(f, h) return restore(SD[1], xpcall(f, h)) end
+  -- f(...) for a host entry point
+  function S.call(f, ...) return rethrow(SD[1], pcall(f, ...)) end
+
+  -- segments ever opened, nested now, counted calls open on this stack
+  function S.stats() return total, nseg, SD[1] end
+  -- set the nesting cap (tests); returns the previous value
+  function S.limit(max)
+    local m0 = SEG_MAX
+    SEG_MAX = max or m0
+    return m0
+  end
+  function S.set_error(fn) ERR = fn end
+  M.seg = S
+end
+
 return M

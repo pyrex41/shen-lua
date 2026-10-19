@@ -3,6 +3,8 @@
 -- ShenOSKernel 43.1 modules are pure defuns; initialise() below runs
 -- (shen.initialise), the extension initialisers and (stlib.initialise).
 local R = require("runtime")
+-- restores the stack-segment count on a caught error (runtime.lua, #93)
+local pcall = R.seg.pcall
 local C = require("compiler")
 local P = require("prims")
 
