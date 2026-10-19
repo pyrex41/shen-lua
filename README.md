@@ -192,7 +192,10 @@ LuaJIT trace logs, run `luajit -jv bin/shen ...`.
 Prolog and the typechecker run on a native engine (`prolog_engine.lua`); the
 portable kernel predicates that show up on compile and execution paths are
 overridden in `prims.lua`. Caches (kernel bytecode, stdlib signatures, user fasl)
-are content-keyed and safe to delete. Internals:
+are content-keyed and safe to delete. The kernel bytecode and stdlib signatures
+live in `${XDG_CACHE_HOME:-$HOME/.cache}/shen-lua/` (`SHEN_KERNEL_CACHE=<path>`
+overrides, `=off` disables); user fasls in `~/.cache/shen-lua-fasl/`
+(`SHEN_FASL_DIR`, `SHEN_FASL=off`). Internals:
 [`doc/PERF-HANDOFF.md`](doc/PERF-HANDOFF.md),
 [`doc/BENCHMARKS.md`](doc/BENCHMARKS.md).
 

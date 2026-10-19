@@ -4,7 +4,7 @@
 -- Two layers of the boot are cached, and each replaces work that used to be
 -- redone on every single start:
 --
---   * the kernel bytecode cache (.shen-kernel-cache.<build>.bin) holds the
+--   * the kernel bytecode cache (~/.cache/shen-lua/kernel-<build>.bin) holds the
 --     compiled ShenOSKernel 42.2 modules, including the precompiled stdlib
 --     (klambda/stlib.kl);
 --   * its sidecar (<kernel cache>.stlib) holds the 290 standard-library type
@@ -138,6 +138,59 @@ do
 
   os.remove(script); os.remove(kcache); os.remove(kcache .. ".stlib")
   for _, d in ipairs({ d1, d2 }) do os.execute("rm -rf " .. sh_quote(d)) end
+end
+
+-- ---------------------------------------------------------------------------
+-- Part 1b — the default kernel cache is per-user, not per-cwd (issue #87).
+--
+-- With SHEN_KERNEL_CACHE unset the cache (and its .stlib sidecar) goes to
+-- $XDG_CACHE_HOME/shen-lua/, else $HOME/.cache/shen-lua/, created on first
+-- write; nothing is written into the directory shen runs from.
+-- ---------------------------------------------------------------------------
+do
+  local function fresh() local d = os.tmpname(); os.remove(d); return d end
+  local function ls(d)
+    local out = {}
+    local h = io.popen("ls -A " .. sh_quote(d) .. " 2>/dev/null")
+    for l in h:lines() do out[#out + 1] = l end
+    h:close()
+    table.sort(out)
+    return table.concat(out, " ")
+  end
+  -- boot_in changes directory, so the launcher path must be absolute
+  local abs = here:sub(1, 1) == "/" and here or ((os.getenv("PWD") or ".") .. "/" .. here)
+  local shen_bin = sh_quote(abs .. "bin/shen")
+  local function boot_in(cwd, env)
+    os.execute("mkdir -p " .. sh_quote(cwd))
+    return run("cd " .. sh_quote(cwd) .. " && env -u SHEN_KERNEL_CACHE -u XDG_CACHE_HOME "
+               .. env .. " SHEN_FASL=off luajit " .. shen_bin .. " -e '(+ 1 2)'")
+  end
+
+  local root = fresh()
+  local cwd, xdg, home = root .. "/cwd", root .. "/xdg", root .. "/home"
+  local out = boot_in(cwd, "XDG_CACHE_HOME=" .. sh_quote(xdg) .. " HOME=" .. sh_quote(home))
+  check(out:match("3%s*$") ~= nil, "#87: boot with the default cache path works (got " .. out .. ")")
+  check(ls(cwd) == "", "#87: nothing is written into the cwd (got " .. ls(cwd) .. ")")
+  local files = ls(xdg .. "/shen-lua")
+  check(files:match("^kernel%-%x+%.bin kernel%-%x+%.bin%.stlib$") ~= nil,
+        "#87: kernel cache and sidecar land in $XDG_CACHE_HOME/shen-lua (got " .. files .. ")")
+  check(ls(home) == "", "#87: $HOME is untouched when XDG_CACHE_HOME is set")
+  out = boot_in(cwd, "XDG_CACHE_HOME=" .. sh_quote(xdg) .. " HOME=" .. sh_quote(home))
+  check(out:match("3%s*$") ~= nil, "#87: warm boot from the per-user cache works")
+
+  out = boot_in(cwd, "HOME=" .. sh_quote(home))
+  files = ls(home .. "/.cache/shen-lua")
+  check(out:match("3%s*$") ~= nil and files:match("^kernel%-%x+%.bin kernel%-%x+%.bin%.stlib$") ~= nil,
+        "#87: without XDG_CACHE_HOME the cache lands in $HOME/.cache/shen-lua (got " .. files .. ")")
+  check(ls(cwd) == "", "#87: still nothing in the cwd")
+
+  -- an unwritable cache location is not an error: the kernel just is not cached
+  local ro = root .. "/ro"
+  os.execute("mkdir -p " .. sh_quote(ro) .. " && chmod 555 " .. sh_quote(ro))
+  out = boot_in(cwd, "XDG_CACHE_HOME=" .. sh_quote(ro .. "/sub") .. " HOME=" .. sh_quote(home))
+  check(out:match("3%s*$") ~= nil, "#87: an unwritable cache dir still boots (got " .. out .. ")")
+  os.execute("chmod 755 " .. sh_quote(ro))
+  os.execute("rm -rf " .. sh_quote(root))
 end
 
 -- ---------------------------------------------------------------------------

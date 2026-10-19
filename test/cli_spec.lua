@@ -20,6 +20,7 @@
 --     itself on 42), --hush-load / SHEN_HUSH_LOAD=1 (load's echo dropped,
 --     the program's own (output ...) kept), including that --hush-load output
 --     is byte-identical cold and on a warm fasl hit;
+--   * a warm fasl hit runs a nested (load) once, not twice (issue #92);
 --   * shen.boot{hush_load = true}, the embedder spelling of that mode.
 --
 -- Every subprocess is wrapped in `timeout` when available, so an EOF-loop
@@ -368,6 +369,54 @@ do
 
   os.remove(fpath)
   for _, d in ipairs{dq, dh, dd, de} do os.execute("rm -rf " .. sh_quote(d)) end
+end
+
+-- ---------------------------------------------------------------------------
+-- A warm fasl hit runs a nested (load) once (pyrex41/shen-lua#92).
+-- A file that loads another file — from a top-level (load ...) form or from a
+-- function that loads — used to replay the inner file's chunks twice on a hit:
+-- once by re-running the outer chunk that calls load, and once more from a
+-- copy of the inner records spliced into the outer fasl. Its output therefore
+-- doubled on every warm run. The output must be the same cold, warm and with
+-- SHEN_FASL=off.
+-- ---------------------------------------------------------------------------
+do
+  local fdir = os.tmpname(); os.remove(fdir)
+  local lib = os.tmpname() .. ".shen"
+  local h = io.open(lib, "w"); h:write('(output "LIB~%")\n'); h:close()
+  local function shen_file(body)
+    local p = os.tmpname() .. ".shen"
+    local fh = io.open(p, "w"); fh:write(body); fh:close()
+    return p
+  end
+  local ql = '"' .. lib .. '"'
+  local mains = {
+    ["top-level load"] = shen_file('(output "BEGIN~%")\n(load ' .. ql .. ')\n'
+      .. '(load ' .. ql .. ')\n(output "END~%")\n'),
+    ["load from a function"] = shen_file('(output "BEGIN~%")\n(load ' .. ql .. ')\n'
+      .. '(define fasl92-reload X -> (load X))\n(fasl92-reload ' .. ql .. ')\n'
+      .. '(output "END~%")\n'),
+  }
+  local want = "BEGIN\nLIB\nLIB\nEND\n"
+  for what, main in pairs(mains) do
+    os.execute("rm -rf " .. sh_quote(fdir))
+    local cmd = SHEN .. " --hush-load " .. sh_quote(main)
+    local envp = "env SHEN_FASL_DIR=" .. sh_quote(fdir) .. " "
+    local cold, ccode = run(envp .. cmd)
+    local warm, wcode = run(envp .. "SHEN_FASL_DEBUG=1 " .. cmd)
+    local warm2 = run(envp .. cmd)
+    local off = run("env SHEN_FASL=off " .. cmd)
+    check(ccode == 0 and wcode == 0, "#92 " .. what .. ": cold and warm runs exit 0")
+    check(warm:find("[fasl] hit", 1, true) ~= nil,
+          "#92 " .. what .. ": second run is a fasl HIT")
+    warm = warm:gsub("%[fasl%][^\n]*\n", "")
+    check(off == want, "#92 " .. what .. ": SHEN_FASL=off prints LIB twice")
+    check(cold == want, "#92 " .. what .. ": cold run prints LIB twice")
+    check(warm == want, "#92 " .. what .. ": warm hit prints LIB twice, not four times")
+    check(warm2 == want, "#92 " .. what .. ": second warm hit is unchanged")
+    os.remove(main)
+  end
+  os.remove(lib); os.execute("rm -rf " .. sh_quote(fdir))
 end
 
 -- ---------------------------------------------------------------------------

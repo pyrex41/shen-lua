@@ -32,6 +32,7 @@ local specs = {
   "test/boot_cache_spec.lua",
   "test/cli_spec.lua",
   "test/checked_integer_spec.lua",
+  "test/datatype_consume_spec.lua",
   "test/engine_spec.lua",
   "test/error_robustness_spec.lua",
   "test/eval_order_spec.lua",
@@ -45,6 +46,7 @@ local specs = {
   "test/numeric_render_spec.lua",
   "test/primitives_spec.lua",
   "test/prolog_semantics_spec.lua",
+  "test/reader_native_spec.lua",
   "test/reader_spec.lua",
   "test/repl_spec.lua",
   "test/stack_segments_spec.lua",
@@ -53,6 +55,7 @@ local specs = {
   "test/typecheck_api_spec.lua",
   "test/typecheck_lazy_spec.lua",
   "test/utf8_strings_spec.lua",
+  "test/wide_compile_spec.lua",
 }
 
 local function sh_quote(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end

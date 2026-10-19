@@ -236,14 +236,38 @@ end
 -- invalidate + rewrite each other's cache, recompiling the kernel every time.
 -- The filename suffix is a hash of the same version/arch fingerprint that
 -- cache_key() folds into the content key.
+--
+-- The default lives in the per-user cache directory,
+-- ${XDG_CACHE_HOME:-$HOME/.cache}/shen-lua/ (issue #87: it used to be a
+-- relative path, so every directory shen ran from got its own ~1.8 MB copy
+-- and recompiled the kernel). With neither variable set there is no default
+-- and the kernel is compiled on every boot, as with SHEN_KERNEL_CACHE=off.
 local function cache_path()
   if not bit then return nil end   -- PUC Lua: no `bit` -> no cache keys
   local p = os.getenv("SHEN_KERNEL_CACHE")
   if p == "off" or p == "0" then return nil end
   if p and p ~= "" then return p end
-  return ".shen-kernel-cache."
+  local dir = os.getenv("XDG_CACHE_HOME")
+  if not dir or dir == "" then
+    local home = os.getenv("HOME")
+    if not home or home == "" then return nil end
+    dir = home .. "/.cache"
+  end
+  return dir .. "/shen-lua/kernel-"
       .. bit.tohex(fnv1a(jit and (jit.version .. jit.arch) or _VERSION))
       .. ".bin"
+end
+
+-- io.open(path, "wb"), creating path's directory on the first write. Returns
+-- nil when it still cannot be opened (read-only location): callers then skip
+-- caching.
+local function open_for_write(path)
+  local fh = io.open(path, "wb")
+  if fh then return fh end
+  local dir = path:match("^(.*)/[^/]*$")
+  if not dir or dir == "" then return nil end
+  os.execute("mkdir -p '" .. dir:gsub("'", "'\\''") .. "' 2>/dev/null")
+  return io.open(path, "wb")
 end
 
 local function read_file(path)
@@ -351,18 +375,11 @@ local function write_cache(path, key, chunks, arity, counters)
   end
   parts[#parts+1] = tostring(counters.gensym) .. "\n" .. tostring(counters.infs) .. "\n"
   local tmp = path .. ".tmp"
-  local fh = io.open(tmp, "wb")
+  local fh = open_for_write(tmp)
   if not fh then return end  -- read-only dir: silently skip caching
   fh:write(table.concat(parts)); fh:close()
   os.remove(path)
   os.rename(tmp, path)
-  -- Writing a per-build default cache obsoletes the old shared-path file from
-  -- pre-per-build versions (it would sit stale forever otherwise). Only the
-  -- default path triggers this — an explicit SHEN_KERNEL_CACHE never does.
-  if path:match("^%.shen%-kernel%-cache%.%x+%.bin$") then
-    os.remove(".shen-kernel-cache.bin")
-    os.remove(".shen-kernel-cache.bin.tmp")
-  end
 end
 
 -- Parse a write_cache blob. key == nil skips the key check (used for the
@@ -785,7 +802,9 @@ end
 -- Known: (destroy ...) at the REPL between loads is not in the key.
 -- SHEN_FASL=off disables; SHEN_FASL_DIR overrides ~/.cache/shen-lua-fasl;
 -- SHEN_FASL_DEBUG=1 logs hits/misses to stderr.
-local FASL_FORMAT = "SHENFASL6"  -- 6: "dv" (shen.*datatypes* by name) replaces
+local FASL_FORMAT = "SHENFASL7"  -- 7: a nested load run inside a chunk is no
+                                 -- longer spliced into the outer fasl (#92);
+                                 -- 6: "dv" (shen.*datatypes* by name) replaces
                                  -- "dt" (re-run shen.process-datatype);
                                  -- 5: "lt" (shen.*lambdatable* delta by name);
                                  -- 4: "e" (per-form value/type echo)
@@ -1305,30 +1324,39 @@ local function install_fasl()
   -- on a miss — so the outer stream stays a complete description of everything
   -- the outer span did, in order. An inner recording that could not be
   -- serialized poisons the outer one for the same reason.
+  --
+  -- Only a load made OUTSIDE the outer span's chunks has a hole to fill (one
+  -- run at macroexpansion time, say). A load made while one of the outer
+  -- chunks executes — a top-level (load ...) form, or a function that loads —
+  -- is already in the outer stream as that chunk, and replaying the chunk
+  -- runs the load again; splicing it as well replays it twice (issue #92).
   local function splice_into_outer(recs, uncacheable, deps)
     local outer = FASL_STACK[#FASL_STACK]
     if not outer then return end
+    if outer.deps and deps then
+      for _, d in ipairs(deps) do outer.deps[#outer.deps + 1] = d end
+    end
+    if outer.in_chunk then return end
     for _, r in ipairs(recs) do
       outer.n = outer.n + 1
       outer[outer.n] = r
     end
     if uncacheable then outer.uncacheable = outer.uncacheable or uncacheable end
-    if outer.deps and deps then
-      for _, d in ipairs(deps) do outer.deps[#outer.deps + 1] = d end
-    end
   end
 
   local orig_load = F["load"]
   F["load"] = function(fname)
     if type(fname) ~= "string" then return orig_load(fname) end
-    local fh = io.open(fname, "rb")
+    -- the file the kernel's load would read: open resolves *home-directory*
+    local fpath = P.home_path(fname)
+    local fh = io.open(fpath, "rb")
     if not fh then return orig_load(fname) end   -- let the kernel error
     local content = fh:read("*a"); fh:close()
     -- Every file a recorded span loads is an input to that span's cache key;
     -- the boot image stores them so it can verify them all on the next boot.
     local outer = FASL_STACK[#FASL_STACK]
     if outer and outer.deps then
-      outer.deps[#outer.deps + 1] = { path = fname, content = content }
+      outer.deps[#outer.deps + 1] = { path = fpath, content = content }
     end
     local key = fasl_key(content)
     local path = dir .. "/" .. key .. ".fasl"
@@ -1415,7 +1443,7 @@ local function write_sigs(path, key, decl, counters)
   end
   parts[#parts+1] = tostring(counters.gensym) .. "\n" .. tostring(counters.infs) .. "\n"
   local tmp = path .. ".tmp"
-  local fh = io.open(tmp, "wb")
+  local fh = open_for_write(tmp)
   if not fh then return end
   fh:write(table.concat(parts)); fh:close()
   os.remove(path)
