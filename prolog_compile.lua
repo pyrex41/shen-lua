@@ -250,7 +250,32 @@ end
 -- into a KL defun called with materialized term arguments. Returns the Lua
 -- call expression.
 local guard_n = 0
+
+-- A guard argument that names one engine term: (shen.deref X B) or a bare
+-- term variable X (the driver may already have dereferenced X, as the 43.1
+-- deref-hoisted by-hypothesis-h does). Returns its Lua local, else nil.
+local function guard_term_ref(x, env)
+  if is_cons(x) and x[1] == SYM["shen.deref"] and is_cons(x[2]) then
+    x = x[2][1]
+  end
+  if is_klvar(x) then
+    local b = env[x.name]
+    if b and b.kind == "term" then return b.lua end
+  end
+  return nil
+end
+
 local function lift_guard(ctx, e, env, out, d)
+  -- (= T1 T2) over two engine terms: compare in the arena (E.eqterm) instead
+  -- of materializing both sides to Shen lists and calling `=`. This is the
+  -- by-hypothesis check, run once per hypothesis per goal; materializing it
+  -- was ~75% of a typecheck-heavy run.
+  if is_cons(e) and e[1] == SYM["="] and is_cons(e[2]) and is_cons(e[2][2])
+     and e[2][2][2] == NIL then
+    local a = guard_term_ref(e[2][1], env)
+    local b = a and guard_term_ref(e[2][2][1], env)
+    if b then return "EQTERM(" .. a .. ", " .. b .. ")" end
+  end
   -- replace (shen.deref X B) / (shen.lazyderef X B) with fresh params
   local params, args = {}, {}
   local seen = {}   -- engine var -> param (dedupe repeated references)
@@ -976,6 +1001,7 @@ local E, NP, F, MAT, IMP = ...
 local CONS, CAR, CDR, LZD = E.cons, E.car, E.cdr, E.lazyderef
 local NEWVAR, POPVAR = E.newvar, E.popvar
 local UNIFY, UNIFYOC, BIND1 = E.unify, E.unify_oc, E.bind1
+local EQTERM = E.eqterm
 local CUT, UNLOCK, LOCKOPEN = E.cut, E.unlock, E.lock_is_open
 local INCINFS, THAW, THAWN, CAPREF = E.incinfs, E.thawH, E.thawN, E.capref
 local GVAR, GCALL, GFINDALL = E.g_var, E.g_call, E.g_findall
