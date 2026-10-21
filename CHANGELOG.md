@@ -53,6 +53,35 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ### Fixed
 
+- The native typechecker no longer returns wrong verdicts on a kernel whose
+  type-checker defuns differ from the ones it was written against. On
+  ShenOSKernel 43.1 with the typecheck deref hoist (shen-sources
+  `perf/typecheck-deref-hoist`), the translated `shen.by-hypothesis` called
+  the new `shen.by-hypothesis-h`, which had no native definition. The call
+  raised a plain Lua error. That error reached callers as an ordinary Shen
+  exception, which `trap-error` (and the Lua `shen.typecheck` API, which
+  fails closed) read as "does not typecheck". Every typecheck failed and
+  the process exited 0. Now:
+  - The translated drivers are the closure of the t-star roots under
+    "calls by name": any `t-star.kl` defun a driver calls is translated too,
+    so the hoisted kernel's `shen.by-hypothesis-h` runs natively.
+  - Before the first typecheck, every kernel defun the port reimplements
+    instead of translating is fingerprinted against the versions it
+    implements. That covers the hand-ported `shen.typecheck`,
+    `lookupsig`/`sigf`, `search-user-datatypes`(`-h`), `show` and
+    `maxinfexceeded?`, plus the `prolog.kl` primitives and builtin goals.
+    The fingerprint is gensym-insensitive; regenerate it with
+    `scripts/kernel-fingerprints.lua`. The set also checks that every driver
+    call resolves.
+  - A mismatch makes typechecks use the kernel's own KL typechecker, and
+    stderr names the defun once. A predicate that is missing at run time
+    raises a distinct sentinel, and the query is rerun on the KL engine.
+  - `SHEN_TYPECHECK_NATIVE=require` raises an error instead of falling back.
+  - `test/kernel_conformance_spec.lua` runs the native typechecker on the
+    vendored 43.1 and the deref-hoisted 43.1 (fixture under
+    `test/fixtures/`) against the kernel's KL typechecker. It also runs it
+    on deliberately mismatched kernels.
+
 - Deep non-tail recursion no longer overflows the Lua stack, in user code
   or in the kernel's own tree walkers. `(depth 12000)` for a plain
   `(+ 1 (depth (- N 1)))` recursion failed with `stack overflow` (it reached
