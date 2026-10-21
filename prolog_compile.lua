@@ -167,6 +167,16 @@ local BUILTIN_GOALS = {
   ["call"] = true,
 }
 
+-- A call to another predicate by name. Records the callee (the driver
+-- closure in typecheck_native.lua follows these) and resolves through MISS so
+-- a name with no native predicate raises E.native_miss rather than calling
+-- nil.
+local function np_ref(ctx, nm)
+  ctx.callees[nm] = true
+  local q = string.format("%q", nm)
+  return "(NP[" .. q .. "] or MISS(" .. q .. "))"
+end
+
 local function refuse(ctx, why)
   ctx.failed = why
   error(ctx.fail, 0)
@@ -742,8 +752,8 @@ compile_value = function(ctx, e, env, out, d)
           for _, l in ipairs(gb) do out[#out + 1] = l end
           local gname = sname(g[1])
           if BUILTIN_GOALS[gname] then refuse(ctx, "builtin inside fork") end
-          out[#out + 1] = indent(d) .. guard .. r .. " = NP[" ..
-            string.format("%q", gname) .. "](" ..
+          out[#out + 1] = indent(d) .. guard .. r .. " = " ..
+            np_ref(ctx, gname) .. "(" ..
             table.concat(parts, ", ") .. (gn > 0 and ", " or "") ..
             nk .. ", " .. kv .. ")" .. (first and "" or " end")
           first = false
@@ -774,7 +784,7 @@ compile_value = function(ctx, e, env, out, d)
     local k = compile_cont(ctx, a[an], env, out, d)
     parts[#parts + 1] = n
     parts[#parts + 1] = k
-    return "NP[" .. string.format("%q", nm) .. "](" .. table.concat(parts, ", ") .. ")"
+    return np_ref(ctx, nm) .. "(" .. table.concat(parts, ", ") .. ")"
   end
 
   refuse(ctx, "unsupported form")
@@ -1002,6 +1012,7 @@ local CONS, CAR, CDR, LZD = E.cons, E.car, E.cdr, E.lazyderef
 local NEWVAR, POPVAR = E.newvar, E.popvar
 local UNIFY, UNIFYOC, BIND1 = E.unify, E.unify_oc, E.bind1
 local EQTERM = E.eqterm
+local MISS = E.native_miss
 local CUT, UNLOCK, LOCKOPEN = E.cut, E.unlock, E.lock_is_open
 local INCINFS, THAW, THAWN, CAPREF = E.incinfs, E.thawH, E.thawN, E.capref
 local GVAR, GCALL, GFINDALL = E.g_var, E.g_call, E.g_findall
@@ -1030,7 +1041,7 @@ local function translate_once(name, allparams, body, mode)
                          allparams[np - 1], allparams[np]
 
   local ctx = setmetatable({
-    buf = {}, nlift = 0, nlocal = 0, fail = {}, liftnames = {},
+    buf = {}, nlift = 0, nlocal = 0, fail = {}, liftnames = {}, callees = {},
     fnloc = nparams + 2, split = mode and true or false, wide = mode == "wide",
   }, CtxMT)
 
@@ -1081,7 +1092,7 @@ local function translate_once(name, allparams, body, mode)
     return nil, "luagen: " .. tostring(err) .. "\n" .. source, nil, err
   end
   local fn = chunk(E, NP, F, E.materialize, E.import_cached)
-  return fn, nil, source
+  return fn, nil, source, nil, ctx.callees
 end
 
 -- Let-chain splitting (see compile_value) costs a call per split point, so
@@ -1097,15 +1108,16 @@ local function width_error(lerr)
       or lerr:find("too many lifted functions", 1, true) ~= nil
 end
 
+-- Returns fn, err, src, callees (the set of predicate names fn calls).
 local function translate_core(name, allparams, body)
-  local fn, err, src, lerr = translate_once(name, allparams, body, false)
+  local fn, err, src, lerr, callees = translate_once(name, allparams, body, false)
   if lerr and tostring(lerr):find("local variables", 1, true) then
-    fn, err, src, lerr = translate_once(name, allparams, body, "split")
+    fn, err, src, lerr, callees = translate_once(name, allparams, body, "split")
   end
   if width_error(lerr) then
-    fn, err, src = translate_once(name, allparams, body, "wide")
+    fn, err, src, lerr, callees = translate_once(name, allparams, body, "wide")
   end
-  return fn, err, src
+  return fn, err, src, callees
 end
 M.translate_core = translate_core
 
@@ -1131,8 +1143,8 @@ function M.translate_defun(defunForm)
   local name = sname(parts[2])
   local allparams = lst2tbl(parts[3])
   local body = parts[4]
-  local fn, err, src = translate_core(name, allparams, body)
-  return fn, err, src, name
+  local fn, err, src, callees = translate_core(name, allparams, body)
+  return fn, err, src, name, callees
 end
 
 -- ---------------------------------------------------------------------------
@@ -1268,9 +1280,7 @@ local function install_dispatch_builtins()
       error("native call: goal head is not a symbol")
     end
     local fn = NP[hv.name]
-    if not fn then
-      error("native call: no native predicate " .. hv.name)
-    end
+    if not fn then E.native_miss(hv.name) end
     local args, an = {}, 0
     local rest = E.lazyderef(E.cdr(d))
     while rest >= E.CONS_BASE do

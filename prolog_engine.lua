@@ -870,6 +870,21 @@ end
 -- ---------------------------------------------------------------------------
 M.NativePred = {}
 
+-- A translated predicate calls another by name through NativePred. A name
+-- with no native predicate used to be `nil(...)`: a plain Lua error that
+-- trap-error turns into an ordinary Shen exception, so a typecheck that hit
+-- it simply looked like a failed typecheck (wrong answer, exit 0). Call
+-- sites now resolve through MISS, which raises this distinct sentinel; the
+-- typecheck entry recognises it and reruns the whole query on the kernel's
+-- KL engine (typecheck_native.lua).
+local MissMT = { __tostring = function(m)
+  return "native prolog: no native predicate " .. tostring(m.name)
+end }
+function M.native_miss(name)
+  error(setmetatable({ name = name }, MissMT), 0)
+end
+function M.is_native_miss(x) return getmetatable(x) == MissMT end
+
 -- ---------------------------------------------------------------------------
 -- install: wiring into the running kernel. Inert until prolog_compile.lua
 -- (Phase 2) and typecheck_native.lua (Phase 3) register their overrides.

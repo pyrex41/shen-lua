@@ -42,6 +42,7 @@ local specs = {
   "test/interop_spec.lua",
   "test/io_spec.lua",
   "test/jit_spec.lua",
+  "test/kernel_conformance_spec.lua",
   "test/library_spec.lua",
   "test/numeric_literal_spec.lua",
   "test/numeric_render_spec.lua",
