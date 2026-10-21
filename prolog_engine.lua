@@ -76,7 +76,7 @@ local cell_top, var_top, trail_top, cap_top = 0, 0, 0, 0
 
 -- Kernel globals / error thrower, bound in install(). Declared up here
 -- because newvar's per-query capacity check needs them.
-local GLOBALS, ERRFN
+local GLOBALS, ERRFN, KEQ   -- KEQ: the kernel's `=`
 
 -- Per-query variable capacity (the kernel's shen.prolog-vector ceiling).
 -- shen.call-prolog allocates ONE absvector of (value shen.*prolog-memory*)
@@ -735,6 +735,40 @@ local function materialize(v)
 end
 M.materialize = materialize
 
+-- eqterm: Shen `=` of two arena terms, i.e. (= (materialize a)
+-- (materialize b)), without building either side. Identical terms are equal
+-- and a cons never equals a non-cons. Any other pair of distinct non-cons
+-- terms (atoms or vars) is decided by the kernel's `=` on their
+-- materializations, which are O(1) (an atom's value or a cached pvar), so
+-- opaque values such as tuples and vectors keep their structural `=`.
+-- Iterative over the cdr spine; car nesting recurses and is counted like
+-- import's (runtime.lua stack segments, #93).
+local eqterm
+eqterm = function(a, b)
+  while true do
+    a = lazyderef(a); b = lazyderef(b)
+    if a == b then return true end
+    if a >= CONS_BASE then
+      if b < CONS_BASE then return false end
+      local pa, pb = a - CONS_BASE, b - CONS_BASE
+      local ca, cb = cells[pa], cells[pb]
+      if ca ~= cb then
+        local same
+        local d = SD[1]
+        if d < SEG_FRAMES then SD[1] = d + 1; same = eqterm(ca, cb); SD[1] = d
+        else same = SEGRUN(eqterm, ca, cb) end
+        if not same then return false end
+      end
+      a = cells[pa + 1]; b = cells[pb + 1]
+    elseif b >= CONS_BASE then
+      return false
+    else
+      return KEQ(materialize(a), materialize(b))
+    end
+  end
+end
+M.eqterm = eqterm
+
 -- ---------------------------------------------------------------------------
 -- goal builtins (legacy 6-arg goal ABI becomes (args..., n, cont))
 -- ---------------------------------------------------------------------------
@@ -844,6 +878,7 @@ function M.install(P)
   M.P = P
   GLOBALS = P.GLOBALS
   ERRFN = P.ERR
+  KEQ = function(x, y) return P.F["="](x, y) end
   for _, mod in ipairs({ "prolog_compile", "typecheck_native" }) do
     local ok, m = pcall(require, mod)
     if ok then

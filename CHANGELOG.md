@@ -37,6 +37,20 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 - `bin/yggdrasil-build.lua` expects `kernel-version=42.2` manifests (older
   slices still build, with a warning).
 
+### Performance
+
+- Typechecking: the native Prolog translator compiles an `(= T1 T2)` guard
+  over two engine terms to an in-arena comparison (`E.eqterm`) instead of
+  copying both terms out to Shen lists and calling `=`. That guard is
+  `shen.by-hypothesis`'s check, run once per hypothesis per goal, and copying
+  it was ~75% of a typecheck-heavy run: capcov's `b-typed` workload drops
+  from ~48 s to ~11 s CPU (instructions retired 661 G -> 140 G) with
+  byte-identical output. Each side may be
+  `(shen.deref X B)` or a bare term variable, so the deref-hoisted
+  `by-hypothesis-h` of a patched 43.1 kernel takes the same path. Atoms and
+  variables that differ still go through the kernel's `=`, so tuples and
+  vectors keep structural equality.
+
 ### Fixed
 
 - Deep non-tail recursion no longer overflows the Lua stack, in user code
