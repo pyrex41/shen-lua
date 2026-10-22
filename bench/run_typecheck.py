@@ -131,6 +131,20 @@ def main():
                         expected_fasl = 'off' if state == 'off' else ('miss' if state == 'cold' or prime else 'hit')
                         if any(v['cache'] != expected_fasl for v in report['loads']):
                             raise RuntimeError(f'{label}: unexpected fixture cache routing: {report["loads"]}')
+                        for load in report['loads']:
+                            infs = load['inferences']
+                            if not isinstance(infs, int) or infs < 0:
+                                raise RuntimeError(f'{label}: invalid load inference counter {infs}')
+                            transitions = load['dispatch_transitions']
+                            if engine == 'native':
+                                if any(r['engine'] not in ('preparing', 'native') for r in transitions):
+                                    raise RuntimeError(f'{label}: source load left native dispatch')
+                                # FASL hits replay declarations directly; they
+                                # can incur inferences without dispatcher calls.
+                                if infs and not transitions and load['cache'] != 'hit':
+                                    raise RuntimeError(f'{label}: missing source-load routing evidence')
+                            elif transitions:
+                                raise RuntimeError(f'{label}: legacy source load used native dispatcher')
                         counts = {}
                         for q in report['queries']:
                             infs = q['inferences']

@@ -740,6 +740,9 @@ function M.install(Pmod, Emod)
     if M.track_routes then
       M.last_route = { engine = engine, reason = reason,
                        native_attempted = attempted or false }
+      -- Optional ordered dispatch transitions for a whole source load. Unlike
+      -- last_route, this retains earlier fallbacks and errors in that load.
+      if M.route_log then M.route_log[#M.route_log+1] = M.last_route end
     end
   end
   local function typecheck_dispatch(expr, type_)

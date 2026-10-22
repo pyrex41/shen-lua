@@ -86,6 +86,10 @@ function M.run(mode)
     wrap(P.F, 'read-file', 'source_read_parse_expand')
     wrap(P.F, 'shen.shen->kl', 'source_lower')
     wrap(P.F, 'read-from-string', 'parse_expand_inclusive')
+    wrap(P.F, 'macroexpand', 'macroexpand_inclusive')
+    wrap(P.F, 'shen.source-macro-walk', 'source_macro_walk_inclusive')
+    wrap(P.F, 'shen.typecheck', 'source_typecheck_inclusive')
+    wrap(P.F, 'shen.record-and-evaluate', 'record_evaluate_inclusive')
     wrap(require('compiler'), 'compile_top', 'kl_to_lua_defun')
     wrap(require('compiler'), 'compile_expr_chunk', 'kl_to_lua_expr')
     wrap(P, 'load_chunk', 'lua_compile')
@@ -118,8 +122,14 @@ function M.run(mode)
       assert(P.home_path(stage.fixture) == stage.fixture,
         'benchmark fixture redirected by *home-directory*')
       P.LAST_FASL_STATUS = nil
+      if TN then TN.last_route = nil; TN.route_log = {} end
       P.F.load(stage.fixture)
-      report.loads[#report.loads+1] = {path=stage.fixture, cpu=os.clock()-t, cache=P.LAST_FASL_STATUS or "off"}
+      local cpu = os.clock()-t
+      report.loads[#report.loads+1] = {path=stage.fixture, cpu=cpu,
+        cache=P.LAST_FASL_STATUS or "off", inferences=P.GLOBALS['shen.*infs*'],
+        dispatch_transitions=TN and TN.route_log or {},
+        dispatcher=report.engine}
+      if TN then TN.route_log = nil end
     end
     for _, case in ipairs(stage.cases) do
       local t = os.clock()

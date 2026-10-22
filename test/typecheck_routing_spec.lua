@@ -8,15 +8,20 @@ if not TN.native_typecheck or os.getenv('SHEN_TYPECHECK_NATIVE') == 'off' then
   return
 end
 TN.track_routes = true
+TN.route_log = {}
 local function raw()
   P.GLOBALS['shen.*infs*'] = 0
   return P.F['shen.typecheck'](1, R.intern('number'))
 end
 assert(raw() == R.intern('number'))
 assert(TN.last_route.engine == 'native' and TN.last_route.native_attempted)
+local first_route = TN.last_route
 -- Rejecting a judgment is still successful native execution.
 assert(P.F['shen.typecheck'](1, R.intern('string')) == false)
 assert(TN.last_route.engine == 'native')
+assert(#TN.route_log == 4 and TN.route_log[1].engine == 'preparing'
+  and TN.route_log[2] == first_route and TN.route_log[3].engine == 'preparing'
+  and TN.route_log[4] == TN.last_route)
 P.GLOBALS['shen.*spy*'] = true
 -- Abort before the interactive legacy spy can read stdin.
 if os.getenv('SHEN_TYPECHECK_NATIVE') == 'require' then
@@ -33,5 +38,10 @@ else
   TN.sigs_complete = complete
 end
 P.GLOBALS['shen.*spy*'] = false
+assert(#TN.route_log == 6 and TN.route_log[5].engine == 'preparing'
+  and TN.route_log[6] == TN.last_route and TN.route_log[2] == first_route)
+TN.route_log = nil
+local retained = TN.last_route
 TN.track_routes = nil
-print('typecheck_routing_spec: 1 pass, 0 fail')
+assert(raw() == R.intern('number') and TN.last_route == retained)
+print('typecheck_routing_spec: 4 pass, 0 fail')

@@ -143,3 +143,19 @@ corpus, alternating fresh processes and preserving full verdicts/inferences,
 source identities and all paired samples. It accepts separate baseline and
 candidate bundles, and a separate allocation mode. The first measured follow-up
 and its rejected experiments are documented in `arena-guards-results.md`.
+
+Each fixture-load row also retains its inference count, configured dispatcher
+and ordered dispatch transitions (engine, reason and whether native execution
+was attempted). This preserves earlier fallback/error transitions that a single
+`last_route` would lose. The strict native runner rejects load transitions out
+of native dispatch. FASL hits can replay declarations directly and incur
+inferences without dispatcher calls: an empty transition log does not certify
+those replayed operations as native queries. The hit cache state, nonzero
+counter and empty log are retained explicitly.
+
+Diagnostic-only attribution now includes macro expansion, source-form walking,
+typechecking and record/evaluate calls. These are inclusive totals across the
+process, including corpus queries where applicable; they overlap and must not
+be added together or used as accepted timing samples. The typed-loading
+investigation and rejected implementations are recorded in
+[front-end-results.md](front-end-results.md).
