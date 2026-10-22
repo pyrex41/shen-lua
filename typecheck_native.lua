@@ -165,10 +165,13 @@ local KNOWN = {
   -- outside their loops, through new -h helpers. The native
   -- search-user-datatypes hand port implements both shapes (it never
   -- copies on deref); by-hypothesis(-h) are translated, not hand-ported.
+  -- ec16a9f adds an empty-list guard before deref in the wrappers. sud
+  -- rejects an empty alternatives list without touching goal/assumptions.
+  -- Review and exact 23-file fixture: test/fixtures/kernel-ec16a9f/README.md.
   ["shen.typecheck"] = { ["53f17a8525d2d3ab"] = "43.1, 43.1+deref-hoist" },
   ["shen.lookupsig"] = { ["7613493146348a37"] = "43.1, 43.1+deref-hoist" },
   ["shen.sigf"] = { ["9224dc17fb22e027"] = "43.1, 43.1+deref-hoist" },
-  ["shen.search-user-datatypes"] = { ["f19996b77935e2cd"] = "43.1", ["bbdfd9a9f7dfc457"] = "43.1+deref-hoist" },
+  ["shen.search-user-datatypes"] = { ["f19996b77935e2cd"] = "43.1", ["bbdfd9a9f7dfc457"] = "43.1+deref-hoist", ["483d69ab4d98d601"] = "ec16a9f" },
   ["shen.search-user-datatypes-h"] = { ["absent"] = "43.1", ["a3924a95ecff6737"] = "43.1+deref-hoist" },
   ["shen.show"] = { ["832effe9caab5eb7"] = "43.1, 43.1+deref-hoist" },
   ["shen.maxinfexceeded?"] = { ["effe20ceadf236e0"] = "43.1, 43.1+deref-hoist" },
@@ -730,20 +733,49 @@ function M.install(Pmod, Emod)
   --    KL typechecker, and stderr says why, once per cause.
   --    SHEN_TYPECHECK_NATIVE=require raises an error instead of falling back.
   local orig_typecheck_ref = nil  -- resolved lazily: t-star loads before us
+  -- Opt-in last-query receipt for benchmarks/embedders (#72). No counters or
+  -- term materialization on the normal path. A receipt describes dispatch,
+  -- including a native attempt followed by a whole-query legacy retry.
+  local function route(engine, reason, attempted)
+    if M.track_routes then
+      M.last_route = { engine = engine, reason = reason,
+                       native_attempted = attempted or false }
+    end
+  end
   local function typecheck_dispatch(expr, type_)
-    ensure_drivers()   -- translate the drivers on first typecheck (see above)
+    route("preparing", "driver translation")
+    ensure_drivers()
+    local reason, attempted
     if native_problems then
+      reason = table.concat(native_problems, "; ")
+      route("unavailable", reason)
       fallback_notice("problems", native_problems)
     elseif n_fail == 0 and M.sigs_complete
        and P.GLOBALS["shen.*spy*"] ~= true then
+      attempted = true
+      route("native", "eligible", true)
       local ok, r = pcall(native_typecheck, expr, type_)
       if ok then return r end
       if E.is_native_miss(r) then
-        fallback_notice("miss:" .. tostring(r.name), { tostring(r) })
-      elseif r ~= M.NATIVE_MISS then
+        reason = tostring(r)
+        route("unavailable", reason, true)
+        fallback_notice("miss:" .. tostring(r.name), { reason })
+      elseif r == M.NATIVE_MISS then
+        reason = "unsupported datatype predicate"
+      else
+        route("native-error", tostring(r), true)
         error(r, 0)
       end
+    else
+      reason = P.GLOBALS["shen.*spy*"] == true and "spy enabled"
+        or (not M.sigs_complete and "incomplete signatures" or "driver translation failed")
     end
+    -- Strict mode must also reject spy/incomplete-signature/ABI fallbacks.
+    if REQUIRE_NATIVE then
+      route("unavailable", reason, attempted)
+      fallback_notice("route:" .. reason, { reason })
+    end
+    route("legacy", reason, attempted)
     return orig_typecheck_ref(expr, type_)
   end
   orig_typecheck_ref = F["shen.typecheck"]
