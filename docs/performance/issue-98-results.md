@@ -2,7 +2,9 @@
 
 The benchmark-repair slice is implemented, followed by exact ec16a9f adapter
 qualification and file-contained cache mutation coverage. The default vendored
-kernel remains release 715824a; no numerical representation change is adopted.
+kernel now uses the qualified upstream ec16a9f build, still version 43.1.
+The measurements below retain their original source identities. No numerical
+representation change is adopted.
 
 Implementation commits: `4fdacd2` and `b4504cb`; corrected diagnostic hooks:
 `05367d6`. Base: fetched origin/main `c6c3a2280f6276e8b2b89b231257f50776c583ca`.
@@ -122,3 +124,25 @@ Generated bundle/cache binaries and downloaded archives remain in the local
 `.work/issue98` directory; bundle hashes and archive identities are recorded.
 
 Evidence archive SHA-256: `e22ae45537f68a61accdef1b5be9c577a3ed3f8cc0e5f8404636ed6eaca88b0c`.
+
+## Adoption as the default upstream 43.1 kernel
+
+Per the user's kernel choice, `klambda/` now matches all 23 authenticated
+upstream ec16a9f files. Version remains 43.1, with no fork version increment.
+The conformance regression now expects the derived `shen.by-hypothesis-h`
+helper and verifies its arena equality guard for the default kernel.
+
+Fresh default-path validation: 1,833 port checks across 32 specs, 154 community
+checks, separate native require and pure-KL certification (154 each), and all
+20 PUC Lua 5.4.7 golden verdicts pass. Source and bundle each pass a complete
+native/legacy pair in every private off/cold/hit state, with three requests per
+judgment and actual native routes checked. These pairs are functional adoption
+checks, not new accepted performance cohorts. The standalone bundle passes
+accepted/rejected native judgments without an external kernel directory.
+
+Complete adoption outputs, paired samples, settings and source hashes are in
+`upstream-431-adoption-evidence.tar.gz` (adjacent SHA-256 and internal index).
+Earlier evidence is preserved. The adoption archive also preserves an initial
+full-suite invocation with FASL globally disabled: four CLI cache-hit assertions
+failed because their required cache was disabled; the normal-cache rerun passes.
+A missing Nix-store PUC binary was restored before the successful PUC rerun.

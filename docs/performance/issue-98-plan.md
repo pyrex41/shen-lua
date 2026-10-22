@@ -22,4 +22,5 @@ independence of shared primitive overrides from native/legacy agreement.
 Execution outcome: measurement foundation and exact-kernel corpus qualification
 completed; see issue-98-results.md and its source-bound receipts. File-contained
 cache mutation coverage passes. The optional numerical owner is deferred; broader
-coverage/boundary attribution stays with #72/#73. No kernel default changes.
+coverage/boundary attribution stays with #72/#73. After qualification, adopt the exact upstream ec16a9f build as the default
+43.1 kernel, per the user’s instruction; preserve the earlier measurements.

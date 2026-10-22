@@ -2,18 +2,24 @@
 
 ## Current: ShenOSKernel 43.1 (community `shen-sources` line)
 
-All 23 official `.kl` files and the kernel test suite under `../tests/` are vendored
-**byte-identical** from the ShenOSKernel 43.1 release.
+All 23 official `.kl` files are vendored **byte-identical** from the build of
+upstream commit `ec16a9fa4fc2e87e2aa336fb1ae30e8ac2266394`. This is upstream
+43.1, including the merged typechecker dereference changes (PR #117) and final
+empty-list guards. No fork-specific 43.1.1 version is used.
 
-- **Repository**: [`Shen-Language/shen-sources`](https://github.com/Shen-Language/shen-sources)
-  - Tag: `shen-43.1`
-  - Commit: `715824a52b55e9c81a9501df8548ff3edd8411f5`
-- **Release asset**: `ShenOSKernel-43.1.tar.gz`
-  - SHA-256: `900eedef44f440af78f9395ed06e689ce1604546fc309f5bc7c8bc84cc651920`
-  - All 23 official `.kl` files and `tests/` are verified against the extracted archive
-    with `cmp` / `diff -r`.
-- `(version)` reports `"43.1"` (set by `shen.initialise-environment` in
-  `init.kl`).
+- **Source repository**: [`Shen-Language/shen-sources`](https://github.com/Shen-Language/shen-sources)
+  - Commit: `ec16a9fa4fc2e87e2aa336fb1ae30e8ac2266394`
+  - Upstream merge by Bruno Deferrari (tizoc).
+- **Unmodified upstream build**, mirrored on the user's fork:
+  [ShenOSKernel-43.1-ec16a9f.tar.gz](https://github.com/pyrex41/shen-sources/releases/download/upstream-ec16a9f/ShenOSKernel-43.1-ec16a9f.tar.gz)
+  - SHA-256: `060066a8f84d9a2f7d41cb3b37b986a8d4653279752b739b5063cd648d9baacd`
+  - Per-file hashes: `../test/fixtures/kernel-ec16a9f/sha256.json`.
+  - All 23 KL files and all 73 files under `../tests/` match the archive.
+  - Run `python3 scripts/verify-kernel-archive.py /path/to/archive.tar.gz`.
+- `(version)` reports `"43.1"` (set by `shen.initialise-environment`).
+- This supersedes the original `shen-43.1` release build at `715824a`, whose
+  archived benchmark results remain identified separately. Exact-kernel handport
+  review and qualification: `../docs/performance/issue-98-results.md`.
 
 Files:
 

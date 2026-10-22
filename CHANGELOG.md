@@ -8,7 +8,9 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 ### Changed
 
 - **Kernel: ShenOSKernel 43.1** (community `Shen-Language/shen-sources`);
-  vendored wholesale from the verified `shen-43.1` release. The public
+  vendored wholesale from verified upstream commit `ec16a9f`, including the
+  merged dereference-hoist changes and final empty-list guards. Kernel version
+  remains `43.1`. The public
   `char-stream?`, `read-unit-string`, and `write-string` interfaces are
   provided by the native Lua stream layer.
 

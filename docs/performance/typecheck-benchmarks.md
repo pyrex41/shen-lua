@@ -18,11 +18,12 @@ Prime outputs and failure/timeout outputs are retained too. Native/legacy order
 alternates within each state; the fresh process is the statistical unit.
 `--timeout` bounds each child (180 seconds by default); no retries hide failures.
 
-The default kernel remains community release commit
-`715824a52b55e9c81a9501df8548ff3edd8411f5`, archive SHA-256
-`900eedef44f440af78f9395ed06e689ce1604546fc309f5bc7c8bc84cc651920`.
-The exact ec16a9f fixture has its own provenance and all 23 files. Both kernels
-report 43.1, so version strings alone are never the identity check.
+The default kernel is upstream commit
+`ec16a9fa4fc2e87e2aa336fb1ae30e8ac2266394`, byte-identical to the exact fixture
+and pinned archive documented in `klambda/PROVENANCE.md`. Earlier measurements
+also cover the original release commit `715824a52b55e9c81a9501df8548ff3edd8411f5`
+(archive SHA-256 `900eedef44f440af78f9395ed06e689ce1604546fc309f5bc7c8bc84cc651920`).
+Both kernels report 43.1, so version strings alone are never the identity check.
 `bench/verify_inputs.py` authenticates all selected KL bytes and repository
 fixtures before execution, failing on missing or changed inputs. The paired
 runner binds source SHA, working diff, all runtime/harness sources, complete

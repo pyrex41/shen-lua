@@ -1,8 +1,9 @@
 # Vendored KLambda for ShenOSKernel 43.1
 
 These are the KLambda sources of **ShenOSKernel 43.1** (community
-[`shen-sources`](https://github.com/Shen-Language/shen-sources) release
-`shen-43.1`), vendored byte-identical so that `shen-lua` is self-contained:
+[`shen-sources`](https://github.com/Shen-Language/shen-sources) commit
+`ec16a9f`, including upstream PR #117), vendored byte-identical so that
+`shen-lua` is self-contained:
 you can `git clone` and run without a separate kernel checkout. See
 [PROVENANCE.md](PROVENANCE.md) for the exact source, checksum and the lineage
 note (this replaced Tarver's S42.0 kernel). The public character stream

@@ -303,8 +303,8 @@ end
 
 do
   local v = child(KDIR.vendored)
-  check(v.added == nil or v.added == "", "vendored: driver closure adds nothing (" .. tostring(v.added) .. ")")
-  check(v.eqterm["shen.by-hypothesis"] == "yes", "vendored: by-hypothesis compares on the arena")
+  check(v.added == "shen.by-hypothesis-h", "vendored: driver closure adds shen.by-hypothesis-h (" .. tostring(v.added) .. ")")
+  check(v.eqterm["shen.by-hypothesis-h"] == "yes", "vendored: by-hypothesis-h compares on the arena")
   local h = child(KDIR.hoist)
   check(h.added == "shen.by-hypothesis-h", "hoist: driver closure adds shen.by-hypothesis-h (" .. tostring(h.added) .. ")")
   check(h.eqterm["shen.by-hypothesis-h"] == "yes", "hoist: by-hypothesis-h compares on the arena")

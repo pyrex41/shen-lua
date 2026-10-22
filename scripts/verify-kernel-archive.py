@@ -23,6 +23,7 @@ with tarfile.open(args.archive, 'r:gz') as archive:
         data = archive.extractfile(prefix + 'klambda/' + name).read()
         assert hashlib.sha256(data).hexdigest() == sha
         assert (fixture / name).read_bytes() == data, name
+        assert (root / "klambda" / name).read_bytes() == data, "vendored " + name
     tests = [m for m in archive.getmembers() if m.isfile() and m.name.startswith(prefix + 'tests/')]
     for member in tests:
         path = root / member.name.removeprefix(prefix)

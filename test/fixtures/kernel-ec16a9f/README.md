@@ -9,8 +9,8 @@ Archive SHA-256:
 `060066a8f84d9a2f7d41cb3b37b986a8d4653279752b739b5063cd648d9baacd`.
 Per-file SHA-256: `sha256.json`. License copied from the authenticated archive.
 `tests/` in that archive is byte-identical to this repository's release tests.
-The default vendored kernel remains release 715824a; this is a qualification
-fixture, not a kernel upgrade. Both kernels report version 43.1.
+The default vendored kernel now matches this exact qualification fixture.
+The earlier release 715824a and this upstream build both report version 43.1.
 
 The earlier `kernel-43.1-deref-hoist` fixture is preserved with its original
 5596445 provenance. Unlike it, these final wrappers return false for empty
