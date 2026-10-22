@@ -276,6 +276,27 @@ local function guard_term_ref(x, env)
 end
 
 local function lift_guard(ctx, e, env, out, d)
+  -- A literal colon is an interned atom, so equality against it observes
+  -- only a term's dereferenced root. The ordinary KL compiler also folds
+  -- this exact-arity intern call and inlines exact-arity equality.
+  local arity = require("compiler").ARITY
+  if arity["="] == 2 and arity["intern"] == 1
+     and is_cons(e) and e[1] == SYM["="] and is_cons(e[2])
+     and is_cons(e[2][2]) and e[2][2][2] == NIL then
+    local term, literal = e[2][1], e[2][2][1]
+    if is_cons(literal) and literal[1] == SYM["intern"]
+       and is_cons(literal[2]) and literal[2][1] == ":" and literal[2][2] == NIL then
+      if is_cons(term) then
+        local a = term[2]
+        local b = is_cons(a) and a[2]
+        local vec = is_cons(b) and is_klvar(b[1]) and env[b[1].name]
+        if term[1] ~= SYM["shen.deref"] or not vec or vec.kind ~= "vec"
+           or b[2] ~= NIL then term = nil end
+      end
+      local ref = term and guard_term_ref(term, env)
+      if ref then return "(LZD(" .. ref .. ") == " .. atomconst(R.intern(":")) .. ")" end
+    end
+  end
   -- (= T1 T2) over two engine terms: compare in the arena (E.eqterm) instead
   -- of materializing both sides to Shen lists and calling `=`. This is the
   -- by-hypothesis check, run once per hypothesis per goal; materializing it

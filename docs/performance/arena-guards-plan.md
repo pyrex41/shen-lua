@@ -25,3 +25,11 @@ Experiment status:
 - Next isolated candidate: consolidate dispatch/query protected calls, keeping
   preprocessing inside the protected boundary and cleanup before returning
   status. Pilot: 1.11x full / 1.08x smaller. Repeat before adoption.
+
+- Protected-call consolidation not adopted: seven-pair repeat did not reproduce
+  the overall pilot gain (0.92x full; 1.20x smaller); the prototype remains on
+  experiment/protected-boundary at 38e04cc and in the evidence.
+- Literal-colon root equality: only prolog_compile.lua changes in the active
+  runtime. Seven-pair cohorts show 1.46x and 1.54x full persistent speedups;
+  smaller-case results vary (1.39x then 0.95x). Validate mechanism, complete
+  semantics, caches and bundles before adoption. Do not claim a uniform gain.
