@@ -135,3 +135,11 @@ The optional numerical-owner lane remains an experiment to consider after these
 gates. These typechecker results supply no numerical-storage evidence and no
 projection of Chez's historical SOR gain onto Lua. No numerical representation
 or automatic dispatcher is adopted here.
+
+## Matched Lua implementation comparisons
+
+`bench/compare_lua.py` compares two isolated native checkouts on the complete
+corpus, alternating fresh processes and preserving full verdicts/inferences,
+source identities and all paired samples. It accepts separate baseline and
+candidate bundles, and a separate allocation mode. The first measured follow-up
+and its rejected experiments are documented in `arena-guards-results.md`.

@@ -1,35 +1,29 @@
-# Arena guard experiment
+# Arena guard follow-up plan
 
 Baseline: 908b25d, upstream ec16a9f. Isolated branch perf/arena-guards.
-Preserve the foundation worktree, all paired receipts and rejected experiments.
+Preserve the foundation worktree, sibling worktrees, all paired receipts and
+rejected experiments. The acceptance gates apply to complete typechecks.
 
-1. Attribute remaining materialization call sites and select one narrow guard.
-2. Implement an arena operation only with an explicit semantic equivalence test;
-   preserve user redefinitions, malformed input/errors and variable freshness.
-3. Run focused tests and strict-native full golden corpus. Compare old/new in
-   alternating fresh processes, first/persistent and typed loads separately.
-   Keep diagnostic counters/profiling outside accepted timing cohorts.
-4. Adopt only on complete-query evidence without material regression in the
-   heavy case. Otherwise retain the rejected patch and try the next bounded
-   target. Protected-call consolidation is a separate experiment.
-5. On adoption: full make test-all, native require and legacy differentials,
-   private cache off/cold/hit and bundle qualification; retain source hashes,
-   settings, complete verdicts/inferences and every paired sample.
+1. Attribute remaining materialization call sites and select a narrow guard.
+2. Implement only with explicit semantic-equivalence tests, preserving the
+   compiler's existing primitive/arity contract and variable/binding behavior.
+3. Compare in alternating fresh processes, keeping first/persistent judgments
+   and typed source loads separate. Keep diagnostics outside timing cohorts.
+4. Adopt only with repeated complete-query evidence and full qualification:
+   focused tests, make test-all, require-mode native and legacy differentials,
+   private cache off/cold/hit, PUC legacy golden and standalone bundle.
+5. Record exact source/kernel identities, settings, verdicts/inferences and all
+   samples; preserve unsupported, negative and inconclusive outcomes honestly.
 
-Experiment status:
-- Direct arena cons-test emission rejected: five-pair median speedups were
-  0.64x full / 0.54x smaller judgments (slower), with exact verdict/inference
-  agreement. Guard implementation and focused test are preserved in evidence.
-- Root-only witness guard not adopted: five-pair median 1.04x full / 1.14x
-  smaller, but typed loading 0.86x and highly variable timings. No clear gain.
-- Next isolated candidate: consolidate dispatch/query protected calls, keeping
-  preprocessing inside the protected boundary and cleanup before returning
-  status. Pilot: 1.11x full / 1.08x smaller. Repeat before adoption.
+Completed outcome: literal-colon root equality is the only adopted runtime
+change (prolog_compile.lua). Source cohorts show 1.46x and 1.54x median full
+persistent speedups; bundles show 1.40x. Smaller-case results are mixed and Lua
+heap growth is essentially unchanged. All qualification checks pass. Full
+methods, source bindings and limitations: arena-guards-results.md.
 
-- Protected-call consolidation not adopted: seven-pair repeat did not reproduce
-  the overall pilot gain (0.92x full; 1.20x smaller); the prototype remains on
-  experiment/protected-boundary at 38e04cc and in the evidence.
-- Literal-colon root equality: only prolog_compile.lua changes in the active
-  runtime. Seven-pair cohorts show 1.46x and 1.54x full persistent speedups;
-  smaller-case results vary (1.39x then 0.95x). Validate mechanism, complete
-  semantics, caches and bundles before adoption. Do not claim a uniform gain.
+Not adopted: direct cons-shape guard, root-only cons witness, and protected-call
+consolidation. Patches, tests and measurements are retained. The protected-call
+prototype also remains on local experiment/protected-boundary at 38e04cc.
+
+Remaining work: front-end reading/expansion/lowering and the smaller-query gap
+against Scheme. This slice does not establish parity or a uniform speedup.

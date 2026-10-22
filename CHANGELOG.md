@@ -41,6 +41,11 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ### Performance
 
+- Native typechecking compares eligible literal-colon guards directly in the
+  arena, avoiding a lifted guard and materialization call. Complete-query
+  measurements, semantic qualification and rejected prototypes are recorded in
+  [`arena-guards-results.md`](docs/performance/arena-guards-results.md).
+
 - Typechecking: the native Prolog translator compiles an `(= T1 T2)` guard
   over two engine terms to an in-arena comparison (`E.eqterm`) instead of
   copying both terms out to Shen lists and calling `=`. That guard is
