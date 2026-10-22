@@ -18,3 +18,8 @@ Validation: focused regressions, complete golden comparisons, make test-all on
 relevant hosts/engine modes, native require corpus, private cache off/cold/hit and
 standalone bundle. Keep diagnostics outside accepted timing cohorts. Do not infer
 independence of shared primitive overrides from native/legacy agreement.
+
+Execution outcome: measurement foundation and exact-kernel corpus qualification
+completed; see issue-98-results.md and its source-bound receipts. File-contained
+cache mutation coverage passes. The optional numerical owner is deferred; broader
+coverage/boundary attribution stays with #72/#73. No kernel default changes.

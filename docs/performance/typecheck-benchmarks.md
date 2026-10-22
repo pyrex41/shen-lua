@@ -106,7 +106,8 @@ SHEN_KL_DIR="$PWD/test/fixtures/kernel-ec16a9f" SHEN_BENCH_BUNDLE="$PWD/.work/ec
 
 The bundle embeds its kernel, so kernel bytecode routing is embedded rather
 than disk off/cold/hit. FASL off/cold/hit still applies to loaded applications.
-Use `--lua lua` for PUC Lua: native FFI operation is explicitly unsupported by
+Use `--lua /path/to/puc-lua` for PUC Lua and verify `report.runtime`:
+the command named `lua` may itself be a LuaJIT alias. native FFI operation is explicitly unsupported by
 this qualification harness, and strict native samples must fail rather than be
 reported as native successes. Legacy golden checks work on PUC Lua; its caches
 may self-disable without a bit library and are not labelled hit.

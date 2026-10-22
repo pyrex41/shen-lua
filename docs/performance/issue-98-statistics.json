@@ -1,0 +1,1122 @@
+{
+  "runtime_commit": "b4504cb7d0b2a50f01089b765b403999caa9f405",
+  "diagnostic_commit": "05367d685d4674c5931a14e0cff81f5b91df132f",
+  "timing": {
+    "release": {
+      "mode": "time",
+      "pairs": 3,
+      "statistical_unit": "fresh process; persistent requests aggregated within process",
+      "timing_qualified": true,
+      "inference_counts": {
+        "legacy": {
+          "number": 8,
+          "identity": 18,
+          "nested-hypotheses": 56,
+          "shadowing": 28,
+          "map": 67,
+          "reject-arithmetic": 37,
+          "reject-condition": 38,
+          "reject-branches": 50,
+          "interpreter-y": 3426,
+          "interpreter-y-inferred": 431741,
+          "interpreter-nested": 1510,
+          "interpreter-call": 508,
+          "interpreter-reject": 57,
+          "calculator-tree": 160,
+          "calculator-call": 103,
+          "calculator-reject-leaf": 66,
+          "calculator-reject-operator": 34,
+          "parser-function": 20,
+          "parser-call": 41,
+          "parser-reject": 65
+        },
+        "native": {
+          "number": 8,
+          "identity": 18,
+          "nested-hypotheses": 56,
+          "shadowing": 28,
+          "map": 69,
+          "reject-arithmetic": 38,
+          "reject-condition": 39,
+          "reject-branches": 51,
+          "interpreter-y": 3426,
+          "interpreter-y-inferred": 431741,
+          "interpreter-nested": 1510,
+          "interpreter-call": 509,
+          "interpreter-reject": 58,
+          "calculator-tree": 160,
+          "calculator-call": 104,
+          "calculator-reject-leaf": 66,
+          "calculator-reject-operator": 34,
+          "parser-function": 21,
+          "parser-call": 42,
+          "parser-reject": 66
+        }
+      },
+      "host_contention": "uncontrolled; exploratory",
+      "states": {
+        "off": {
+          "process_wall": {
+            "legacy_median": 4.355068249999999,
+            "native_median": 1.9257215420000016,
+            "paired_legacy_over_native": [
+              3.492381280413755,
+              1.9683302473021804,
+              1.7216807067356676
+            ],
+            "median_ratio": 1.9683302473021804,
+            "ratio_range": [
+              1.7216807067356676,
+              3.492381280413755
+            ],
+            "native_wins": 3
+          },
+          "phase/initialise": {
+            "legacy_median": 0.085487,
+            "native_median": 0.099939,
+            "paired_legacy_over_native": [
+              0.8106845175557089,
+              0.9544084322571256,
+              0.633819211720395
+            ],
+            "median_ratio": 0.8106845175557089,
+            "ratio_range": [
+              0.633819211720395,
+              0.9544084322571256
+            ],
+            "native_wins": 0
+          },
+          "phase/kernel_load": {
+            "legacy_median": 0.328002,
+            "native_median": 0.31598,
+            "paired_legacy_over_native": [
+              1.0380467118172036,
+              0.9881191338015786,
+              0.8916705175288543
+            ],
+            "median_ratio": 0.9881191338015786,
+            "ratio_range": [
+              0.8916705175288543,
+              1.0380467118172036
+            ],
+            "native_wins": 1
+          },
+          "phase/query_read": {
+            "legacy_median": 0.026217,
+            "native_median": 0.028802,
+            "paired_legacy_over_native": [
+              0.910249288243872,
+              1.50350473016036,
+              0.6622740556336996
+            ],
+            "median_ratio": 0.910249288243872,
+            "ratio_range": [
+              0.6622740556336996,
+              1.50350473016036
+            ],
+            "native_wins": 1
+          },
+          "phase/require": {
+            "legacy_median": 0.003451,
+            "native_median": 0.00341,
+            "paired_legacy_over_native": [
+              1.3803827751196172,
+              1.0120234604105574,
+              0.7646764926305272
+            ],
+            "median_ratio": 1.0120234604105574,
+            "ratio_range": [
+              0.7646764926305272,
+              1.3803827751196172
+            ],
+            "native_wins": 2
+          },
+          "load/tests/interpreter.shen": {
+            "legacy_median": 0.880443,
+            "native_median": 0.650035,
+            "paired_legacy_over_native": [
+              1.3699123893328822,
+              1.4336520518590647,
+              1.1298820159842364
+            ],
+            "median_ratio": 1.3699123893328822,
+            "ratio_range": [
+              1.1298820159842364,
+              1.4336520518590647
+            ],
+            "native_wins": 3
+          },
+          "load/tests/calculator.shen": {
+            "legacy_median": 0.051921,
+            "native_median": 0.060919,
+            "paired_legacy_over_native": [
+              0.8522956713012361,
+              1.5569321017379505,
+              0.598698420317066
+            ],
+            "median_ratio": 0.8522956713012361,
+            "ratio_range": [
+              0.598698420317066,
+              1.5569321017379505
+            ],
+            "native_wins": 1
+          },
+          "load/bench/fixtures/parser.shen": {
+            "legacy_median": 0.039488,
+            "native_median": 0.048009,
+            "paired_legacy_over_native": [
+              0.3367767301503825,
+              1.015401229012933,
+              0.8225124455831199
+            ],
+            "median_ratio": 0.8225124455831199,
+            "ratio_range": [
+              0.3367767301503825,
+              1.015401229012933
+            ],
+            "native_wins": 1
+          },
+          "first": {
+            "legacy_median": 0.5170049999999996,
+            "native_median": 0.04473399999999998,
+            "paired_legacy_over_native": [
+              9.994683730281555,
+              13.58896775745913,
+              11.921133813206968
+            ],
+            "median_ratio": 11.921133813206968,
+            "ratio_range": [
+              9.994683730281555,
+              13.58896775745913
+            ],
+            "native_wins": 3
+          },
+          "persistent": {
+            "legacy_median": 0.970054999999999,
+            "native_median": 0.058775999999999745,
+            "paired_legacy_over_native": [
+              15.046831174561135,
+              18.012347971404772,
+              17.44424595072825
+            ],
+            "median_ratio": 17.44424595072825,
+            "ratio_range": [
+              15.046831174561135,
+              18.012347971404772
+            ],
+            "native_wins": 3
+          }
+        },
+        "cold": {
+          "process_wall": {
+            "legacy_median": 5.538897082999995,
+            "native_median": 3.377781542000001,
+            "paired_legacy_over_native": [
+              1.3116984970599754,
+              1.999753049174092,
+              1.6398032300574379
+            ],
+            "median_ratio": 1.6398032300574379,
+            "ratio_range": [
+              1.3116984970599754,
+              1.999753049174092
+            ],
+            "native_wins": 3
+          },
+          "phase/initialise": {
+            "legacy_median": 0.112454,
+            "native_median": 0.104742,
+            "paired_legacy_over_native": [
+              1.0736285348761718,
+              1.0377225337799691,
+              1.299742022199098
+            ],
+            "median_ratio": 1.0736285348761718,
+            "ratio_range": [
+              1.0377225337799691,
+              1.299742022199098
+            ],
+            "native_wins": 3
+          },
+          "phase/kernel_load": {
+            "legacy_median": 0.36268,
+            "native_median": 0.351492,
+            "paired_legacy_over_native": [
+              1.178859465861948,
+              0.8930361844518532,
+              1.0318300274259442
+            ],
+            "median_ratio": 1.0318300274259442,
+            "ratio_range": [
+              0.8930361844518532,
+              1.178859465861948
+            ],
+            "native_wins": 2
+          },
+          "phase/query_read": {
+            "legacy_median": 0.034463999999999,
+            "native_median": 0.035588,
+            "paired_legacy_over_native": [
+              0.6245831348260894,
+              0.9684163201078735,
+              1.0963443691998997
+            ],
+            "median_ratio": 0.9684163201078735,
+            "ratio_range": [
+              0.6245831348260894,
+              1.0963443691998997
+            ],
+            "native_wins": 1
+          },
+          "phase/require": {
+            "legacy_median": 0.004347,
+            "native_median": 0.00353,
+            "paired_legacy_over_native": [
+              0.8493552168815944,
+              0.8989095195991748,
+              1.5147308781869688
+            ],
+            "median_ratio": 0.8989095195991748,
+            "ratio_range": [
+              0.8493552168815944,
+              1.5147308781869688
+            ],
+            "native_wins": 1
+          },
+          "load/tests/interpreter.shen": {
+            "legacy_median": 0.922718,
+            "native_median": 0.768567,
+            "paired_legacy_over_native": [
+              1.1971767575527574,
+              1.1821649901700177,
+              1.8218775208654647
+            ],
+            "median_ratio": 1.1971767575527574,
+            "ratio_range": [
+              1.1821649901700177,
+              1.8218775208654647
+            ],
+            "native_wins": 3
+          },
+          "load/tests/calculator.shen": {
+            "legacy_median": 0.112978,
+            "native_median": 0.073362,
+            "paired_legacy_over_native": [
+              0.676626491752791,
+              1.6102867081705616,
+              1.5400070881382733
+            ],
+            "median_ratio": 1.5400070881382733,
+            "ratio_range": [
+              0.676626491752791,
+              1.6102867081705616
+            ],
+            "native_wins": 2
+          },
+          "load/bench/fixtures/parser.shen": {
+            "legacy_median": 0.044564,
+            "native_median": 0.053179,
+            "paired_legacy_over_native": [
+              0.42712826116127056,
+              0.7912333815979993,
+              1.1939022123071201
+            ],
+            "median_ratio": 0.7912333815979993,
+            "ratio_range": [
+              0.42712826116127056,
+              1.1939022123071201
+            ],
+            "native_wins": 1
+          },
+          "first": {
+            "legacy_median": 0.5621290000000002,
+            "native_median": 0.055254999999999575,
+            "paired_legacy_over_native": [
+              4.774538778434549,
+              10.173359876934295,
+              16.198732063784135
+            ],
+            "median_ratio": 10.173359876934295,
+            "ratio_range": [
+              4.774538778434549,
+              16.198732063784135
+            ],
+            "native_wins": 3
+          },
+          "persistent": {
+            "legacy_median": 1.065752000000001,
+            "native_median": 0.11008700000000055,
+            "paired_legacy_over_native": [
+              7.087071931616562,
+              10.827401936381854,
+              9.837201486097321
+            ],
+            "median_ratio": 9.837201486097321,
+            "ratio_range": [
+              7.087071931616562,
+              10.827401936381854
+            ],
+            "native_wins": 3
+          }
+        },
+        "hit": {
+          "process_wall": {
+            "legacy_median": 3.45982699999999,
+            "native_median": 2.217333124999996,
+            "paired_legacy_over_native": [
+              0.8930622659078793,
+              1.6595516773659185,
+              1.77728664068012
+            ],
+            "median_ratio": 1.6595516773659185,
+            "ratio_range": [
+              0.8930622659078793,
+              1.77728664068012
+            ],
+            "native_wins": 2
+          },
+          "phase/initialise": {
+            "legacy_median": 0.032619,
+            "native_median": 0.036196,
+            "paired_legacy_over_native": [
+              1.0793487971940041,
+              1.204525361918444,
+              0.7807142132494674
+            ],
+            "median_ratio": 1.0793487971940041,
+            "ratio_range": [
+              0.7807142132494674,
+              1.204525361918444
+            ],
+            "native_wins": 2
+          },
+          "phase/kernel_load": {
+            "legacy_median": 0.012056,
+            "native_median": 0.016209,
+            "paired_legacy_over_native": [
+              0.5461160275319568,
+              0.7556912826207661,
+              0.6845721424109931
+            ],
+            "median_ratio": 0.6845721424109931,
+            "ratio_range": [
+              0.5461160275319568,
+              0.7556912826207661
+            ],
+            "native_wins": 0
+          },
+          "phase/query_read": {
+            "legacy_median": 0.028075,
+            "native_median": 0.025613,
+            "paired_legacy_over_native": [
+              1.152204717846128,
+              0.9264147830391025,
+              1.143950337719127
+            ],
+            "median_ratio": 1.143950337719127,
+            "ratio_range": [
+              0.9264147830391025,
+              1.152204717846128
+            ],
+            "native_wins": 2
+          },
+          "phase/require": {
+            "legacy_median": 0.003514,
+            "native_median": 0.003707,
+            "paired_legacy_over_native": [
+              0.9190720258969517,
+              0.8076304297862561,
+              1.325642523364486
+            ],
+            "median_ratio": 0.9190720258969517,
+            "ratio_range": [
+              0.8076304297862561,
+              1.325642523364486
+            ],
+            "native_wins": 1
+          },
+          "load/tests/interpreter.shen": {
+            "legacy_median": 0.093047,
+            "native_median": 0.087284,
+            "paired_legacy_over_native": [
+              0.9275124879703038,
+              1.0602575051619947,
+              1.194917104367592
+            ],
+            "median_ratio": 1.0602575051619947,
+            "ratio_range": [
+              0.9275124879703038,
+              1.194917104367592
+            ],
+            "native_wins": 2
+          },
+          "load/tests/calculator.shen": {
+            "legacy_median": 0.021882,
+            "native_median": 0.008705,
+            "paired_legacy_over_native": [
+              1.7583440767798308,
+              1.9479095270733378,
+              2.5137277426766227
+            ],
+            "median_ratio": 1.9479095270733378,
+            "ratio_range": [
+              1.7583440767798308,
+              2.5137277426766227
+            ],
+            "native_wins": 3
+          },
+          "load/bench/fixtures/parser.shen": {
+            "legacy_median": 0.0094700000000001,
+            "native_median": 0.014583,
+            "paired_legacy_over_native": [
+              1.6273623001130673,
+              0.5544126722896592,
+              0.6513515372446592
+            ],
+            "median_ratio": 0.6513515372446592,
+            "ratio_range": [
+              0.5544126722896592,
+              1.6273623001130673
+            ],
+            "native_wins": 1
+          },
+          "first": {
+            "legacy_median": 0.4385950000000008,
+            "native_median": 0.14784100000000008,
+            "paired_legacy_over_native": [
+              3.6571045920955583,
+              2.779893338007945,
+              4.842714866177909
+            ],
+            "median_ratio": 3.6571045920955583,
+            "ratio_range": [
+              2.779893338007945,
+              4.842714866177909
+            ],
+            "native_wins": 3
+          },
+          "persistent": {
+            "legacy_median": 0.8760030000000002,
+            "native_median": 0.12353199999999998,
+            "paired_legacy_over_native": [
+              6.611992743971285,
+              7.09130427743419,
+              14.744569596905622
+            ],
+            "median_ratio": 7.09130427743419,
+            "ratio_range": [
+              6.611992743971285,
+              14.744569596905622
+            ],
+            "native_wins": 3
+          }
+        }
+      }
+    },
+    "exact": {
+      "mode": "time",
+      "pairs": 3,
+      "statistical_unit": "fresh process; persistent requests aggregated within process",
+      "timing_qualified": true,
+      "inference_counts": {
+        "legacy": {
+          "number": 8,
+          "identity": 18,
+          "nested-hypotheses": 56,
+          "shadowing": 28,
+          "map": 67,
+          "reject-arithmetic": 37,
+          "reject-condition": 38,
+          "reject-branches": 50,
+          "interpreter-y": 3426,
+          "interpreter-y-inferred": 431741,
+          "interpreter-nested": 1510,
+          "interpreter-call": 508,
+          "interpreter-reject": 57,
+          "calculator-tree": 160,
+          "calculator-call": 103,
+          "calculator-reject-leaf": 66,
+          "calculator-reject-operator": 34,
+          "parser-function": 20,
+          "parser-call": 41,
+          "parser-reject": 65
+        },
+        "native": {
+          "number": 8,
+          "identity": 18,
+          "nested-hypotheses": 56,
+          "shadowing": 28,
+          "map": 69,
+          "reject-arithmetic": 38,
+          "reject-condition": 39,
+          "reject-branches": 51,
+          "interpreter-y": 3426,
+          "interpreter-y-inferred": 431741,
+          "interpreter-nested": 1510,
+          "interpreter-call": 509,
+          "interpreter-reject": 58,
+          "calculator-tree": 160,
+          "calculator-call": 104,
+          "calculator-reject-leaf": 66,
+          "calculator-reject-operator": 34,
+          "parser-function": 21,
+          "parser-call": 42,
+          "parser-reject": 66
+        }
+      },
+      "host_contention": "uncontrolled; exploratory",
+      "states": {
+        "off": {
+          "process_wall": {
+            "legacy_median": 5.225561583999999,
+            "native_median": 2.064613125000001,
+            "paired_legacy_over_native": [
+              2.531012479153932,
+              1.386056299178418,
+              3.482623628835923
+            ],
+            "median_ratio": 2.531012479153932,
+            "ratio_range": [
+              1.386056299178418,
+              3.482623628835923
+            ],
+            "native_wins": 3
+          },
+          "phase/initialise": {
+            "legacy_median": 0.082383,
+            "native_median": 0.097018,
+            "paired_legacy_over_native": [
+              0.8130965387866169,
+              0.8087433491500893,
+              0.9422414877677765
+            ],
+            "median_ratio": 0.8130965387866169,
+            "ratio_range": [
+              0.8087433491500893,
+              0.9422414877677765
+            ],
+            "native_wins": 0
+          },
+          "phase/kernel_load": {
+            "legacy_median": 0.274439,
+            "native_median": 0.26568,
+            "paired_legacy_over_native": [
+              1.0358494910187552,
+              0.9963954602282875,
+              0.884206564287865
+            ],
+            "median_ratio": 0.9963954602282875,
+            "ratio_range": [
+              0.884206564287865,
+              1.0358494910187552
+            ],
+            "native_wins": 1
+          },
+          "phase/query_read": {
+            "legacy_median": 0.026097,
+            "native_median": 0.031142,
+            "paired_legacy_over_native": [
+              1.0387692552640593,
+              0.7690096439168593,
+              0.9868666110076745
+            ],
+            "median_ratio": 0.9868666110076745,
+            "ratio_range": [
+              0.7690096439168593,
+              1.0387692552640593
+            ],
+            "native_wins": 1
+          },
+          "phase/require": {
+            "legacy_median": 0.00359,
+            "native_median": 0.00504,
+            "paired_legacy_over_native": [
+              1.2290311537144814,
+              0.7910714285714285,
+              0.6017867325603498
+            ],
+            "median_ratio": 0.7910714285714285,
+            "ratio_range": [
+              0.6017867325603498,
+              1.2290311537144814
+            ],
+            "native_wins": 1
+          },
+          "load/tests/interpreter.shen": {
+            "legacy_median": 0.92048,
+            "native_median": 0.601747,
+            "paired_legacy_over_native": [
+              1.6862394003430603,
+              1.4604279678429144,
+              1.2805581083079767
+            ],
+            "median_ratio": 1.4604279678429144,
+            "ratio_range": [
+              1.2805581083079767,
+              1.6862394003430603
+            ],
+            "native_wins": 3
+          },
+          "load/tests/calculator.shen": {
+            "legacy_median": 0.066752,
+            "native_median": 0.064264,
+            "paired_legacy_over_native": [
+              1.0387152993900162,
+              0.4857180314973534,
+              1.1345466021460129
+            ],
+            "median_ratio": 1.0387152993900162,
+            "ratio_range": [
+              0.4857180314973534,
+              1.1345466021460129
+            ],
+            "native_wins": 2
+          },
+          "load/bench/fixtures/parser.shen": {
+            "legacy_median": 0.033132,
+            "native_median": 0.041265,
+            "paired_legacy_over_native": [
+              0.8406576677154166,
+              0.557348842845026,
+              0.5182761410689639
+            ],
+            "median_ratio": 0.557348842845026,
+            "ratio_range": [
+              0.5182761410689639,
+              0.8406576677154166
+            ],
+            "native_wins": 0
+          },
+          "first": {
+            "legacy_median": 0.5034069999999997,
+            "native_median": 0.05619699999999975,
+            "paired_legacy_over_native": [
+              12.549096347999416,
+              9.114632453689733,
+              5.91676496508713
+            ],
+            "median_ratio": 9.114632453689733,
+            "ratio_range": [
+              5.91676496508713,
+              12.549096347999416
+            ],
+            "native_wins": 3
+          },
+          "persistent": {
+            "legacy_median": 0.8845689999999994,
+            "native_median": 0.07507800000000045,
+            "paired_legacy_over_native": [
+              13.945861103062045,
+              11.585862290272296,
+              13.603359173126542
+            ],
+            "median_ratio": 13.603359173126542,
+            "ratio_range": [
+              11.585862290272296,
+              13.945861103062045
+            ],
+            "native_wins": 3
+          }
+        },
+        "cold": {
+          "process_wall": {
+            "legacy_median": 6.5514184580000006,
+            "native_median": 5.132153374999994,
+            "paired_legacy_over_native": [
+              1.2765437778834907,
+              1.2768459227149542,
+              1.3086714461528115
+            ],
+            "median_ratio": 1.2768459227149542,
+            "ratio_range": [
+              1.2765437778834907,
+              1.3086714461528115
+            ],
+            "native_wins": 3
+          },
+          "phase/initialise": {
+            "legacy_median": 0.099704,
+            "native_median": 0.105479,
+            "paired_legacy_over_native": [
+              0.992478720577222,
+              0.9764563011713088,
+              0.8065112486845724
+            ],
+            "median_ratio": 0.9764563011713088,
+            "ratio_range": [
+              0.8065112486845724,
+              0.992478720577222
+            ],
+            "native_wins": 0
+          },
+          "phase/kernel_load": {
+            "legacy_median": 0.358024,
+            "native_median": 0.308984,
+            "paired_legacy_over_native": [
+              1.0756041346556782,
+              1.1587137198042619,
+              1.1190723996617444
+            ],
+            "median_ratio": 1.1190723996617444,
+            "ratio_range": [
+              1.0756041346556782,
+              1.1587137198042619
+            ],
+            "native_wins": 3
+          },
+          "phase/query_read": {
+            "legacy_median": 0.03847,
+            "native_median": 0.044001000000001,
+            "paired_legacy_over_native": [
+              0.8865707597554627,
+              1.1747999755695353,
+              0.8101418249933101
+            ],
+            "median_ratio": 0.8865707597554627,
+            "ratio_range": [
+              0.8101418249933101,
+              1.1747999755695353
+            ],
+            "native_wins": 1
+          },
+          "phase/require": {
+            "legacy_median": 0.004068,
+            "native_median": 0.004552,
+            "paired_legacy_over_native": [
+              0.9076212471131639,
+              0.9478098788443615,
+              0.8110720562390159
+            ],
+            "median_ratio": 0.9076212471131639,
+            "ratio_range": [
+              0.8110720562390159,
+              0.9478098788443615
+            ],
+            "native_wins": 0
+          },
+          "load/tests/interpreter.shen": {
+            "legacy_median": 1.016097,
+            "native_median": 0.705734,
+            "paired_legacy_over_native": [
+              1.5420484205097105,
+              1.4523846279191432,
+              1.2483571979069483
+            ],
+            "median_ratio": 1.4523846279191432,
+            "ratio_range": [
+              1.2483571979069483,
+              1.5420484205097105
+            ],
+            "native_wins": 3
+          },
+          "load/tests/calculator.shen": {
+            "legacy_median": 0.09274,
+            "native_median": 0.088676,
+            "paired_legacy_over_native": [
+              1.4485031120624103,
+              1.0458297622806623,
+              0.7376446863173015
+            ],
+            "median_ratio": 1.0458297622806623,
+            "ratio_range": [
+              0.7376446863173015,
+              1.4485031120624103
+            ],
+            "native_wins": 2
+          },
+          "load/bench/fixtures/parser.shen": {
+            "legacy_median": 0.064357,
+            "native_median": 0.094007,
+            "paired_legacy_over_native": [
+              0.6845979554714011,
+              0.7490399952738228,
+              0.5810805068540883
+            ],
+            "median_ratio": 0.6845979554714011,
+            "ratio_range": [
+              0.5810805068540883,
+              0.7490399952738228
+            ],
+            "native_wins": 0
+          },
+          "first": {
+            "legacy_median": 0.6227419999999991,
+            "native_median": 0.1422469999999995,
+            "paired_legacy_over_native": [
+              4.377891976632205,
+              9.204009753454297,
+              4.148738031441473
+            ],
+            "median_ratio": 4.377891976632205,
+            "ratio_range": [
+              4.148738031441473,
+              9.204009753454297
+            ],
+            "native_wins": 3
+          },
+          "persistent": {
+            "legacy_median": 0.9434920000000013,
+            "native_median": 0.10952000000000053,
+            "paired_legacy_over_native": [
+              8.098539079620123,
+              10.742863649302508,
+              7.285609687770629
+            ],
+            "median_ratio": 8.098539079620123,
+            "ratio_range": [
+              7.285609687770629,
+              10.742863649302508
+            ],
+            "native_wins": 3
+          }
+        },
+        "hit": {
+          "process_wall": {
+            "legacy_median": 4.696058665999999,
+            "native_median": 3.242300125,
+            "paired_legacy_over_native": [
+              1.0871234113970552,
+              1.4483726012254954,
+              0.7585708686135487
+            ],
+            "median_ratio": 1.0871234113970552,
+            "ratio_range": [
+              0.7585708686135487,
+              1.4483726012254954
+            ],
+            "native_wins": 2
+          },
+          "phase/initialise": {
+            "legacy_median": 0.03526,
+            "native_median": 0.045693,
+            "paired_legacy_over_native": [
+              0.836123695095529,
+              0.9585950031264442,
+              0.6128908937992201
+            ],
+            "median_ratio": 0.836123695095529,
+            "ratio_range": [
+              0.6128908937992201,
+              0.9585950031264442
+            ],
+            "native_wins": 0
+          },
+          "phase/kernel_load": {
+            "legacy_median": 0.007804,
+            "native_median": 0.015985,
+            "paired_legacy_over_native": [
+              0.5775169470248557,
+              0.4882076947137942,
+              0.35421247134771017
+            ],
+            "median_ratio": 0.4882076947137942,
+            "ratio_range": [
+              0.35421247134771017,
+              0.5775169470248557
+            ],
+            "native_wins": 0
+          },
+          "phase/query_read": {
+            "legacy_median": 0.024461,
+            "native_median": 0.027612,
+            "paired_legacy_over_native": [
+              0.8466608720846008,
+              0.9623116566348007,
+              0.6677425862416785
+            ],
+            "median_ratio": 0.8466608720846008,
+            "ratio_range": [
+              0.6677425862416785,
+              0.9623116566348007
+            ],
+            "native_wins": 0
+          },
+          "phase/require": {
+            "legacy_median": 0.003091,
+            "native_median": 0.004365,
+            "paired_legacy_over_native": [
+              0.9024839006439742,
+              1.1198167239404353,
+              0.6734204793028322
+            ],
+            "median_ratio": 0.9024839006439742,
+            "ratio_range": [
+              0.6734204793028322,
+              1.1198167239404353
+            ],
+            "native_wins": 1
+          },
+          "load/tests/interpreter.shen": {
+            "legacy_median": 0.093791,
+            "native_median": 0.091581,
+            "paired_legacy_over_native": [
+              0.834135901551632,
+              1.202775250810409,
+              0.8229157527155315
+            ],
+            "median_ratio": 0.834135901551632,
+            "ratio_range": [
+              0.8229157527155315,
+              1.202775250810409
+            ],
+            "native_wins": 1
+          },
+          "load/tests/calculator.shen": {
+            "legacy_median": 0.011356,
+            "native_median": 0.01087,
+            "paired_legacy_over_native": [
+              0.7418807767319511,
+              1.3048374123865332,
+              1.2310947562097516
+            ],
+            "median_ratio": 1.2310947562097516,
+            "ratio_range": [
+              0.7418807767319511,
+              1.3048374123865332
+            ],
+            "native_wins": 2
+          },
+          "load/bench/fixtures/parser.shen": {
+            "legacy_median": 0.013636,
+            "native_median": 0.013753,
+            "paired_legacy_over_native": [
+              0.7218061513851524,
+              1.0072388831437435,
+              1.075115223586532
+            ],
+            "median_ratio": 1.0072388831437435,
+            "ratio_range": [
+              0.7218061513851524,
+              1.075115223586532
+            ],
+            "native_wins": 2
+          },
+          "first": {
+            "legacy_median": 0.4457840000000001,
+            "native_median": 0.12323500000000016,
+            "paired_legacy_over_native": [
+              3.2010224368077167,
+              4.520494047498333,
+              1.932792507584752
+            ],
+            "median_ratio": 3.2010224368077167,
+            "ratio_range": [
+              1.932792507584752,
+              4.520494047498333
+            ],
+            "native_wins": 3
+          },
+          "persistent": {
+            "legacy_median": 0.8640890000000003,
+            "native_median": 0.07968300000000002,
+            "paired_legacy_over_native": [
+              11.373578453671326,
+              12.601822220548922,
+              4.3587804742712235
+            ],
+            "median_ratio": 11.373578453671326,
+            "ratio_range": [
+              4.3587804742712235,
+              12.601822220548922
+            ],
+            "native_wins": 3
+          }
+        }
+      }
+    }
+  },
+  "native_driver_compile_cpu": {
+    "release": {
+      "off": {
+        "samples": [
+          0.020207,
+          0.029362,
+          0.018558
+        ],
+        "median": 0.020207,
+        "range": [
+          0.018558,
+          0.029362
+        ]
+      },
+      "cold": {
+        "samples": [
+          0.022958,
+          0.019099,
+          0.024485
+        ],
+        "median": 0.022958,
+        "range": [
+          0.019099,
+          0.024485
+        ]
+      },
+      "hit": {
+        "samples": [
+          0.024211,
+          0.027107,
+          0.022771
+        ],
+        "median": 0.024211,
+        "range": [
+          0.022771,
+          0.027107
+        ]
+      }
+    },
+    "exact": {
+      "off": {
+        "samples": [
+          0.02072,
+          0.023176,
+          0.025817
+        ],
+        "median": 0.023176,
+        "range": [
+          0.02072,
+          0.025817
+        ]
+      },
+      "cold": {
+        "samples": [
+          0.020804,
+          0.02906,
+          0.037281
+        ],
+        "median": 0.02906,
+        "range": [
+          0.020804,
+          0.037281
+        ]
+      },
+      "hit": {
+        "samples": [
+          0.027546,
+          0.018932,
+          0.033112
+        ],
+        "median": 0.027546,
+        "range": [
+          0.018932,
+          0.033112
+        ]
+      }
+    }
+  },
+  "validation": {
+    "port_checks_per_kernel": 1833,
+    "community_judgments_per_kernel": 154,
+    "native_require": true,
+    "pure_kl_prolog_control": true,
+    "puc": "5.4.7",
+    "puc_native": "explicitly rejected",
+    "standalone_bundles": true
+  },
+  "limitations": [
+    "Uncontrolled busy host; engine comparison, no improvement-over-main or kernel A/B claim",
+    "Pure-KL switch independently controls Prolog primitives; general stdlib overrides still shared",
+    "Interactive mutation between loads excluded from FASL contract",
+    "Whole-query fallback/effect coverage beyond this corpus remains #72; detailed boundary allocation attribution remains #73",
+    "Numerical-owner prototype not adopted; no Lua numerical result inferred from Chez"
+  ]
+}
