@@ -86,6 +86,25 @@ local function translated(src)
 end
 
 do
+  local fn, err, src = translated([[
+(defun spec.empty-guard (V1 V2 V3 V4 V5)
+  (if (= (shen.lazyderef V1 V2) ()) false true))]])
+  check(fn ~= nil, "ec16a9f inline empty-list guard translates: " .. tostring(err))
+  if fn then
+    local q = E.query_begin()
+    local v = E.newvar()
+    check(fn(E.import(R.NIL, {}), 0, nil) == false, "empty hypotheses reject before helper")
+    check(fn(E.import(kl("(x)"), {}), 0, nil) == true, "nonempty hypotheses enter helper")
+    check(fn(v, 0, nil) == true, "unbound alternatives are not empty")
+    E.bind1(v, E.import(R.NIL, {}), function()
+      check(fn(v, 0, nil) == false, "bound empty alternatives lazily dereference")
+      return true
+    end)
+    E.query_end(q)
+  end
+end
+
+do
   -- shape of 43.1 shen.by-hypothesis (both sides dereferenced)
   local _, err, src = translated([[
 (defun spec.byh (V1 V2 V3 V4 V5 V6 V7)

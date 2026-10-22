@@ -39,6 +39,7 @@ if arg[1] == "--child" then
   shen.boot{ quiet = true }
   local R = require("runtime")
   local TN = require("typecheck_native")
+  TN.track_routes = true
   local opts = {}
   for i = 2, #arg do opts[arg[i]] = true end
 
@@ -54,7 +55,19 @@ if arg[1] == "--child" then
       local msg = (getmetatable(r) == R.Excn) and tostring(r.msg) or tostring(r)
       return "ERROR " .. msg:gsub("\n", " ")
     end
+    if os.getenv("SHEN_TYPECHECK_NATIVE") == "require" then
+      assert(TN.last_route and TN.last_route.engine == "native", "unexpected fallback")
+    end
     return r == false and "false" or R.to_str(r)
+  end
+
+  if opts.shared then
+    local P = shen.prims
+    local direct = P.F["shen.deref"](37, R.NIL)
+    io.write("SHARED\t", P.PROLOG_PRIMITIVES or "?", "\t", tostring(direct),
+      "\t", tostring(P.GLOBALS["spec.shared-hit"]), "\n")
+    io.write("QUERY\t", tc("1", "number"), "\n")
+    os.exit(0)
   end
 
   shen.eval([[
@@ -89,6 +102,37 @@ if arg[1] == "--child" then
   end
   for i, c in ipairs(battery) do
     io.write("V", i, "\t", c[1], " : ", c[2], "\t", tc(c[1], c[2]), "\n")
+  end
+  if opts.effects then
+    shen.eval([[
+(set spec.effects 0)
+(define spec.touch X -> (do (set spec.effects (+ 1 (value spec.effects))) X))
+(define spec.explode -> (do (spec.touch true) (simple-error "spec-runtime-error")))
+(datatype spec-alternatives
+  if (spec.touch false)
+  _____________________
+  [X] : spec-alternatives;
+  X : number;
+  =====================
+  [X] : spec-alternatives;)
+(datatype spec-error
+  if (spec.explode)
+  _____________________
+  [X] : spec-error;)
+]])
+    for _, expr in ipairs({ "[37]", "[\"bad\"]" }) do
+      shen.prims.GLOBALS["spec.effects"] = 0
+      local result = tc(expr, "spec-alternatives")
+      io.write("EFFECT\t", expr, "\t", result, "\t", shen.prims.GLOBALS["spec.effects"], "\n")
+    end
+    shen.prims.GLOBALS["spec.effects"] = 0
+    shen.prims.GLOBALS["shen.*infs*"] = 0
+    local ok, err = R.seg.pcall(raw_typecheck, "[37]", "spec-error")
+    local msg = type(err) == "table" and err.msg or tostring(err)
+    io.write("RUNTIME\t", tostring(ok), "\t", msg, "\t", shen.prims.GLOBALS["spec.effects"], "\n")
+    if os.getenv("SHEN_TYPECHECK_NATIVE") == "require" then
+      assert(TN.last_route.engine == "native-error", "runtime error must not retry legacy")
+    end
   end
   if TN.drivers then
     io.write("PROBLEMS\t", TN.native_problems and #TN.native_problems or 0, "\n")
@@ -172,6 +216,11 @@ end
 
 local KDIR = {
   vendored = nil,
+  shared = kernel("shared", { prolog = function(src)
+    return replace_defun(src, "shen.deref",
+      "(defun shen.deref (V1 V2) (do (set spec.shared-hit true) V1))")
+  end }),
+  exact = here .. "test/fixtures/kernel-ec16a9f",
   hoist = kernel("hoist", { ["t-star"] = function() return HOIST end }),
   mutated = kernel("mutated", { ["t-star"] = function(src)
     return replace_defun(src, "shen.search-user-datatypes",
@@ -232,11 +281,20 @@ local NOTICE = "native typechecker unavailable"
 
 -- vendored and hoisted kernels: native, with no fallback, and the same
 -- verdicts as the kernel's KL typechecker
-for _, k in ipairs({ "vendored", "hoist" }) do
-  local native = child(KDIR[k])
-  local legacy = child(KDIR[k], "SHEN_TYPECHECK_NATIVE=off")
+for _, k in ipairs({ "vendored", "hoist", "exact" }) do
+  local native = child(KDIR[k], "SHEN_TYPECHECK_NATIVE=require", "effects")
+  local legacy = child(KDIR[k], "SHEN_TYPECHECK_NATIVE=off SHEN_PROLOG_PRIMITIVES=kl", "effects")
   check(same_list(legacy.verdicts, WANT), k .. ": KL typechecker verdicts as expected\n" .. show(legacy))
   check(same_list(native.verdicts, legacy.verdicts), k .. ": native verdicts == KL verdicts\n" .. show(native))
+  check(native.out:find("EFFECT\t[37]\tspec-alternatives\t1", 1, true)
+    and native.out:find('EFFECT\t["bad"]\tfalse\t1', 1, true),
+    k .. ": failed earlier alternative effects once, bindings backtrack")
+  check(legacy.out:find("EFFECT\t[37]\tspec-alternatives\t1", 1, true)
+    and legacy.out:find('EFFECT\t["bad"]\tfalse\t1', 1, true),
+    k .. ": pure KL alternatives agree on effects")
+  check(native.out:find("RUNTIME\tfalse\tspec-runtime-error\t1", 1, true)
+    and legacy.out:find("RUNTIME\tfalse\tspec-runtime-error\t1", 1, true),
+    k .. ": runtime errors preserve effects exactly once")
   check(native.problems == 0, k .. ": native typechecker conforms (" .. tostring(native.problems) .. " problems)\n" .. native.stderr)
   check(not native.stderr:find(NOTICE, 1, true), k .. ": no fallback notice\n" .. native.stderr)
   local strict = child(KDIR[k], "SHEN_TYPECHECK_NATIVE=require")
@@ -276,6 +334,21 @@ do
   check(same_list(native.verdicts, WANT), "moved: native falls back with the right verdicts\n" .. show(native))
   check(native.stderr:find("calls shen.by-hypothesis-h, which is neither", 1, true),
         "moved: stderr names the unresolvable call\n" .. native.stderr)
+end
+
+-- Shared primitive mismatch: BOTH engine settings must preserve the selected
+-- kernel definition, and strict native mode must reject its unreviewed shape.
+do
+  for _, mode in ipairs({ "", "SHEN_PROLOG_ENGINE=legacy" }) do
+    local r = child(KDIR.shared, mode, "shared")
+    check(r.out:find("SHARED\tkl\t37\ttrue", 1, true),
+      "shared primitive: selected KL body/effect survives " .. mode .. "\n" .. show(r))
+    check(r.stderr:find("preserving kernel KL Prolog primitives", 1, true),
+      "shared primitive mismatch reports retained KL semantics")
+  end
+  local strict = child(KDIR.shared, "SHEN_TYPECHECK_NATIVE=require", "shared raw")
+  check(strict.out:find("SHEN_TYPECHECK_NATIVE=require", 1, true),
+    "shared primitive mismatch refuses strict native execution\n" .. show(strict))
 end
 
 -- a predicate lost at run time: the query misses loudly and is rerun on the

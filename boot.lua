@@ -459,7 +459,30 @@ local function install_native_overrides()
   -- (stlib.initialise-arities) registers at boot) builds one.
   P.install_native_lambda_entry()
   -- Hottest Prolog deref primitives (see prims.install_native_prolog).
-  P.install_native_prolog()
+  -- These overrides are shared by native and legacy typechecking. Falling
+  -- back is safe only if changed source primitives remain the actual KL
+  -- definitions, rather than being overwritten by our older Lua handports.
+  local TN = require("typecheck_native")
+  local src = (P.KL_SOURCES and P.KL_SOURCES.prolog) or read_file(KLDIR .. "prolog.kl")
+  local defs = src and TN.defuns_of(src) or {}
+  local shared = { "shen.pvar?", "shen.lazyderef", "shen.deref", "shen.bindv",
+    "shen.unwind", "shen.bind!", "shen.occurs-check?", "shen.lzy=", "shen.lzy=!",
+    "shen.newpv", "shen.gc" }
+  local problems = {}
+  for _, name in ipairs(shared) do
+    local known = TN.KNOWN[name]
+    if not (known and known[TN.fingerprint_in(defs, name)]) then
+      problems[#problems+1] = name
+    end
+  end
+  P.PROLOG_PRIMITIVES = "kl"
+  if #problems == 0 and os.getenv("SHEN_PROLOG_PRIMITIVES") ~= "kl" then
+    P.install_native_prolog()
+    P.PROLOG_PRIMITIVES = "lua"
+  elseif #problems > 0 then
+    io.stderr:write("shen-lua: preserving kernel KL Prolog primitives; unrecognized source: ",
+      table.concat(problems, ", "), "\n")
+  end
   -- Hottest general-purpose kernel functions with native Lua
   -- (element?, assoc, map, reverse, fail, ...; see prims.install_native_stdlib).
   P.install_native_stdlib()
@@ -741,6 +764,7 @@ local function compile_kernel(extsources, path, key, verbose)
 end
 
 local function load_kernel(verbose)
+  P.KERNEL_CACHE_STATUS = "compile-off"
   -- Embedded kernel (single-file bundle, see build/make-bundle.lua):
   -- P.KERNEL_CACHE_DATA holds a write_cache-format blob baked in at bundle
   -- build time, P.KL_SOURCES the .kl sources as a name -> string table.
@@ -751,9 +775,11 @@ local function load_kernel(verbose)
   if P.KERNEL_CACHE_DATA then
     local cached = parse_cache(P.KERNEL_CACHE_DATA, nil)
     if not (cached and load_cached(cached, verbose, " (embedded)")) then
+      P.KERNEL_CACHE_STATUS = "embedded-source"
       compile_kernel(assert(P.KL_SOURCES, "embedded kernel bytecode unusable and no embedded .kl sources"),
                      nil, nil, verbose)
     end
+    P.KERNEL_CACHE_STATUS = P.KERNEL_CACHE_STATUS == "embedded-source" and "embedded-source" or "embedded-bytecode"
     install_native_overrides()
     return
   end
@@ -765,12 +791,14 @@ local function load_kernel(verbose)
     local cached = read_cache(path, key)
     if cached then
       if load_cached(cached, verbose, " (cached)") then
+        P.KERNEL_CACHE_STATUS = "hit"
         install_native_overrides()
         return
       end
       os.remove(path)  -- corrupt/stale dump: recompile below and rewrite
     end
   end
+  P.KERNEL_CACHE_STATUS = path and "miss" or "compile-off"
   compile_kernel(sources, path, key, verbose)
   install_native_overrides()
 end
@@ -1375,6 +1403,7 @@ local function install_fasl()
       local ok, err = pcall(fasl_replay, cached)
       if outer0 then outer0.in_chunk = saved_in_chunk end
       if ok then
+        if P.TRACK_FASL then P.LAST_FASL_STATUS = "hit" end
         fasl_log("hit  " .. fname .. " " .. key)
         FASL_ROLL = fnv1a(content, FASL_ROLL)
         splice_into_outer(cached.recs, nil, nil)
@@ -1383,6 +1412,7 @@ local function install_fasl()
       os.remove(path)   -- stale beyond what the key caught: recompile next run
       error(err, 0)
     end
+    if P.TRACK_FASL then P.LAST_FASL_STATUS = "miss" end
     fasl_log("miss " .. fname .. " " .. key)
     local rec = { n = 0, in_chunk = false }
     local arity0 = {}

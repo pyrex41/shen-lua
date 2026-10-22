@@ -557,7 +557,14 @@ compile_value = function(ctx, e, env, out, d)
     local a, b = args[1], args[2][1]
     local akind = is_klvar(a) and env[a.name] and env[a.name].kind
     local bkind = is_klvar(b) and env[b.name] and env[b.name].kind
-    if akind == "term" or bkind == "term" then
+    -- Final ec16a9f wrappers test (= (shen.lazyderef List B) ())
+    -- directly, without a let-bound term local. Both operands must stay in
+    -- arena representation; compile_value would mistake lazyderef for a
+    -- goal call. Restrict this extra shape to the empty-list sentinel test.
+    local function lazy_empty(x, other)
+      return other == NIL and is_cons(x) and x[1] == SYM["shen.lazyderef"]
+    end
+    if akind == "term" or bkind == "term" or lazy_empty(a, b) or lazy_empty(b, a) then
       local al = compile_term(ctx, a, env, out, d)
       local bl = compile_term(ctx, b, env, out, d)
       return "(" .. al .. " == " .. bl .. ")"

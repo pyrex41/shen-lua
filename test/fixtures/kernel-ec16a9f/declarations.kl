@@ -1,0 +1,25 @@
+(defun datatypes () (map (lambda Z920 (shen.typename Z920)) (value shen.*alldatatypes*)))
+
+(defun included () (map (lambda Z921 (shen.typename Z921)) (value shen.*datatypes*)))
+
+(defun shen.typename (V924) (cond ((cons? V924) (intern (shen.typename-h (str (hd V924))))) (true (shen.f-error shen.typename))))
+
+(defun shen.typename-h (V925) (cond ((= "#type" V925) "") ((shen.+string? V925) (cn (hdstr V925) (shen.typename-h (tlstr V925)))) (true (shen.f-error shen.typename-h))))
+
+(defun prolog-memory (V926) (if (< V926 0) (value shen.*prolog-memory*) (if (integer? V926) (set shen.*prolog-memory* V926) (simple-error "prolog memory expects an integer value
+"))))
+
+(defun arity (V927) (trap-error (get V927 arity (value *property-vector*)) (lambda Z928 -1)))
+
+(defun shen.initialise-arity-table (V931) (cond ((= () V931) ()) ((and (cons? V931) (cons? (tl V931))) (let W932 (put (hd V931) arity (hd (tl V931)) (value *property-vector*)) (shen.initialise-arity-table (tl (tl V931))))) (true (simple-error "implementation error in shen.initialise-arity-table"))))
+
+(defun systemf (V933) (let W934 (get shen shen.external-symbols (value *property-vector*)) (let W935 (put shen shen.external-symbols (adjoin V933 W934) (value *property-vector*)) V933)))
+
+(defun adjoin (V936 V937) (if (element? V936 V937) V937 (cons V936 V937)))
+
+(defun shen.lambda-entry (V938) (let W939 (arity V938) (if (or (= W939 -1) (= W939 0)) () (cons V938 (eval-kl (shen.lambda-function (cons V938 ()) W939))))))
+
+(defun shen.set-lambda-form-entry (V940) (cond ((cons? V940) (put (hd V940) shen.lambda-form (tl V940) (value *property-vector*))) (true (shen.f-error shen.set-lambda-form-entry))))
+
+(defun shen.build-lambda-table (V941) (let W942 (map (lambda Z943 (shen.lambda-entry Z943)) V941) (shen.for-each (lambda Z944 (shen.set-lambda-form-entry Z944)) (cons (cons shen.register-source-form (lambda Z945 (lambda Z946 (shen.register-source-form Z945 Z946)))) (cons (cons shen.unregister-source-form (lambda Z947 (shen.unregister-source-form Z947))) (cons (cons shen.tuple (lambda Z948 (shen.tuple Z948))) (cons (cons shen.pvar (lambda Z949 (shen.pvar Z949))) (cons (cons shen.dictionary (lambda Z950 (shen.dictionary Z950))) (cons (cons shen.print-prolog-vector (lambda Z951 (shen.print-prolog-vector Z951))) (cons (cons shen.print-freshterm (lambda Z952 (shen.print-freshterm Z952))) (cons (cons shen.printF (lambda Z953 (shen.printF Z953))) W942)))))))))))
+

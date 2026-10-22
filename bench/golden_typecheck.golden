@@ -1,27 +1,20 @@
-tc-number	number
-tc-string	string
-tc-boolean	boolean
-tc-list	(list . (number . ()))
-tc-arith	number
-tc-id-lambda	(?1 . (--> . (?1 . ())))
-tc-mono-lambda	(number . (--> . (number . ())))
-tc-twice	((?1 . (--> . (?1 . ()))) . (--> . ((?1 . (--> . (?1 . ()))) . ())))
-tc-compose	((?1 . (--> . (?2 . ()))) . (--> . (((?3 . (--> . (?1 . ()))) . (--> . ((?3 . (--> . (?2 . ()))) . ()))) . ())))
-tc-cons	(list . (number . ()))
-tc-tuple	(number . (* . (string . ())))
-tc-nested-tuple	((number . (* . (number . ()))) . (* . (string . ())))
-tc-if	number
-tc-let	number
-tc-let-shadow	string
-tc-map	(list . (number . ()))
-tc-reverse	(list . (number . ()))
-tc-hd	false
-tc-append	(list . (number . ()))
-tc-poly-pair	(?1 . (--> . ((?1 . (* . (?1 . ()))) . ())))
-tcfail-arith	false
-tcfail-hd	false
-tcfail-if	false
-tcfail-branch	primitive-object
-tcfail-list	(list . (primitive-object . ()))
-tc-ycombinator	(list . (l-formula . ()))
-prolog-einstein	german
+number	number
+identity	(?1 . (--> . (?1 . ())))
+nested-hypotheses	((?1 . (--> . (?1 . ()))) . (--> . ((?1 . (--> . (?1 . ()))) . ())))
+shadowing	string
+map	(list . (number . ()))
+reject-arithmetic	false
+reject-condition	false
+reject-branches	false
+interpreter-y	(list . (l-formula . ()))
+interpreter-y-inferred	(list . (l-formula . ()))
+interpreter-nested	l-formula
+interpreter-call	l-formula
+interpreter-reject	false
+calculator-tree	arith-expr
+calculator-call	number
+calculator-reject-leaf	false
+calculator-reject-operator	false
+parser-function	((list . (symbol . ())) . (--> . ((str . ((list . (symbol . ())) . ((list . (symbol . ())) . ()))) . ())))
+parser-call	(str . ((list . (symbol . ())) . ((list . (symbol . ())) . ())))
+parser-reject	false

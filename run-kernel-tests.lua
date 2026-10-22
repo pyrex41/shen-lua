@@ -105,6 +105,18 @@ if not ok1 then
   os.exit(1)
 end
 
+-- The authenticated suite calls reset at its end. Count the actual passed,
+-- failed and err callbacks, rather than reporting its reset globals as 0/0.
+local passed, failed = 0, 0
+for _, name in ipairs({ "passed", "failed", "test-harness.err" }) do
+  local orig = assert(P.F[name], "missing harness callback " .. name)
+  P.F[name] = function(...)
+    if name == "passed" then passed = passed + 1 else failed = failed + 1 end
+    return orig(...)
+  end
+  P.FA[P.F[name]] = P.FA[orig]
+end
+
 -- Now the big one
 print("Loading kerneltests.shen (this runs the actual reports)...")
 local ok2, e2 = xpcall(function()
@@ -119,18 +131,6 @@ end)
 print("\n=== Test run finished ===")
 print("kerneltests result:", ok2 and "ok" or e2)
 
--- Final counters from the harness. The harness defines *passed* / *failed*
--- inside its `(package test-harness ...)` block, so the bare symbol names get
--- prefixed to `test-harness.*passed*` / `test-harness.*failed*`.
-local function getg(...)
-  for _, name in ipairs({...}) do
-    local v = P.GLOBALS[name]
-    if v ~= nil then return v end
-  end
-  return "?"
-end
-print(string.format("Counters: passed=%s failed=%s",
-  getg("test-harness.*passed*", "*passed*"),
-  getg("test-harness.*failed*", "*failed*")))
-
+print(string.format("Counters: passed=%d failed=%d", passed, failed))
 print("\nDone.")
+os.exit(ok2 and passed > 0 and failed == 0 and 0 or 1)

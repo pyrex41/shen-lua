@@ -17,3 +17,6 @@ examples/*/fastcgi_temp/
 examples/*/proxy_temp/
 examples/*/scgi_temp/
 examples/*/uwsgi_temp/
+
+.work/
+__pycache__/
