@@ -510,21 +510,22 @@ end })
 -- ---------------------------------------------------------------------------
 -- the typecheck entry (t-star.kl:1)
 -- ---------------------------------------------------------------------------
+-- Return status and value together so the dispatcher need not protect an
+-- already-protected query a second time. Preprocessing is inside the same
+-- boundary: native misses there retain whole-query fallback behavior too.
 local function native_typecheck(expr, type_)
-  -- pre-processing identical to the legacy entry (plain helpers via F)
-  local vars = F["shen.extract-vars"](type_)
-  local rect = F["shen.rectify-type"](type_)
-  local curried = F["shen.curry"](expr)
-
-  local q = E.query_begin()
-  E.setinfs(P.GLOBALS["shen.*infs*"] or 0)
-
-  local A = E.newvar()
-  local toplevel = NP["shen.toplevel-forms"]
-  local insertpv = NP["shen.insert-prolog-variables"]
-  local imp = E.import_cached
-
+  local q
   local ok, result = pcall(function()
+    local vars = F["shen.extract-vars"](type_)
+    local rect = F["shen.rectify-type"](type_)
+    local curried = F["shen.curry"](expr)
+
+    q = E.query_begin()
+    E.setinfs(P.GLOBALS["shen.*infs*"] or 0)
+    local A = E.newvar()
+    local toplevel = NP["shen.toplevel-forms"]
+    local insertpv = NP["shen.insert-prolog-variables"]
+    local imp = E.import_cached
     E.incinfs()
     local kret = E.newcont1(function(base)
       return E.materialize(E.capref(base, 0))
@@ -536,13 +537,11 @@ local function native_typecheck(expr, type_)
     return insertpv(imp(vars), imp(rect), A, 0, ktop)
   end)
 
-  P.GLOBALS["shen.*infs*"] = E.getinfs()
-  E.query_end(q)
-  if not ok then
-    -- popvar bookkeeping past query_end is already restored; rethrow
-    error(result, 0)
+  if q then
+    P.GLOBALS["shen.*infs*"] = E.getinfs()
+    E.query_end(q)
   end
-  return result
+  return ok, result
 end
 
 -- ---------------------------------------------------------------------------
@@ -754,7 +753,7 @@ function M.install(Pmod, Emod)
        and P.GLOBALS["shen.*spy*"] ~= true then
       attempted = true
       route("native", "eligible", true)
-      local ok, r = pcall(native_typecheck, expr, type_)
+      local ok, r = native_typecheck(expr, type_)
       if ok then return r end
       if E.is_native_miss(r) then
         reason = tostring(r)
@@ -792,7 +791,9 @@ function M.install(Pmod, Emod)
   -- dispatch path already calls ensure_drivers(), so it uses the raw local.
   M.native_typecheck = function(expr, type_)
     ensure_drivers()
-    return native_typecheck(expr, type_)
+    local ok, result = native_typecheck(expr, type_)
+    if not ok then error(result, 0) end
+    return result
   end
 end
 
