@@ -165,10 +165,17 @@ local KNOWN = {
   -- outside their loops, through new -h helpers. The native
   -- search-user-datatypes hand port implements both shapes (it never
   -- copies on deref); by-hypothesis(-h) are translated, not hand-ported.
+  -- 43.1@ec16a9f = upstream shen-sources ec16a9f, the merge of #117: the
+  -- deref hoist above plus bdb8582, where search-user-datatypes and
+  -- by-hypothesis return false at once on an empty datatype/hypothesis list
+  -- without dereferencing. The hand port already fails on an empty list
+  -- before any clause, with no inference counted (as -h's clauses never
+  -- match one), and never copies on deref, so it implements this shape too.
+  -- Only search-user-datatypes changes fingerprint; -h is the hoist's.
   ["shen.typecheck"] = { ["53f17a8525d2d3ab"] = "43.1, 43.1+deref-hoist" },
   ["shen.lookupsig"] = { ["7613493146348a37"] = "43.1, 43.1+deref-hoist" },
   ["shen.sigf"] = { ["9224dc17fb22e027"] = "43.1, 43.1+deref-hoist" },
-  ["shen.search-user-datatypes"] = { ["f19996b77935e2cd"] = "43.1", ["bbdfd9a9f7dfc457"] = "43.1+deref-hoist" },
+  ["shen.search-user-datatypes"] = { ["f19996b77935e2cd"] = "43.1", ["bbdfd9a9f7dfc457"] = "43.1+deref-hoist", ["483d69ab4d98d601"] = "43.1@ec16a9f" },
   ["shen.search-user-datatypes-h"] = { ["absent"] = "43.1", ["a3924a95ecff6737"] = "43.1+deref-hoist" },
   ["shen.show"] = { ["832effe9caab5eb7"] = "43.1, 43.1+deref-hoist" },
   ["shen.maxinfexceeded?"] = { ["effe20ceadf236e0"] = "43.1, 43.1+deref-hoist" },
