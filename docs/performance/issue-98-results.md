@@ -91,9 +91,9 @@ budget behavior are unchanged. No exact low-budget threshold parity is claimed.
 
 The original Lua compiler profiling hook observed only the public export and
 missed the captured local loader. Those reports are retained and superseded by
-`corrected-*-diagnostic` and `corrected-*-bundle`. The corrected cold/off profiles
+`corrected-*-diagnostic` and `corrected-*-bundle`. The corrected native cold/off profiles
 observe 89 defun compilations plus 55 expression compilations and 144 actual Lua
-loads/compilations. Inclusive hooks overlap and must not be summed. GC-stopped
+loads/compilations; legacy observes 37 + 55 = 92. Inclusive hooks overlap and must not be summed. GC-stopped
 allocation diagnostics measure Lua heap growth, excluding FFI/native capacity;
 GC-on heap occupancy is never labelled cumulative allocation.
 
