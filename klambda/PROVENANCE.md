@@ -1,9 +1,20 @@
 # Provenance of the vendored KLambda kernel
 
-## Current: ShenOSKernel 43.1 (community `shen-sources` line)
+## Current: ShenOSKernel 43.1 at upstream `ec16a9f` (community `shen-sources` line)
 
-All 23 official `.kl` files and the kernel test suite under `../tests/` are vendored
-**byte-identical** from the ShenOSKernel 43.1 release.
+The 23 `.kl` files are vendored **byte-identical** from the kernel built at upstream
+`Shen-Language/shen-sources` master `ec16a9f`: the 43.1 release plus the type checker's
+deref-once change (shen-sources#117, with its empty-list guard). The kernel test suite
+under `../tests/` is unchanged from 43.1 and identical to that build's.
+
+- **Build**: `ShenOSKernel-43.1-ec16a9f.tar.gz`, unmodified upstream sources built with
+  the repo's `make klambda`/`make release`, from
+  https://github.com/pyrex41/shen-sources/releases/tag/upstream-ec16a9f
+  - SHA-256: `060066a8f84d9a2f7d41cb3b37b986a8d4653279752b739b5063cd648d9baacd`
+- `(version)` still reports `"43.1"`.
+
+The record of the original 43.1 import follows.
+
 
 - **Repository**: [`Shen-Language/shen-sources`](https://github.com/Shen-Language/shen-sources)
   - Tag: `shen-43.1`
