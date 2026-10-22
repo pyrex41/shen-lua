@@ -68,7 +68,7 @@ assert(ref:find('STATE\tdatatype-old\tfalse',1,true),ref)
 assert(ref:find('STATE\tdestroyed\tfalse',1,true),ref)
 assert(ref:find('STATE\tfailed-effects\t2',1,true),ref)
 assert(ref:find('STATE\tnested-effects\t1',1,true),ref)
--- Changing a nested dependency must invalidate its enclosing replay.
+-- Changing a nested dependency must update effects through its enclosing replay.
 write('dependency.shen','(set cache.nested-count (+ 7 (value cache.nested-count)))\n')
 local changed,changedout=run('cold')
 assert(changed:find('STATE\tnested-effects\t7',1,true),changedout)

@@ -67,8 +67,10 @@ python3 bench/run_typecheck.py --mode diagnostic --pairs 1 --out .work/typecheck
 python3 bench/run_typecheck.py --mode alloc --pairs 1 --out .work/typecheck-allocation
 ```
 
-Diagnostic hooks measure inclusive read/parse/expand, source lowering, KL-to-Lua
-and Lua compilation CPU/call counts. They overlap and must not be summed or mixed
+Diagnostic hooks measure inclusive file reading/parsing/expansion, parsing
+itself, source lowering, KL-to-Lua defun/expression compilation and Lua
+compilation CPU/call counts. The Lua compiler hook covers the local loader
+captured by eval-kl, as well as the exported loader used by FASL replay. They overlap and must not be summed or mixed
 into accepted timing cohorts. GC-stopped query heap growth in allocation mode
 covers the Lua heap only; FFI arenas and native allocator capacity are excluded.
 GC restarts after each query, including a caught error. GC-on occupancy is never

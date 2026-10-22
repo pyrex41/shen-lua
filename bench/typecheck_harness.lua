@@ -85,8 +85,24 @@ function M.run(mode)
     end
     wrap(P.F, 'read-file', 'source_read_parse_expand')
     wrap(P.F, 'shen.shen->kl', 'source_lower')
-    wrap(require('compiler'), 'compile_top', 'kl_to_lua')
+    wrap(P.F, 'read-from-string', 'parse_expand_inclusive')
+    wrap(require('compiler'), 'compile_top', 'kl_to_lua_defun')
+    wrap(require('compiler'), 'compile_expr_chunk', 'kl_to_lua_expr')
     wrap(P, 'load_chunk', 'lua_compile')
+    -- eval-kl captures the LOCAL loader inside compile_and_load; changing
+    -- only the exported P.load_chunk misses source compilation entirely.
+    -- This reflective hook is confined to diagnostic processes.
+    local hooked = false
+    for i=1,100 do
+      local name = debug.getupvalue(P.compile_and_load, i)
+      if not name then break end
+      if name == 'load_chunk' then
+        debug.setupvalue(P.compile_and_load, i, P.load_chunk)
+        hooked = true
+        break
+      end
+    end
+    assert(hooked, 'cannot instrument actual local Lua compiler; refusing diagnostic report')
   end
   if TN and report.engine == 'native-dispatch' then
     phase('driver_compile', TN.ensure_drivers)
