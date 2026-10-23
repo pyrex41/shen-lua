@@ -555,8 +555,19 @@ compile_value = function(ctx, e, env, out, d)
   -- (= A B)
   if h == SYM["="] and is_cons(args) and is_cons(args[2]) then
     local a, b = args[1], args[2][1]
-    local akind = is_klvar(a) and env[a.name] and env[a.name].kind
-    local bkind = is_klvar(b) and env[b.name] and env[b.name].kind
+    -- a side is an engine term when it is a term variable, or a
+    -- (shen.lazyderef X B) of one (compiled to LZD): upstream ec16a9f's
+    -- by-hypothesis tests (= (shen.lazyderef Hyp B) ()) before descending
+    local function termkind(x)
+      if is_klvar(x) then return env[x.name] and env[x.name].kind end
+      if is_cons(x) and x[1] == SYM["shen.lazyderef"]
+         and is_cons(x[2]) and is_klvar(x[2][1]) then
+        local v = env[x[2][1].name]
+        return v and v.kind == "term" and "term" or nil
+      end
+      return nil
+    end
+    local akind, bkind = termkind(a), termkind(b)
     if akind == "term" or bkind == "term" then
       local al = compile_term(ctx, a, env, out, d)
       local bl = compile_term(ctx, b, env, out, d)

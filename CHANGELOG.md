@@ -7,6 +7,18 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ### Changed
 
+- **Kernel: ShenOSKernel 43.1 at upstream `ec16a9f`** (the 43.1 release plus
+  shen-sources#117): `shen.by-hypothesis` and `shen.search-user-datatypes`
+  dereference the checked term once per call through new `-h` predicates, and
+  fail at once on an empty list. Vendored byte-identical from
+  `ShenOSKernel-43.1-ec16a9f.tar.gz` (SHA-256 `060066a8…9baacd`); `(version)`
+  is still `"43.1"`. The native typechecker follows it without falling back:
+  `typecheck_native.lua` accepts the new `shen.search-user-datatypes`
+  fingerprint (the hand port already fails on an empty list), and the driver
+  translator compiles the `(= (shen.lazyderef Hyp B) ())` guard in
+  `shen.by-hypothesis` as an arena comparison. eqterm still fires in
+  `shen.by-hypothesis-h`.
+
 - **Kernel: ShenOSKernel 43.1** (community `Shen-Language/shen-sources`);
   vendored wholesale from the verified `shen-43.1` release. The public
   `char-stream?`, `read-unit-string`, and `write-string` interfaces are

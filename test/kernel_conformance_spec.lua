@@ -20,7 +20,8 @@
 -- expectations.
 --
 -- Kernels:
---   vendored    klambda/ (ShenOSKernel 43.1)
+--   vendored    klambda/ (ShenOSKernel 43.1 at upstream ec16a9f: the deref hoist
+--               plus an empty-list guard, shen-sources#117)
 --   hoist       43.1 with the deref hoist (test/fixtures/kernel-43.1-deref-hoist)
 --   mutated     43.1 whose shen.search-user-datatypes never consults a
 --               datatype: the hand port no longer implements it
@@ -244,9 +245,12 @@ for _, k in ipairs({ "vendored", "hoist" }) do
 end
 
 do
+  -- klambda/ is upstream ec16a9f (the 43.1 release plus shen-sources#117):
+  -- the deref-hoisted drivers, plus an empty-list guard in
+  -- shen.by-hypothesis / shen.search-user-datatypes
   local v = child(KDIR.vendored)
-  check(v.added == nil or v.added == "", "vendored: driver closure adds nothing (" .. tostring(v.added) .. ")")
-  check(v.eqterm["shen.by-hypothesis"] == "yes", "vendored: by-hypothesis compares on the arena")
+  check(v.added == "shen.by-hypothesis-h", "vendored: driver closure adds shen.by-hypothesis-h (" .. tostring(v.added) .. ")")
+  check(v.eqterm["shen.by-hypothesis-h"] == "yes", "vendored: by-hypothesis-h compares on the arena")
   local h = child(KDIR.hoist)
   check(h.added == "shen.by-hypothesis-h", "hoist: driver closure adds shen.by-hypothesis-h (" .. tostring(h.added) .. ")")
   check(h.eqterm["shen.by-hypothesis-h"] == "yes", "hoist: by-hypothesis-h compares on the arena")
