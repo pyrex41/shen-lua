@@ -585,12 +585,14 @@ defprim("type", 2, function(x, _ty) return x end)
 local load_form  -- fwd (defined below)
 defprim("eval-kl", 1, function(form) return P.eval(form) end)
 
--- get-time : (get-time Sym), Sym in {run, real, unix}
+-- get-time : (get-time Sym), Sym in {run, real, unix}; anything else raises
 local t0_real = os.time()
 defprim("get-time", 1, function(sym)
-  local name = is_symbol(sym) and sym.name or tostring(sym)
+  local name = is_symbol(sym) and sym.name
   if name == "run" then return os.clock()
-  else return os.time() - t0_real end   -- real / unix : wall seconds since boot
+  elseif name == "unix" then return os.time()
+  elseif name == "real" then return os.time() - t0_real  -- wall seconds since boot
+  else ERR("get-time: invalid option: " .. R.to_str(sym)) end
 end)
 
 -- ---- streams -------------------------------------------------------------

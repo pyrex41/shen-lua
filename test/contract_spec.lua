@@ -102,5 +102,13 @@ do
   os.remove(tmp)
 end
 
+-- get-time: unix is the Unix time, and an unknown option raises --------------------
+check(math.abs(eval("(get-time unix)") - os.time()) <= 2, "(get-time unix) is the Unix time")
+check(type(eval("(get-time run)")) == "number", "(get-time run) is a number")
+check(type(eval("(get-time real)")) == "number", "(get-time real) is a number")
+for _, bad in ipairs({ "sideways", "1", '"unix"' }) do
+  check((caught("(get-time " .. bad .. ")") or ""):find("invalid option", 1, true) ~= nil, "(get-time " .. bad .. ") raises")
+end
+
 io.write(string.format("contract_spec: %d passed, %d failed\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)
