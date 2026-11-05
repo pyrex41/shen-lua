@@ -583,8 +583,21 @@ function M.install(Pmod, Emod)
   -- then init.kl. An incomplete harvest (missing source
   -- or an unrecognised form) leaves sigs_complete false, which forces the
   -- legacy in-kernel typecheck path — slower, but identical verdicts.
-  M.sigs_complete = harvest_types_sigs(read_kl("types"))
-    or harvest_init_sigs(read_kl("init"))
+  -- Parsing those files is most of a boot's engine cost (two read_alls, 65M of
+  -- 480M instructions) and only a typecheck wants the result, so it waits for
+  -- the first one. A signature declared or destroyed before then must win.
+  local types_src, init_src = read_kl("types"), read_kl("init")
+  local sig_touched = {}
+  local function ensure_sigs()
+    if not types_src and not init_src then return end
+    local src1, src2 = types_src, init_src
+    types_src, init_src = nil, nil
+    local live = {}
+    for k, v in pairs(NativeSig) do live[k] = v end
+    M.sigs_complete = harvest_types_sigs(src1) or harvest_init_sigs(src2)
+    for k in pairs(sig_touched) do NativeSig[k] = live[k] end
+    for k, v in pairs(live) do NativeSig[k] = v end
+  end
 
   -- Driver TRANSLATION is DEFERRED to the first typecheck; the t-star.kl READ
   -- stays eager. Walking the 16 driver defuns through the KL->Lua prolog
@@ -618,6 +631,7 @@ function M.install(Pmod, Emod)
   local native_problems = nil
   local function ensure_drivers()
     if drivers_ready then return end
+    ensure_sigs()
     -- Translate into FRESH accumulators and commit `drivers_ready` (plus the
     -- n_fail the dispatch consults) only AFTER the whole pass and the
     -- hand-ports succeed. If R.read_all or an unexpected translator error
@@ -722,6 +736,7 @@ function M.install(Pmod, Emod)
   if orig_destroy then
     F["destroy"] = function(name)
       NativeSig[name] = nil
+      sig_touched[name] = true
       return orig_destroy(name)
     end
     P.FA[F["destroy"]] = 1
