@@ -117,5 +117,25 @@ check(eval('(make-string "~A" "a")') == 'a', "~A still prints a string bare")
 check(eval('(make-string "~S" "a")') == '"a"', "~S still quotes a string")
 check(eval('(= (concat a 1) a1)') == true, "concat of atoms is unchanged")
 
+-- address-> and <-address stay inside the vector -----------------------------------
+for _, form in ipairs({
+  "(address-> (absvector 1) 1 x)", "(address-> (absvector 1) 5 x)",
+  "(address-> (absvector 1) -1 x)", "(address-> (absvector 1) 0.5 x)",
+  "(address-> (absvector 0) 0 x)", "(<-address (absvector 1) -1)",
+  "(<-address (absvector 1) 1)", "(<-address (absvector 0) 0)",
+}) do
+  check((caught(form) or ""):find("is not a valid index", 1, true) ~= nil, form .. " raises")
+end
+eval("(define contract-store V I X -> (address-> V I X))")
+eval("(define contract-load V I -> (<-address V I))")
+check((caught("(contract-store (absvector 1) 1 x)") or ""):find("is not a valid index", 1, true) ~= nil,
+      "a compiled address-> past the end raises")
+check((caught("(contract-load (absvector 1) -1)") or ""):find("is not a valid index", 1, true) ~= nil,
+      "a compiled <-address reads no length word")
+check(eval("(contract-load (contract-store (absvector 2) 1 7) 1)") == 7, "in-range slots still work")
+check(eval("(let F address-> (<-address (F (absvector 1) 0 8) 0))") == 8, "address-> through a variable")
+check((caught("(let F address-> (F (absvector 1) 3 8))") or ""):find("is not a valid index", 1, true) ~= nil,
+      "address-> through a variable checks too")
+
 io.write(string.format("contract_spec: %d passed, %d failed\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)

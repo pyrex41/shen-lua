@@ -560,12 +560,17 @@ local function addr_oob(v, i)
   ERR(R.to_str and (tostring(i) .. " is not a valid index") or "invalid index")
 end
 P.addr_oob = addr_oob
+-- A negative index is out of range too: v[1] holds the length word. A write to
+-- a slot that does not exist raises as well, rather than growing the table.
 defprim("<-address", 2, function(v, i)
   local w = v[i+2]
-  if w == nil then addr_oob(v, i) end
+  if w == nil or i < 0 then addr_oob(v, i) end
   return w
 end)
-defprim("address->", 3, function(v, i, x) v[i+2]=x; return v end)
+defprim("address->", 3, function(v, i, x)
+  if v[i+2] == nil or i < 0 then addr_oob(v, i) end
+  v[i+2]=x; return v
+end)
 
 -- freeze/thaw : thunks are 0-arity functions (kernel: (defun thaw (V) (V)))
 -- Hot path in the Prolog/typechecker CPS: a thawed value is always a 0-arity
@@ -901,9 +906,9 @@ function P.install_native_prolog()
     -- Per-query capacity: shen.prolog-vector allocates ONE absvector of
     -- (value shen.*prolog-memory*) slots per query, so the kernel's
     -- shen.nextticket writes slot n and the query dies once n reaches the
-    -- vector size. Our absvector is a Lua table, and address-> is an
-    -- unchecked store, so without this the vector would silently grow and a
-    -- query that raises on every other port would answer here.
+    -- vector size. This native path stores without going through address->,
+    -- so without this the vector would silently grow and a query that raises
+    -- on every other port would answer here.
     local size = vec[1]
     if type(size) == "number" and n >= size then
       ERR("prolog vector index out of range: a single query may allocate at "
@@ -2667,10 +2672,13 @@ local ENV = {
   end,
   ADDR = function(v, i)
     local w = v[i + 2]
-    if w == nil then return F["<-address"](v, i) end
+    if w == nil or i < 0 then return F["<-address"](v, i) end
     return w
   end,
-  ADSET = function(v, i, x) v[i + 2] = x; return v end,
+  ADSET = function(v, i, x)
+    if v[i + 2] == nil or i < 0 then return F["address->"](v, i, x) end
+    v[i + 2] = x; return v
+  end,
   VMT = Vmt,
   -- allow compiled code to reach a few Lua builtins safely
   -- trap-error's pcall restores the stack-segment count (runtime.lua, #93)
