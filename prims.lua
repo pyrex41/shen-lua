@@ -1456,7 +1456,101 @@ function P.install_native_stdlib()
   }
   -- try the alternatives from number `from` on at v: returns the kind
   -- ("open", "item", "skip", or nil for <e>), the rest, and the value
+  --
+  -- Fast paths, by the token's first code. A token's first code rules out most
+  -- alternatives, and the plain cases of the rest take a few lines here, where
+  -- the KL combinators spent about 20,000 instructions per input byte. Anything
+  -- else takes the ordered choice below, so these must only ever agree with it:
+  -- a digit run followed by . or e, a string with c#, a non-ASCII byte and all
+  -- punctuation go to the kernel's rules.
+  local SX_WS, SX_SYM0, SX_SYMN, SX_CH = {}, {}, {}, {}
+  for c = 0, 127 do SX_CH[c] = string.char(c) end
+  for _, c in ipairs{ 9, 10, 13, 32 } do SX_WS[c] = true end
+  for c = 97, 122 do SX_SYM0[c] = true end
+  for c = 65, 90 do SX_SYM0[c] = true end
+  for ch in ("=-*/+_?$!@~.><&%'#`"):gmatch(".") do SX_SYM0[ch:byte()] = true end
+  for c in pairs(SX_SYM0) do SX_SYMN[c] = true end
+  local SX_DIGIT, SX_NUMCONT = {}, { [45] = true, [43] = true, [46] = true }
+  for c = 48, 57 do SX_SYMN[c] = true; SX_DIGIT[c] = true; SX_NUMCONT[c] = true end
+  local sx_buf = {}
+  local sx_vector = intern("vector")
+  local sx_dollar = intern("$")
+  -- <sym>: the caller knows the first code qualifies
+  local function sx_sym(v)
+    local n = 0
+    local buf, ch, symn = sx_buf, SX_CH, SX_SYMN
+    repeat
+      n = n + 1; buf[n] = ch[v[1]]
+      v = v[2]
+    until not is_cons(v) or not symn[v[1]]
+    local s = table.concat(buf, "", 1, n)
+    if s == "<>" then return "item", v, cons(sx_vector, cons(0, NIL)) end
+    return "item", v, F["intern"](s)
+  end
+  -- <str> with no c# escape and only ASCII, else false
+  local function sx_str(v)
+    local n = 0
+    local buf, ch = sx_buf, SX_CH
+    v = v[2]
+    while is_cons(v) do
+      local c = v[1]
+      if c == 34 then return "item", v[2], table.concat(buf, "", 1, n) end
+      if c == 99 or type(c) ~= "number" or c > 127 or c < 0 then
+        -- c can begin c#NN; so leave only that case to the kernel's rules
+        if c ~= 99 or (is_cons(v[2]) and v[2][1] == 35) then return false end
+      end
+      n = n + 1; buf[n] = ch[c]
+      v = v[2]
+    end
+    return false
+  end
+  -- <number> for a run of at most 15 digits not followed by . or e: exact in a
+  -- double, so the kernel's sum of digit * 10^k reaches the same value
+  local function sx_int(v)
+    local acc, n = 0, 0
+    while is_cons(v) do
+      local c = v[1]
+      if not SX_DIGIT[c] then
+        if c == 46 or c == 101 then return false end
+        break
+      end
+      acc = acc * 10 + (c - 48)
+      n = n + 1
+      if n > 15 then return false end
+      v = v[2]
+    end
+    return "item", v, acc
+  end
+  -- kind, rest, value like sx_step; false to take the ordered choice
+  local function sx_fast(v)
+    if not is_cons(v) then return nil end
+    local c = v[1]
+    if SX_WS[c] then
+      repeat v = v[2] until not is_cons(v) or not SX_WS[v[1]]
+      return "skip", v
+    end
+    if c == 91 then return "open", v[2], SX_LSB end
+    if c == 40 then return "open", v[2], SX_LRB end
+    if c == 93 or c == 41 then return nil end   -- no alternative takes a closer
+    if SX_SYM0[c] then
+      local t = v[2]
+      local d = is_cons(t) and t[1]
+      if c == 45 or c == 43 then        -- - and +: <number> takes signs
+        if SX_NUMCONT[d] then return false end
+      elseif c == 46 then               -- .: <number> takes .digits
+        if SX_DIGIT[d] then return false end
+      end
+      return sx_sym(v)
+    end
+    if c == 34 then return sx_str(v) end
+    if SX_DIGIT[c] then return sx_int(v) end
+    return false
+  end
   local function sx_step(v, from)
+    if from == 1 then
+      local kind, rest, val = sx_fast(v)
+      if kind ~= false then return kind, rest, val end
+    end
     if from <= SX_LSB then
       local r = F["shen.<lsb>"](v)
       if r ~= fail_sym then return "open", r[1], SX_LSB end
@@ -1501,17 +1595,23 @@ function P.install_native_stdlib()
         for i = frame.n, 1, -1 do
           local it = frame[i]
           if it.alt == SX_LSB then acc = cons(F["shen.cons-form"](it.inner), acc)
-          elseif it.alt == SX_LRB then acc = F["shen.add-sexpr"](it.inner, acc)
+          elseif it.alt == SX_LRB then
+            local inner = it.inner
+            -- add-sexpr only treats ($ X) specially
+            if is_cons(inner) and inner[1] == sx_dollar then
+              acc = F["shen.add-sexpr"](inner, acc)
+            else
+              acc = cons(inner, acc)
+            end
           else acc = cons(it[1], acc) end
         end
         if sp == 0 then return cons(v, cons(acc, NIL)) end
         local closed = frame
         frame = stack[sp]; stack[sp] = nil; sp = sp - 1
-        local r = F[closed.alt == SX_LSB and "shen.<rsb>" or "shen.<rrb>"](v)
-        if r ~= fail_sym then
+        if is_cons(v) and v[1] == (closed.alt == SX_LSB and 93 or 41) then
           frame.n = frame.n + 1
           frame[frame.n] = { alt = closed.alt, inner = acc }
-          v = r[1]
+          v = v[2]
         else
           -- no closer: the bracket alternative fails; try the next ones there
           v = closed.pos
