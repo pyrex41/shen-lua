@@ -371,6 +371,7 @@ for _, n in ipairs({
   "difference", "union", "intersection", "occurrences", "subst", "==",
   "fail", "get", "put", "unput", "hdstr", "string->symbol", "pr",
 }) do LEAF[n] = true end
+local sink_branch  -- fwd (count sinking)
 local function nt_call(fexpr, argstr, n)
   NTCOUNT = NTCOUNT + 1
   if CNT then
@@ -2133,7 +2134,8 @@ function cexpr(form, env)
       -- the inner closure had no effect but the allocation, and a call with
       -- every argument (CURn, APPn) now makes none. A partial application
       -- goes through PARTIAL, as for a defun.
-      if depth >= 2 and depth <= MAX_UNCURRY and C.UNCURRY then
+      -- (Not in wide mode, which budgets each closure's upvalues below.)
+      if depth >= 2 and depth <= MAX_UNCURRY and C.UNCURRY and not WIDE then
         local lns, e2 = {}, env
         for i = 1, depth do
           lns[i] = gen("v")
@@ -2241,6 +2243,67 @@ function cexpr(form, env)
   end
 end
 
+-- Count sinking. A counting defun only needs its count on the paths that make
+-- a non-tail call, and in pattern-matching code half the calls take a clause
+-- that makes none: a function's leading tests run uncounted, and each branch
+-- opens the count itself if it needs it. The segment path restarts the
+-- function from the top, so everything before the count must be safe to run
+-- twice: tests built from SINK_TEST primitives over variables and literals,
+-- which change nothing (one that raises never reaches the count).
+local SINK_TEST = {}
+for _, n in ipairs({
+  "=", ">", "<", ">=", "<=", "cons?", "number?", "string?", "symbol?",
+  "boolean?", "empty?", "absvector?", "tuple?", "integer?", "variable?",
+  "hd", "tl", "not", "and", "or", "if", "+", "-", "*",
+}) do SINK_TEST[n] = true end
+local function sink_test(form, env)
+  if not is_cons(form) then return true end
+  local h = car(form)
+  if not (is_symbol(h) and not env[h.name] and SINK_TEST[h.name]) then return false end
+  local cur = cdr(form)
+  while is_cons(cur) do
+    if not sink_test(car(cur), env) then return false end
+    cur = cdr(cur)
+  end
+  return true
+end
+local function sinkable(form, env)
+  if not is_cons(form) then return false end
+  local h = car(form)
+  if not (is_symbol(h) and not env[h.name]) then return false end
+  if h.name == "if" then return sink_test(car(cdr(form)), env) end
+  if h.name == "cond" then
+    local cur = cdr(form)
+    while is_cons(cur) do
+      if not sink_test(car(car(cur)), env) then return false end
+      cur = cdr(cur)
+    end
+    return true
+  end
+  return false
+end
+-- `form` in tail position of a counting defun with no count open yet.
+sink_branch = function(form, env)
+  local saved = CNT
+  local owner = { used = false, tok = "\1" .. gen("k") .. "\1" }
+  local sink = sinkable(form, env)
+  CNT = { owner = owner, ret = true, sink = sink, params = saved.params }
+  local src = ctail(form, env)
+  if sink and owner.used then
+    -- a test made a counted call after all: the count opens here
+    sink = false
+    CNT.sink = false
+    owner.used = false
+    src = ctail(form, env)
+  end
+  CNT = saved
+  if sink or not owner.used then return (src:gsub(owner.tok, "")) end
+  local dv = gen("d")
+  return "local " .. dv .. " = SD[1]; if " .. dv .. " >= " .. SEG_FRAMES
+    .. " then return SEG(impl" .. saved.params .. ") end; SD[1] = " .. dv .. " + 1; "
+    .. (src:gsub(owner.tok, "SD[1] = " .. dv .. "; "))
+end
+
 -- ------------------------------------------------------------------
 -- Statement-nesting depth ctail will emit for `form`, used to pick which
 -- branch of an `if` gets nested inside the guard block (the other is emitted
@@ -2302,6 +2365,8 @@ function ctail(form, env)
   local head = car(form)
   if is_symbol(head) and not env[head.name] then
     local op = head.name
+    -- under count sinking (see sink_branch) a branch opens its own count
+    local ctail = (CNT and CNT.sink) and sink_branch or ctail
     if op == "if" then
       local test = car(cdr(form))
       local th   = car(cdr(cdr(form)))
@@ -2482,6 +2547,9 @@ end
 -- top-level form compilation
 -- ------------------------------------------------------------------
 -- compile (defun NAME (PARAMS) BODY) -> Lua source registering into F-table.
+local function SD_REF_SEEN(src) return src:find("SD[1]", 1, true) ~= nil end
+C.SINK_COUNT = os.getenv("SHEN_SINK_COUNT") ~= "off"
+
 -- Hot runtime helpers a defun's chunk binds as locals. A chunk global is a
 -- hash lookup in ENV plus an identity guard on every use, in the interpreter
 -- and on a trace alike; a never-reassigned local is an immutable upvalue,
@@ -2572,7 +2640,15 @@ local function cdefun(form)
     owner = { used = false, tok = "\1" .. gen("k") .. "\1" }
     CNT = { owner = owner, ret = true }
   end
-  local body_src = ctail(body, env)
+  local body_src
+  if owner and SELF == nil and C.SINK_COUNT then
+    CNT.params = #lnames > 0 and (", " .. table.concat(lnames, ", ")) or ""
+    body_src = sink_branch(body, env)
+    -- each branch that needs the count opens it; none is left for the top
+    CTX.sd = CTX.sd or SD_REF_SEEN(body_src)
+  else
+    body_src = ctail(body, env)
+  end
   CNT = saved_cnt
   local fref_decls = {}
   for i, r in ipairs(FREF_LIST) do
