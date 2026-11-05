@@ -96,6 +96,7 @@ do
   -- pause=200), and most of that churn is short-lived list cells. Raising
   -- the pause to 400 (heap may grow to 4x live before a full cycle) cuts
   -- suite CPU ~15-20% for about 2x peak RSS (30MB -> 60MB on that suite).
+  -- (Past a small heap the pause adapts, below.)
   -- SHEN_GC=off keeps the host's defaults (embedders that manage the GC
   -- themselves should set it); SHEN_GC="pause[,stepmul]" sets explicit
   -- values (e.g. SHEN_GC=800,100 buys another ~10% on batch runs at ~110MB;
@@ -105,6 +106,22 @@ do
     local pause, stepmul
     if gc and gc ~= "" then pause, stepmul = gc:match("^(%d+),?(%d*)$") end
     collectgarbage("setpause", tonumber(pause) or 400)
+    if not pause and newproxy then
+      -- 400 is cheap on a small live heap and wasteful on a big one: the 186 MB
+      -- the kernel suite peaked at was 36 MB live. So at the end of each cycle
+      -- aim for live + max(live, 48 MB) of heap, within pause 150..400. A small
+      -- heap, where the allocation-heavy benchmarks live, stays at 400.
+      local GROW_KB = 48 * 1024
+      local function arm()
+        local sentinel = newproxy(true)
+        getmetatable(sentinel).__gc = function()
+          local want = 100 + 100 * GROW_KB / collectgarbage("count")
+          collectgarbage("setpause", want > 400 and 400 or want < 150 and 150 or want)
+          arm()
+        end
+      end
+      arm()
+    end
     if stepmul and stepmul ~= "" then collectgarbage("setstepmul", tonumber(stepmul)) end
   end
 end
