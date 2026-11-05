@@ -285,7 +285,7 @@ local numToStr = R.num_to_str
 defprim("str", 1, function(x)
   local t = type(x)
   if t=="number" then return numToStr(x)
-  elseif t=="string" then return x          -- str of a string is the string (with quotes? Shen: str adds nothing here)
+  elseif t=="string" then return '"' .. x .. '"'   -- quoted, as on shen-cl, shen-scheme, shen-go, shen-c
   elseif t=="boolean" then return x and "true" or "false"
   elseif is_symbol(x) then return x.name
   elseif x==NIL then ERR("str: cannot convert ()")

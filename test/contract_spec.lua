@@ -110,5 +110,12 @@ for _, bad in ipairs({ "sideways", "1", '"unix"' }) do
   check((caught("(get-time " .. bad .. ")") or ""):find("invalid option", 1, true) ~= nil, "(get-time " .. bad .. ") raises")
 end
 
+-- str of a string adds the quotes ----------------------------------------------
+check(eval('(str "a")') == '"a"', '(str "a") is quoted')
+check(eval('(str "")') == '""', '(str "") is quoted')
+check(eval('(make-string "~A" "a")') == 'a', "~A still prints a string bare")
+check(eval('(make-string "~S" "a")') == '"a"', "~S still quotes a string")
+check(eval('(= (concat a 1) a1)') == true, "concat of atoms is unchanged")
+
 io.write(string.format("contract_spec: %d passed, %d failed\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)
