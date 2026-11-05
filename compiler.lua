@@ -422,6 +422,21 @@ local function unknown_call(name, argstr, n, tail)
   return "APP(" .. symlit(name) .. ", " .. argstr .. ")"
 end
 C.MAX_CALLN = MAX_CALLN
+-- APP with a fixed argument count (prims.lua), for a call through a value
+local MAX_APPN = 4
+C.MAX_APPN = MAX_APPN
+local function app_name(n)
+  if n >= 1 and n <= MAX_APPN then return "APP" .. n end
+  return "APP"
+end
+-- A one-parameter lambda needs no MKFUN where APP can recover its arity from
+-- debug.getinfo (is_raw_lambda in prims.lua); Lua 5.1 has no nparams.
+local LAM1_RAW = debug and debug.getinfo and debug.getinfo(print, "u").nparams ~= nil
+local function lam1(params, body)
+  local fn = "function(" .. params .. ") " .. body .. " end"
+  if LAM1_RAW then return fn end
+  return "MKFUN(1, " .. fn .. ")"
+end
 
 -- ------------------------------------------------------------------
 -- atom / literal compilation
@@ -928,7 +943,7 @@ local function order_free(form, env)
   return true   -- number/string/boolean/(), symbol literal or local variable
 end
 
-local function curried_call(form, env, tail)
+local function curried_call(form, env, tail, last)
   local args = {}
   local cur = form
   while is_cons(cur) and is_cons(car(cur)) do
@@ -937,29 +952,53 @@ local function curried_call(form, env, tail)
     table.insert(args, 1, car(rest))
     cur = car(cur)
   end
-  -- cur must be (fn SYM): `fn` not rebound, SYM a symbol literal
-  if not (is_cons(cur) and is_symbol(car(cur)) and car(cur).name == "fn"
-          and not env["fn"]) then
+  if not is_cons(cur) then return nil end
+  local chead, rest = car(cur), cdr(cur)
+  if not (is_symbol(chead) and is_cons(rest) and cdr(rest) == NIL) then return nil end
+  local gref
+  if chead.name == "fn" and not env["fn"] then
+    -- (fn SYM): SYM a symbol literal
+    local sym = car(rest)
+    if not (is_symbol(sym) and not env[sym.name]) then return nil end
+    if #args < 1 or #args > MAX_CALLN then return nil end
+    for i = 2, #args do
+      if not order_free(args[i], env) then return nil end
+    end
+    gref = callee_ref("fn") .. "(" .. symlit(sym.name) .. ")"
+  elseif env[chead.name] then
+    -- a call through a local variable, ((((G a1) a2) ... an)): Shen's
+    -- (G a1 ... an) for a G it knows nothing about. G and a1 go first in
+    -- both forms, whatever a1 is.
+    table.insert(args, 1, car(rest))
+    if #args < 2 or #args > MAX_CALLN then return nil end
+    gref = env[chead.name]
+    local n = #args
+    local free = true
+    for i = 2, n do free = free and order_free(args[i], env) end
+    if not free then
+      -- only the last argument may do anything: the earlier ones are read
+      -- twice, and PRE needs them before it runs
+      for i = 1, n - 1 do
+        if not order_free(args[i], env) then return nil end
+      end
+      local cs = {}
+      for i = 1, n - 1 do cs[i] = cexpr(args[i], env) end
+      local head = gref .. ", " .. table.concat(cs, ", ")
+      local a = head .. ", PRE" .. n .. "(" .. head .. "), " .. (last or cexpr(args[n], env))
+      if not tail then return nt_call("CUR" .. n .. "P", a, n + 2) end
+      return "CUR" .. n .. "P(" .. a .. ")"
+    end
+  else
     return nil
   end
-  local rest = cdr(cur)
-  if not (is_cons(rest) and cdr(rest) == NIL) then return nil end
-  local sym = car(rest)
-  if not (is_symbol(sym) and not env[sym.name]) then return nil end
   local n = #args
-  if n < 1 or n > MAX_CALLN then return nil end
-  for i = 2, n do
-    if not order_free(args[i], env) then return nil end
-  end
-  local fnref = callee_ref("fn")
   local cargs = {}
-  for i = 1, n do cargs[i] = cexpr(args[i], env) end
+  for i = 1, n - 1 do cargs[i] = cexpr(args[i], env) end
+  cargs[n] = last or cexpr(args[n], env)
   if not tail then
-    return nt_call("CUR" .. n, fnref .. "(" .. symlit(sym.name) .. "), "
-                   .. table.concat(cargs, ", "), n + 1)
+    return nt_call("CUR" .. n, gref .. ", " .. table.concat(cargs, ", "), n + 1)
   end
-  return "CUR" .. n .. "(" .. fnref .. "(" .. symlit(sym.name) .. "), "
-         .. table.concat(cargs, ", ") .. ")"
+  return "CUR" .. n .. "(" .. gref .. ", " .. table.concat(cargs, ", ") .. ")"
 end
 
 -- The form whose call cexpr_tail is compiling: the body of a lambda or
@@ -1177,7 +1216,7 @@ local function ccall(form, env, tail)
       return unknown_call(name, argstr, #args, tail)
     end
   else
-    local cur = curried_call(form, env, tail)
+    local cur = curried_call(form, env, tail, #cargs == 1 and cargs[1] or nil)
     if cur and not (hoist and NTCOUNT ~= n0) then return cur end
     -- head is a bound variable or a compound expression -> generic apply
     local hv = cexpr(head, env)
@@ -1185,11 +1224,12 @@ local function ccall(form, env, tail)
       hv = hoist_args(hv)
       argstr = table.concat(cargs, ", ")
     end
+    local app = app_name(#args)
     if not tail then
-      return nt_call("APP", hv .. (#args > 0 and (", " .. argstr) or ""), #args + 1)
+      return nt_call(app, hv .. (#args > 0 and (", " .. argstr) or ""), #args + 1)
     end
     if #args == 0 then return "APP(" .. hv .. ")" end
-    return "APP(" .. hv .. ", " .. argstr .. ")"
+    return app .. "(" .. hv .. ", " .. argstr .. ")"
   end
 end
 
@@ -2100,13 +2140,13 @@ function cexpr(form, env)
       -- Not impl-scope: `fN` locals live in impl, not this nested function.
       if CTX then
         -- a function of its own that counts itself, like a defun's impl
-        return "MKFUN(1, function(" .. ln .. ") " .. counted_body(body, e2, ln) .. " end)"
+        return lam1(ln, counted_body(body, e2, ln))
       end
       local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
       HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
       local bodyc = cexpr_tail(body, e2)
       HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
-      return "MKFUN(1, function(" .. ln .. ") return " .. bodyc .. " end)"
+      return lam1(ln, "return " .. bodyc)
     elseif op == "freeze" then
       local body = car(cdr(form))
       if CTX then

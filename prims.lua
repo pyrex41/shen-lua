@@ -157,6 +157,30 @@ local function PARTIAL(f, ar, have)
   return MKFUN(need, g)
 end
 
+-- A compiled one-parameter lambda carries no FA entry (see the lambda case of
+-- cexpr in compiler.lua): recording it was a new key in a weak table for every
+-- closure created. An unrecorded function otherwise means "assume exact"
+-- (primitives, a host's function), so APP tells the lambda apart here, on the
+-- only path that needs to: applying it to other than one argument.
+local getinfo = debug and debug.getinfo
+local RAW_LAMBDA = setmetatable({}, {__mode="k"})  -- what getinfo said, per function
+local function is_raw_lambda(f)
+  local r = RAW_LAMBDA[f]
+  if r ~= nil then return r end
+  r = false
+  if getinfo then
+    local i = getinfo(f, "uS")
+    if i.nparams == 1 and not i.isvararg and i.what ~= "main" then
+      -- compiled chunks carry a bare chunkname ("shen:f", "eval", a kernel
+      -- file); host and runtime Lua is "@file" or "=name"
+      local c = i.source:sub(1, 1)
+      r = c ~= "@" and c ~= "="
+    end
+  end
+  RAW_LAMBDA[f] = r
+  return r
+end
+
 APP = function(f, ...)
   -- Fast path: the operand is overwhelmingly a Lua function (a compiled Shen
   -- function or a continuation/thunk). Check that first so the common case
@@ -165,7 +189,13 @@ APP = function(f, ...)
   if type(f) == "function" then
     local n = select("#", ...)
     local ar = FA[f]
-    if ar == nil or ar == n then     -- primitive/unknown-arity fn: assume exact
+    if ar == nil then
+      if n == 1 or not is_raw_lambda(f) then  -- primitive/unknown-arity fn: assume exact
+        return f(...)
+      end
+      ar = 1
+    end
+    if ar == n then
       return f(...)
     elseif n < ar then
       return PARTIAL(f, ar, {...})
@@ -2696,20 +2726,73 @@ do
       .. "end\n"
     ENV["CALL" .. n] = assert((loadstring or load)(src, "=CALL" .. n))(F, FA, APP, intern)
   end
+  -- APP1..APPn: APP with the argument count fixed, so the common exact call
+  -- is a plain call instead of a vararg forward. Anything else takes APP.
+  for n = 1, C.MAX_APPN do
+    local ps = {}
+    for i = 1, n do ps[i] = "a" .. i end
+    local plist = table.concat(ps, ", ")
+    local exact = n == 1 and "ar == 1 or ar == nil" or ("ar == " .. n)
+    local src = "local F, FA, APP, type, rawget, getmetatable, Symbol = ...\n"
+      .. "return function(f, " .. plist .. ", ...)\n"
+      .. "  if type(f) ~= 'function' and getmetatable(f) == Symbol then\n"
+      .. "    local g = F[f.name]\n"
+      .. "    if g ~= nil then f = g end\n"
+      .. "  end\n"
+      .. "  if type(f) == 'function' then\n"
+      .. "    local ar = rawget(FA, f)\n"
+      .. "    if " .. exact .. " then return f(" .. plist .. ") end\n"
+      .. "  end\n"
+      .. "  return APP(f, " .. plist .. ")\n"
+      .. "end\n"
+    ENV["APP" .. n] = assert((loadstring or load)(src, "=APP" .. n))(F, FA, APP, type, rawget, getmetatable, R.Symbol)
+  end
   -- CUR1..CURn: a curried chain ((((fn f) a1) a2) ... an) whose (fn f) has
   -- already been evaluated to g (see curried_call in compiler.lua). Arity n:
   -- one direct call. Otherwise the original nested applications, verbatim.
+  -- CURnP(g, a1..an-1, PREn(g, a1..an-1), an): the same chain when an is not
+  -- order-free. PREn runs the partial applications right then, before an is
+  -- evaluated, unless the arity is n, when they cannot run code at all.
+  local CUR_DIRECT = setmetatable({}, { __tostring = function() return "#<cur direct>" end })
+  for n = 2, C.MAX_CALLN do
+    local ps = {}
+    for i = 1, n - 1 do ps[i] = "a" .. i end
+    local nested = "g"
+    for i = 1, n - 1 do nested = "APP(" .. nested .. ", a" .. i .. ")" end
+    local plist = table.concat(ps, ", ")
+    local src = "local F, FA, APP, D, rawget, type, getmetatable, Symbol = ...\n"
+      .. "return function(g, " .. plist .. ", ...)\n"
+      .. "  if rawget(FA, g) == " .. n .. " then return D end\n"
+      .. "  if getmetatable(g) == Symbol then\n"
+      .. "    local f = F[g.name]\n"
+      .. "    if f ~= nil and rawget(FA, f) == " .. n .. " then return D end\n"
+      .. "  end\n"
+      .. "  return " .. nested .. "\n"
+      .. "end, function(g, " .. plist .. ", r, an, ...)\n"
+      .. "  if r == D then\n"
+      .. "    if type(g) == 'function' then return g(" .. plist .. ", an) end\n"
+      .. "    return F[g.name](" .. plist .. ", an)\n"
+      .. "  end\n"
+      .. "  return APP(r, an)\n"
+      .. "end\n"
+    ENV["PRE" .. n], ENV["CUR" .. n .. "P"] =
+      assert((loadstring or load)(src, "=CUR" .. n .. "P"))(F, FA, APP, CUR_DIRECT, rawget, type, getmetatable, R.Symbol)
+  end
   for n = 1, C.MAX_CALLN do
     local ps = {}
     for i = 1, n do ps[i] = "a" .. i end
     local nested = "g"
     for i = 1, n do nested = "APP(" .. nested .. ", a" .. i .. ")" end
-    local src = "local FA, APP = ...\n"
-      .. "return function(g, " .. table.concat(ps, ", ") .. ")\n"
-      .. "  if FA[g] == " .. n .. " then return g(" .. table.concat(ps, ", ") .. ") end\n"
+    local src = "local F, FA, APP, rawget, getmetatable, Symbol = ...\n"
+      .. "return function(g, " .. table.concat(ps, ", ") .. ", ...)\n"
+      .. "  if rawget(FA, g) == " .. n .. " then return g(" .. table.concat(ps, ", ") .. ") end\n"
+      .. "  if getmetatable(g) == Symbol then\n"
+      .. "    local f = F[g.name]\n"
+      .. "    if f ~= nil and rawget(FA, f) == " .. n .. " then return f(" .. table.concat(ps, ", ") .. ") end\n"
+      .. "  end\n"
       .. "  return " .. nested .. "\n"
       .. "end\n"
-    ENV["CUR" .. n] = assert((loadstring or load)(src, "=CUR" .. n))(FA, APP)
+    ENV["CUR" .. n] = assert((loadstring or load)(src, "=CUR" .. n))(F, FA, APP, rawget, getmetatable, R.Symbol)
   end
 end
 
