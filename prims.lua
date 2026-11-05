@@ -725,7 +725,20 @@ end)
 
 -- close (STREAM) -> ()
 defprim("close", 1, function(st)
-  if is_stream(st) and st.close then st.close() end
+  if not is_stream(st) then ERR("close: not a stream") end
+  -- Closing twice is harmless; using a closed stream raises a Shen error, not
+  -- Lua's "attempt to use a closed file". Replacing the functions keeps the
+  -- read and write paths free of a closed check.
+  if st.close then
+    st.close()
+    st.close = nil
+    if st.kind == "in" then
+      st.readbyte = function() ERR("read-byte: stream is closed") end
+      st.pb, st.eof = nil, false
+    else
+      st.write = function() ERR("write-byte: stream is closed") end
+    end
+  end
   return NIL
 end)
 

@@ -85,5 +85,22 @@ for _, key in ipairs({ "1", "a", '"a"' }) do
   check(h >= 1 and h <= 10, "(hash " .. key .. " 10) is in range")
 end
 
+-- close is idempotent, and a closed stream is an error -----------------------------
+do
+  local tmp = os.tmpname()
+  local q = '"' .. tmp .. '"'
+  eval("(close (open " .. q .. " out))")
+  check(caught("(let S (open " .. q .. " in) (do (close S) (close S)))") == nil, "close twice on input")
+  check(caught("(let S (open " .. q .. " out) (do (close S) (close S)))") == nil, "close twice on output")
+  check((caught("(let S (open " .. q .. " in) (do (close S) (read-byte S)))") or ""):find("stream is closed", 1, true) ~= nil,
+        "read-byte on a closed stream")
+  check((caught("(let S (open " .. q .. " in) (do (read-byte S) (close S) (read-byte S)))") or ""):find("stream is closed", 1, true) ~= nil,
+        "read-byte on a closed stream that had reached EOF")
+  check((caught("(let S (open " .. q .. " out) (do (close S) (write-byte 65 S)))") or ""):find("stream is closed", 1, true) ~= nil,
+        "write-byte on a closed stream")
+  check((caught("(close 1)") or ""):find("not a stream", 1, true) ~= nil, "(close 1) raises")
+  os.remove(tmp)
+end
+
 io.write(string.format("contract_spec: %d passed, %d failed\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)
