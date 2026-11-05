@@ -1147,6 +1147,54 @@ function P.install_native_stdlib()
   end
   local function map(f, lst) return map_h(f, lst, NIL) end
 
+  -- shen.walk (macros.kl): apply a macro to a form bottom-up, as
+  -- (F (map (/. Z (shen.walk F Z)) X)). macroexpand makes one walk per macro,
+  -- several per form, and nearly always nothing changes, yet the kernel's rebuilds
+  -- the whole tree each time and macroexpand then compares it to the old one
+  -- cell by cell. Keep the old cells until a child really changes, so the usual
+  -- walk allocates nothing and that comparison ends at once. Same calls in the
+  -- same order; forms are immutable, so sharing is not observable. An improper
+  -- list goes to the kernel's, for its error.
+  local orig_walk = F["shen.walk"]
+  local function walk(f, x)
+    if not is_cons(x) then return APP(f, x) end
+    local t = x
+    repeat t = t[2] until not is_cons(t)
+    if t ~= NIL then return orig_walk(f, x) end
+    local head, last = nil, nil
+    local cell = x
+    repeat
+      local e = cell[1]
+      local v
+      if is_cons(e) then
+        -- a counted call, as in map_h
+        local d = SD[1]
+        if d < SEG_FRAMES then SD[1] = d + 1; v = walk(f, e); SD[1] = d
+        else v = SEGRUN(walk, f, e) end
+      else
+        v = APP(f, e)
+      end
+      if head then
+        local c = cons(v, NIL)
+        last[2] = c; last = c
+      elseif v ~= e then
+        -- first change: copy the cells before this one
+        local p = x
+        while p ~= cell do
+          local c = cons(p[1], NIL)
+          if head then last[2] = c else head = c end
+          last = c
+          p = p[2]
+        end
+        local c = cons(v, NIL)
+        if head then last[2] = c else head = c end
+        last = c
+      end
+      cell = cell[2]
+    until cell == NIL
+    return APP(f, head or x)
+  end
+
   -- variable? : a symbol whose name is an uppercase letter followed by
   -- alphanums (kernel chain variable?/analyse-variable?/uppercase?/alphanums?,
   -- where alphanum = letter | digit | the misc set "=-*/+_?$!@~.><&%'#`").
@@ -2377,6 +2425,7 @@ function P.install_native_stdlib()
   install("reverse", reverse, 1)
   install("shen.map-h", map_h, 3)
   install("map", map, 2)
+  install("shen.walk", walk, 2)
   install("not", native_not, 1)
   install("boolean?", boolean_q, 1)
   install("empty?", empty_q, 1)
