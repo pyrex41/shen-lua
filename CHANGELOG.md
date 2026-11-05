@@ -7,6 +7,18 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ### Changed
 
+- **Kernel: ShenOSKernel 43.2** (community `Shen-Language/shen-sources`, tag
+  `shen-43.2`, commit `e6947f507ebc`, release tarball SHA-256
+  `23c71508...417f32`). Vendored byte-identical; `(version)` is `"43.2"`. Against
+  the previously vendored 43.1 build at `ec16a9f` only `init.kl` (the version
+  string) and `extension-type-annotations.kl` (renumbered generated names) change;
+  `t-star.kl` is unchanged, so the native typechecker fingerprints and the eqterm
+  path in `shen.by-hypothesis-h` are unaffected. `tests/` gains upstream's
+  `benchmark-coverage.shen`. `bin/yggdrasil-build.lua` now expects manifest
+  `kernel-version=43.2`.
+
+### Changed
+
 - **Kernel: ShenOSKernel 43.1 at upstream `ec16a9f`** (the 43.1 release plus
   shen-sources#117): `shen.by-hypothesis` and `shen.search-user-datatypes`
   dereference the checked term once per call through new `-h` predicates, and
