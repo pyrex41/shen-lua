@@ -537,6 +537,13 @@ end)
 local FAILOBJ = intern("shen.fail!")
 P.FAILOBJ = FAILOBJ
 defprim("absvector", 1, function(n)
+  -- Validate first: a negative or fractional length would build a table whose
+  -- length word disagrees with its slots (and a non-number used to surface as
+  -- a raw Lua arithmetic error), and the printer dies on the result outside
+  -- any handler the program set up.
+  if type(n) ~= "number" or n < 0 or n % 1 ~= 0 then
+    ERR(R.to_str(n) .. " is not a valid vector length")
+  end
   local v = { [1] = n }
   for i=0,n-1 do v[i+2] = FAILOBJ end
   return setmetatable(v, Vmt)
