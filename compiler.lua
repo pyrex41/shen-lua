@@ -506,6 +506,8 @@ local FREF_MAP = {}
 local function callee_ref(name)
   if not IN_IMPL then return ftab_ref(name) end
   if DEFUN_NAME and name == DEFUN_NAME then return "impl" end
+  -- the fall-through clause of a define: looked up only if it runs
+  if name == "shen.f-error" then return ftab_ref(name) end
   local ln = FREF_MAP[name]
   if ln then return ln end
   ln = "f" .. (#FREF_LIST + 1)
@@ -2480,6 +2482,35 @@ end
 -- top-level form compilation
 -- ------------------------------------------------------------------
 -- compile (defun NAME (PARAMS) BODY) -> Lua source registering into F-table.
+-- Hot runtime helpers a defun's chunk binds as locals. A chunk global is a
+-- hash lookup in ENV plus an identity guard on every use, in the interpreter
+-- and on a trace alike; a never-reassigned local is an immutable upvalue,
+-- which a trace folds to a constant. Only ENV entries fixed before any chunk
+-- runs may be listed (not GET_OR, say, which install_native_stdlib sets later).
+-- Only the names a body mentions are bound: each is an upvalue, and Lua allows
+-- 60 per function (past that the width retry recompiles in wide mode).
+local HOT_HELPERS = {
+  "ADD", "SUB", "MUL", "DIV", "GT", "LT", "GE", "LE", "EQ", "HD", "TL",
+  "APP1", "APP2", "APP3", "APP4", "APP", "MKFUN", "F", "NIL",
+  "CUR2", "CUR3", "CUR4", "PRE2", "PRE3", "PRE4", "CUR2P", "CUR3P", "CUR4P",
+  "TRMC_C", "TRMC_T", "CMT", "getmetatable", "setmetatable",
+}
+local function helper_imports(a, b, c)
+  -- wide mode budgets its upvalues without these
+  if WIDE then return "" end
+  local names = {}
+  local find = string.find
+  for i = 1, #HOT_HELPERS do
+    local h = HOT_HELPERS[i]
+    if find(a, h, 1, true) or find(b, h, 1, true) or (c and find(c, h, 1, true)) then
+      names[#names + 1] = h
+    end
+  end
+  if #names == 0 then return "" end
+  local l = table.concat(names, ", ")
+  return "local " .. l .. " = " .. l .. "; "
+end
+
 local function cdefun(form)
   local name = car(cdr(form)).name
   local params = to_array(car(cdr(cdr(form))))
@@ -2609,6 +2640,9 @@ local function cdefun(form)
   if CTX.nt or CTX.sd or (owner and owner.used) then
     nt_init = "local SD, SEG, SEGSELF = SD, SEG, SEGSELF; " .. (CTX.nt and NT_SRC or "")
   end
+  -- (TLOOP below uses these whether or not the body names them)
+  nt_init = helper_imports(kc_init, body_src, trmc_used and "setmetatable CMT NIL TRMC_C TRMC_T")
+    .. nt_init
   CTX = saved
   local plist = table.concat(lnames, ", ")
   local src
