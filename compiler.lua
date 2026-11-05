@@ -1825,6 +1825,10 @@ local WIDE_SPLIT_LOCALS = 80
 
 -- see the lambda case of cexpr; deeper than any curried chain in the kernel
 local CURRY_DEPTH = 32
+-- Deepest lambda group compiled as one function; parameters hold registers.
+local MAX_UNCURRY = 4
+C.UNCURRY = os.getenv("SHEN_UNCURRY") ~= "off"
+C.HOIST_LAMBDA = os.getenv("SHEN_HOIST_LAMBDA") ~= "off"
 
 local function is_ident(s)
   return type(s) == "string" and s:match("^[%a_][%w_]*$") ~= nil
@@ -1969,6 +1973,21 @@ local function try_split_let(form, env)
   return ret(hoist_kc(form, env, lnames, true))
 end
 
+-- A lambda that reads no outer local is a constant: built once when its defun
+-- is loaded, in KC, instead of per evaluation. Creating a closure (FNEW) is a
+-- bytecode LuaJIT cannot trace, so the defun creating one per iteration would
+-- otherwise never compile. Only its identity changes: two evaluations of one
+-- such lambda are now the same function.
+local function hoist_closed(form, env, src)
+  if not (CTX and C.HOIST_LAMBDA) then return src end
+  local fv = {}
+  collect_free(form, env, {}, fv)
+  if next(fv) ~= nil then return src end
+  local idx = #CTX.cbodies + 1
+  CTX.cbodies[idx] = src
+  return "KC[" .. idx .. "]"
+end
+
 -- The statements of a lambda body (`params`: its parameter list), compiled
 -- as a function of its own that counts itself like a defun's impl (see
 -- NT_SRC): a lambda called by a tail call holds no counted caller frame.
@@ -2108,6 +2127,29 @@ function cexpr(form, env)
         HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
         return "CURRY(" .. depth .. ", function(" .. t .. ") return " .. bodyc .. " end)"
       end
+      -- (lambda X (lambda Y B)) is one function of the whole group. Creating
+      -- the inner closure had no effect but the allocation, and a call with
+      -- every argument (CURn, APPn) now makes none. A partial application
+      -- goes through PARTIAL, as for a defun.
+      if depth >= 2 and depth <= MAX_UNCURRY and C.UNCURRY then
+        local lns, e2 = {}, env
+        for i = 1, depth do
+          lns[i] = gen("v")
+          e2 = extend(e2, vars[i].name, lns[i])
+        end
+        local plist = table.concat(lns, ", ")
+        local fnsrc
+        if CTX then
+          fnsrc = "function(" .. plist .. ") " .. counted_body(inner, e2, plist) .. " end"
+        else
+          local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
+          HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
+          local bodyc = cexpr_tail(inner, e2)
+          HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
+          fnsrc = "function(" .. plist .. ") return " .. bodyc .. " end"
+        end
+        return hoist_closed(form, env, "MKFUN(" .. depth .. ", " .. fnsrc .. ")")
+      end
       local ln = gen("v")
       if WIDE and CTX then
         -- each distinct outer name the closure reads is one upvalue
@@ -2140,7 +2182,7 @@ function cexpr(form, env)
       -- Not impl-scope: `fN` locals live in impl, not this nested function.
       if CTX then
         -- a function of its own that counts itself, like a defun's impl
-        return lam1(ln, counted_body(body, e2, ln))
+        return hoist_closed(form, env, lam1(ln, counted_body(body, e2, ln)))
       end
       local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
       HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
