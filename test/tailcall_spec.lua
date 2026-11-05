@@ -170,6 +170,33 @@ do
 end
 
 -- ---------------------------------------------------------------------------
+-- proven conses: hd/tl dominated by (cons? E) read the cell directly
+-- ---------------------------------------------------------------------------
+do
+  local src = gensrc("(defun pc-a (L) (if (cons? L) (hd L) 0))")
+  check(not src:find("HD(", 1, true), "hd under (cons? V) needs no check")
+  src = gensrc("(defun pc-b (L) (cond ((and (cons? L) (cons? (tl L))) (hd (tl L))) (true 0)))")
+  check(src:find("[1]", 1, true) ~= nil, "(and ...) proves a chain for its result")
+  src = gensrc("(defun pc-c (L) (if (cons? L) 0 (hd L)))")
+  check(src:find("HD(", 1, true) ~= nil, "the else branch proves nothing")
+  src = gensrc("(defun pc-d (L M) (if (cons? L) (hd M) 0))")
+  check(src:find("HD(", 1, true) ~= nil, "another variable is not proven")
+  src = gensrc("(defun pc-e (L) (if (cons? L) (let L (tl L) (hd L)) 0))")
+  check(src:find("HD(", 1, true) ~= nil, "a shadowing let is not proven")
+  src = gensrc("(defun pc-f (L) (do (if (cons? L) 1 2) (hd L)))")
+  check(src:find("HD(", 1, true) ~= nil, "a proof ends with its branch")
+
+  ev("(defun pc-g (L) (if (cons? L) (hd L) (trap-error (hd L) (lambda E wrong))))")
+  check(ev("(pc-g (cons 1 ()))") == 1, "proven hd reads the car")
+  check(ev("(pc-g 7)").name == "wrong", "hd of a non-cons still errors")
+  ev("(defun pc-h (L) (if (cons? L) (pc-h (tl L)) done))")
+  check(ev("(pc-h (cons 1 (cons 2 ())))").name == "done", "a self-tail loop re-tests its param")
+  ev("(defun pc-i (L) (if (cons? L) (hd (tl L)) 0))")
+  check(ev("(trap-error (pc-i (cons 1 2)) (lambda E caught))").name == "caught",
+        "only the tested chain is proven, not its tail")
+end
+
+-- ---------------------------------------------------------------------------
 -- tail recursion modulo cons (TRMC, #58): (cons H (self ...)) builders
 -- ---------------------------------------------------------------------------
 local TRMC_ON = os.getenv("SHEN_TRMC") ~= "off"
