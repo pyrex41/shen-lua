@@ -1218,7 +1218,8 @@ local function install_fasl()
     return { k = "p", x = x, pointer = pointer, y = y }
   end)
   wrap_recorded("set", function(rec, name, val)
-    local nm = R.is_symbol(name) and name.name or tostring(name)
+    if not R.is_symbol(name) then return nil end  -- the primitive will raise
+    local nm = name.name
     -- the gensym counter churns on every expansion-time gensym; the replay
     -- fast-forward (max) covers it without hundreds of noise records
     if nm == "shen.*gensym*" then return nil end

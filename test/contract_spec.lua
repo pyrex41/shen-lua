@@ -55,5 +55,18 @@ for _, bad in ipairs({
   check(eval("(contract-h 1)") == 2, "after " .. bad .. ": define still works")
 end
 
+-- A global is named by a symbol, nothing else ------------------------------------
+for _, bad in ipairs({ '1', '"contract-v"', '[]', '(absvector 1)' }) do
+  check((caught("(set " .. bad .. " 2)") or ""):find("is not a symbol", 1, true) ~= nil,
+        "(set " .. bad .. " 2) raises")
+  check((caught("(value " .. bad .. ")") or ""):find("is not a symbol", 1, true) ~= nil,
+        "(value " .. bad .. ") raises")
+end
+check((caught("(value contract-v)") or ""):find("has no value", 1, true) ~= nil,
+      "a rejected (set \"contract-v\" 2) did not bind the symbol contract-v")
+eval("(set contract-v 3)")
+check(eval("(value contract-v)") == 3, "(set sym v) still works")
+check(eval("(let S contract-v (value S))") == 3, "(value S) through a variable still works")
+
 io.write(string.format("contract_spec: %d passed, %d failed\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)

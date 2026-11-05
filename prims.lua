@@ -515,12 +515,15 @@ defprim("string->symbol", 1, function(s) return intern(s) end)
 defprim("empty?", 1, function(x) return x==NIL end)
 
 -- globals (dual namespace)
+-- Only a symbol names a global: keying on tostring() made (set "x" 1) and
+-- (set x 1) the same variable, and (set 1 2) define one called "1".
 defprim("set", 2, function(sym, v)
-  local key = is_symbol(sym) and sym.name or tostring(sym)
-  GLOBALS[key] = v; return v
+  if not is_symbol(sym) then ERR(R.to_str(sym) .. " is not a symbol") end
+  GLOBALS[sym.name] = v; return v
 end)
 defprim("value", 1, function(sym)
-  local key = is_symbol(sym) and sym.name or tostring(sym)
+  if not is_symbol(sym) then ERR(R.to_str(sym) .. " is not a symbol") end
+  local key = sym.name
   local v = GLOBALS[key]
   if v == nil then ERR("variable " .. key .. " has no value") end
   return v
