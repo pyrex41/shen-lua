@@ -127,9 +127,25 @@ end
 P.Thunk = Thunk
 
 local APP  -- fwd
+local MAX_PARTIAL1 = 12
+local PARTIAL1 = {}
+for ar = 2, MAX_PARTIAL1 do
+  local ps = {}
+  for i = 1, ar - 1 do ps[i] = "x" .. i end
+  local plist = table.concat(ps, ", ")
+  PARTIAL1[ar] = assert((loadstring or load)(
+    "return function(f, a) return function(" .. plist .. ") return f(a, " .. plist .. ") end end",
+    "=PARTIAL1"))()
+end
 local function PARTIAL(f, ar, have)
   local need = ar - #have
   local g
+  -- One argument at a time is what a curried chain does: a closure over it,
+  -- and no tables on the call. (A chain through a defun of arity n calls n-1
+  -- of these per use.)
+  if #have == 1 and ar <= MAX_PARTIAL1 then
+    return MKFUN(need, PARTIAL1[ar](f, have[1]))
+  end
   g = function(...)
     local extra = {...}
     local all = {}
