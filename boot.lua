@@ -1036,7 +1036,26 @@ local function fasl_replay(cached)
       P.load_chunk(r.dump, r.name)()
     elseif r.k == "d" then
       -- through the live F["declare"] so engine sig-table wrappers see it
-      P.F["declare"](r.name, r.typ)
+      local declared = false
+      local t = P.GLOBALS["shen.*sigf*"]
+      while R.is_cons(t) and not declared do
+        declared = R.is_cons(t[1]) and t[1][1] == r.name
+        t = t[2]
+      end
+      if declared then
+        P.F["declare"](r.name, r.typ)
+      else
+        -- declare's check that a new type agrees with the old one, which is
+        -- a System S query on the kernel's Prolog: 70M instructions each, 80%
+        -- of the kernel suite on a warm fasl. It only warns, and with no old
+        -- type there is nothing to warn about. This is what a hit promises:
+        -- it typechecked when compiled.
+        local variancy = P.F["shen.variancy"]
+        P.F["shen.variancy"] = function() return false end
+        local ok, err = pcall(P.F["declare"], r.name, r.typ)
+        P.F["shen.variancy"] = variancy
+        if not ok then error(err, 0) end
+      end
     elseif r.k == "m" then
       -- the macro's defun chunk replayed above; rebuild the (name . fn) pair
       local fn = P.F[r.name.name]
