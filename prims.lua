@@ -1152,9 +1152,12 @@ function P.install_native_stdlib()
   -- where alphanum = letter | digit | the misc set "=-*/+_?$!@~.><&%'#`").
   -- The kernel version walks the name char-by-char through trap-error +
   -- hdstr/tlstr string churn; here one pattern match, memoized on the
-  -- interned symbol itself so each distinct symbol pays it once. Non-symbols
-  -- delegate to the original for byte-identical edge semantics.
-  local orig_variable = F["variable?"]
+  -- interned symbol itself so each distinct symbol pays it once. A non-symbol
+  -- is never a variable: the kernel version answers false outright for
+  -- booleans, numbers and strings, and for anything else (str V) raises inside
+  -- its trap-error, so it is false again, by way of a thrown error. Thrown
+  -- errors are expensive here (on arm64 LuaJIT unwinds through the system
+  -- unwinder) and the define/yacc parser asks this about every cons it meets.
   local VARPAT = "^[A-Z][%w=%-%*/%+_%?%$!@~%.><&%%'#`]*$"
   local function variable_q(x)
     if is_symbol(x) then
@@ -1165,7 +1168,7 @@ function P.install_native_stdlib()
       end
       return v
     end
-    return orig_variable(x)
+    return false
   end
 
   -- pr (issue #22): the canonical kernel `pr` (klambda/writer.kl) gates ALL
