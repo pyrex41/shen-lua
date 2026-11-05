@@ -2819,13 +2819,9 @@ function P.eval(form)
   local t = type(form)
   if t == "number" or t == "string" or t == "boolean" then return form end
   if form == NIL then return form end
-  if is_symbol(form) then
-    -- Bare symbols evaluate to their value in the global var namespace if
-    -- bound, otherwise to themselves (KL convention).
-    local v = GLOBALS[form.name]
-    if v ~= nil then return v end
-    return form
-  end
+  -- A bare symbol evaluates to itself, bound as a global or not: the global
+  -- namespace is reached only through (value S).
+  if is_symbol(form) then return form end
   if t == "table" and not is_cons(form) then
     -- absvector, stream, exception, or other opaque object: self-evaluating.
     return form

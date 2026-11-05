@@ -68,5 +68,12 @@ eval("(set contract-v 3)")
 check(eval("(value contract-v)") == 3, "(set sym v) still works")
 check(eval("(let S contract-v (value S))") == 3, "(value S) through a variable still works")
 
+-- A symbol is self-evaluating, whether or not it names a global -------------------
+eval("(set contract-sym 7)")
+check(eval("(= (eval-kl contract-sym) contract-sym)") == true, "(eval-kl sym) is sym")
+check(eval("(= (eval contract-sym) contract-sym)") == true, "(eval sym) is sym")
+check(eval("(= (eval-kl [if true contract-sym 1]) contract-sym)") == true, "a compiled symbol is sym")
+check(eval("(eval-kl [value contract-sym])") == 7, "(value sym) still reads the global")
+
 io.write(string.format("contract_spec: %d passed, %d failed\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)
