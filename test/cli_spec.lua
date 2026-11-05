@@ -449,5 +449,35 @@ shen.call("load", %q)
   os.remove(fpath); os.remove(lpath)
 end
 
+-- ---------------------------------------------------------------------------
+-- A fasl stores shen.*userdefs* as one push per define, not the whole list
+-- each time, which made it quadratic in the file's definitions. A hit must
+-- rebuild the same list, redefinitions included.
+-- ---------------------------------------------------------------------------
+do
+  local fdir = os.tmpname(); os.remove(fdir)
+  local p = os.tmpname() .. ".shen"
+  local parts = { "(define ud-a -> 1)\n(define ud-b -> 2)\n(define ud-a -> 3)\n" }
+  for i = 1, 300 do parts[#parts + 1] = "(define ud-f" .. i .. " -> " .. i .. ")\n" end
+  local fh = io.open(p, "w"); fh:write(table.concat(parts)); fh:close()
+  local cmd = SHEN .. " --hush-load " .. sh_quote(p)
+    .. " -e " .. sh_quote("[(value shen.*userdefs*) (ud-a) (ud-f300)]")
+  local envp = "env SHEN_FASL_DIR=" .. sh_quote(fdir) .. " "
+  local cold, ccode = run(envp .. cmd)
+  local warm, wcode = run(envp .. "SHEN_FASL_DEBUG=1 " .. cmd)
+  local off = run("env SHEN_FASL=off " .. cmd)
+  check(ccode == 0 and wcode == 0, "userdefs: cold and warm runs exit 0")
+  check(warm:find("[fasl] hit", 1, true) ~= nil, "userdefs: second run is a fasl HIT")
+  warm = warm:gsub("%[fasl%][^\n]*\n", "")
+  check(cold:find("ud-f300", 1, true) ~= nil, "userdefs: the list is printed")
+  check(cold == off, "userdefs: cold run matches SHEN_FASL=off")
+  check(warm == off, "userdefs: warm hit rebuilds the same list")
+  local total = 0
+  local ls = io.popen("cat " .. sh_quote(fdir) .. "/*.fasl | wc -c")
+  total = tonumber(ls:read("*a")); ls:close()
+  check(total and total < 250000, "userdefs: fasl of 300 defines stays linear, got " .. tostring(total))
+  os.remove(p); os.execute("rm -rf " .. sh_quote(fdir))
+end
+
 io.write(string.format("cli_spec: %d pass, %d fail\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)

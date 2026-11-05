@@ -802,7 +802,9 @@ end
 -- Known: (destroy ...) at the REPL between loads is not in the key.
 -- SHEN_FASL=off disables; SHEN_FASL_DIR overrides ~/.cache/shen-lua-fasl;
 -- SHEN_FASL_DEBUG=1 logs hits/misses to stderr.
-local FASL_FORMAT = "SHENFASL7"  -- 7: a nested load run inside a chunk is no
+local FASL_FORMAT = "SHENFASL8"  -- 8: "h" pushes onto a global instead of
+                                 -- storing its whole list at each step;
+                                 -- 7: a nested load run inside a chunk is no
                                  -- longer spliced into the outer fasl (#92);
                                  -- 6: "dv" (shen.*datatypes* by name) replaces
                                  -- "dt" (re-run shen.process-datatype);
@@ -859,7 +861,9 @@ end
 --   | E\n #bytes\n bytes                per-form value/type echo (stoutput)
 --   | A\n <ser names>                   shen.*lambdatable* delta (entries
 --                                       rebuilt by name via shen.lambda-entry)
---   | G\n <ser name><ser val> }*        (set ...) outside any chunk
+--   | G\n <ser name><ser val>           (set ...) outside any chunk
+--   | H\n <ser name><ser head> }*       ditto, when the value is the global's
+--                                       old value with one element pushed
 --   narity\n {ar SP name\n}*  kbase\n nkdata\n entries  gensym\n
 local function fasl_serialize(rec, arity0)
   if rec.uncacheable then error(rec.uncacheable) end
@@ -902,6 +906,10 @@ local function fasl_serialize(rec, arity0)
       -- mirrors the "C" chunk framing — no trailing separator, the next
       -- record's kind letter starts immediately after the bytes.
       parts[#parts+1] = "E\n" .. #r.bytes .. "\n" .. r.bytes
+    elseif r.k == "h" then
+      parts[#parts+1] = "H\n"
+      kdata_ser(r.name, parts)
+      kdata_ser(r.head, parts)
     else -- "g"
       parts[#parts+1] = "G\n"
       kdata_ser(r.name, parts)
@@ -995,6 +1003,9 @@ local function fasl_parse(data, pos)
     elseif k == "G" then
       local v = de_n(2); if not v then return nil end
       recs[i] = { k = "g", name = v[1], val = v[2] }
+    elseif k == "H" then
+      local v = de_n(2); if not v then return nil end
+      recs[i] = { k = "h", name = v[1], head = v[2] }
     else return nil end
   end
   local na = tonumber(line() or ""); if not na then return nil end
@@ -1086,6 +1097,9 @@ local function fasl_replay(cached)
       if not P.HUSH_LOAD_ECHO then
         P.F["pr"](r.bytes, P.GLOBALS["*stoutput*"])
       end
+    elseif r.k == "h" then
+      local cur = P.GLOBALS[r.name.name]
+      P.F["set"](r.name, R.cons(r.head, cur == nil and R.NIL or cur))
     else -- "g"
       P.F["set"](r.name, r.val)
     end
@@ -1278,6 +1292,15 @@ local function install_fasl()
       local names = R.NIL
       for i = #rev, 1, -1 do names = R.cons(rev[i], names) end
       return { k = "dv", global = name, names = names }
+    end
+    -- shen.record-kl sets shen.*userdefs* at every define, and storing the whole
+    -- list each time made a fasl quadratic in its definitions (1500 defines:
+    -- 1.1M list cells, 12 of its 14 MB). The recorder runs BEFORE the original
+    -- set, so the global still holds the old value: store only what changed.
+    local old = R.is_symbol(name) and P.GLOBALS[nm]
+    if old and rawequal(old, val) then return nil end
+    if old and R.is_cons(val) and rawequal(val[2], old) then
+      return { k = "h", name = name, head = val[1] }
     end
     return { k = "g", name = name, val = val }
   end)
