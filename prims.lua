@@ -1262,6 +1262,11 @@ function P.install_native_stdlib()
     end
   end
   local function hash(v, bound)
+    -- The kernel's shen.mod never returns for a bound of 0 or below (non-symbol
+    -- keys hung the process) and x % 0 is NaN (symbol keys returned it).
+    if type(bound) ~= "number" or bound < 1 or bound % 1 ~= 0 then
+      ERR("hash: " .. R.to_str(bound) .. " is not a positive integer")
+    end
     local s
     if is_symbol(v) then s = v.name
     elseif type(v) == "string" then s = v

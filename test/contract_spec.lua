@@ -75,5 +75,15 @@ check(eval("(= (eval contract-sym) contract-sym)") == true, "(eval sym) is sym")
 check(eval("(= (eval-kl [if true contract-sym 1]) contract-sym)") == true, "a compiled symbol is sym")
 check(eval("(eval-kl [value contract-sym])") == 7, "(value sym) still reads the global")
 
+-- hash takes a positive integer bound; these used to hang or return NaN -----------
+for _, key in ipairs({ "1", "a", '"a"' }) do
+  for _, bound in ipairs({ "0", "-1", "0.5", "a" }) do
+    local src = "(hash " .. key .. " " .. bound .. ")"
+    check((caught(src) or ""):find("not a positive integer", 1, true) ~= nil, src .. " raises")
+  end
+  local h = eval("(hash " .. key .. " 10)")
+  check(h >= 1 and h <= 10, "(hash " .. key .. " 10) is in range")
+end
+
 io.write(string.format("contract_spec: %d passed, %d failed\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)
