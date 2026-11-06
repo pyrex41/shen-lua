@@ -177,7 +177,7 @@ local function find_kldir()
 end
 local KLDIR = find_kldir() .. "/"
 P.KLDIR = KLDIR   -- resolved .kl directory (trailing /), for typecheck_native
--- Boot order for the ShenOSKernel-43.1 kernel (community shen-sources line).
+-- Boot order for the ShenOSKernel-43.2 kernel (community shen-sources line).
 -- Every 43.1 .kl file is pure defuns: no module has load-time side effects, so
 -- the order below (upstream make.shen's module order, then the booted
 -- extensions, then the precompiled standard library) is for readability only.
@@ -217,7 +217,7 @@ P.GLOBALS["*implementation*"] = rawget(_G, "jit") and "LuaJIT" or _VERSION
 P.GLOBALS["*port*"]           = "shen-lua"
 P.GLOBALS["*porters*"]        = "shen-lua contributors"
 P.GLOBALS["*os*"]             = (package.config and package.config:sub(1,1) == "\\") and "Windows" or "Unix"
-P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes from init.kl ("43.1")
+P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes from init.kl ("43.2")
 
 -- ---- kernel bytecode cache -------------------------------------------------
 -- Loading the kernel from .kl sources costs ~0.8s (read + parse + KL->Lua
