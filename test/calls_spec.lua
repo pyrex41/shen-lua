@@ -116,6 +116,15 @@ check("the same under if", "(do (set frames 0) (counted-if 5000) (value frames))
 local P = require("prims")
 P.F["host-count"] = function(...) return select("#", ...) end
 check("host function through a symbol", "(app1 host-count 1)", "1")
+-- fn and function go through the kernel's arity table, which a host function is
+-- not in. They raise, as they did before the fixed-arity helpers.
+for _, src in ipairs({ "(function host-count)", "(fn host-count)" }) do
+  local ok, err = pcall(shen.eval, src)
+  local msg = not ok and tostring(type(err) == "table" and err.msg or err) or ""
+  local raised = not ok and msg:find("host-count is undefined", 1, true) ~= nil
+  if raised then npass = npass + 1
+  else nfail = nfail + 1; print("FAIL " .. src .. ": " .. msg) end
+end
 
 print(("calls_spec: %d pass, %d fail"):format(npass, nfail))
 os.exit(nfail == 0 and 0 or 1)
