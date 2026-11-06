@@ -1675,7 +1675,53 @@ local function const_lua(form, env)
   return nil
 end
 
+-- Compiling a form and then throwing away its text must throw away what compiling
+-- left behind as well. Above all CCACHE: a cached accessor names a local whose
+-- declaration was in the discarded text, and reading it afterwards reads an undeclared
+-- global, so nil, with no error. Returns the function that undoes the attempt. The
+-- attempt runs with a child CCACHE, which it restores on either outcome.
+local function compile_attempt()
+  local cc, fnl = CCACHE, FNL
+  local np, npt, pt, nloc, nosplit = fnl.np, fnl.npt, fnl.pt, fnl.nloc, fnl.nosplit
+  local nbodies, ctx_nt, ctx_sd = CTX and #CTX.cbodies, CTX and CTX.nt, CTX and CTX.sd
+  local ntcount, tcount, tailpre = NTCOUNT, TCOUNT, TAILPRE
+  local hoist, nhoist, hpure = HOIST, HOIST and #HOIST.out, HOIST and HOIST.pure
+  local self_, self_used = SELF, SELF and SELF.used
+  local nfref = FREF_LIST and #FREF_LIST
+  CCACHE = child_cache()
+  local function keep() CCACHE = cc end
+  local function undo()
+    CCACHE = cc
+    fnl.np, fnl.npt, fnl.pt, fnl.nloc, fnl.nosplit = np, npt, pt, nloc, nosplit
+    if CTX then
+      for i = #CTX.cbodies, nbodies + 1, -1 do CTX.cbodies[i] = nil end
+      CTX.nt, CTX.sd = ctx_nt, ctx_sd
+    end
+    NTCOUNT, TCOUNT, TAILPRE = ntcount, tcount, tailpre
+    if hoist then
+      for i = #hoist.out, nhoist + 1, -1 do hoist.out[i] = nil end
+      hoist.pure = hpure
+    end
+    if self_ then self_.used = self_used end
+    if FREF_LIST then
+      for i = #FREF_LIST, nfref + 1, -1 do
+        FREF_MAP[FREF_LIST[i].name] = nil
+        FREF_LIST[i] = nil
+      end
+    end
+  end
+  return undo, keep
+end
+
+local try_trap_opt_body
 local function try_trap_opt(form, env)
+  local undo, keep = compile_attempt()
+  local r = try_trap_opt_body(form, env)
+  if r == nil then undo() else keep() end
+  return r
+end
+
+try_trap_opt_body = function(form, env)
   if not (is_cons(form) and is_symbol(form[1]) and form[1].name == "trap-error"
           and not env["trap-error"]) then
     return nil
@@ -2408,13 +2454,18 @@ sink_branch = function(form, env)
   local owner = { used = false, tok = "\1" .. gen("k") .. "\1" }
   local sink = sinkable(form, env)
   CNT = { owner = owner, ret = true, sink = sink, params = saved.params }
+  local undo, keep = compile_attempt()
   local src = ctail(form, env)
   if sink and owner.used then
-    -- a test made a counted call after all: the count opens here
+    -- a test made a counted call after all: the count opens here. Starting over
+    -- discards this text, so discard what compiling it left behind too.
+    undo()
     sink = false
     CNT.sink = false
     owner.used = false
     src = ctail(form, env)
+  else
+    keep()
   end
   CNT = saved
   if sink or not owner.used then return (src:gsub(owner.tok, "")) end

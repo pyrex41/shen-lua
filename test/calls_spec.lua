@@ -165,6 +165,20 @@ do
   if R.is_cons(v) then npass = npass + 1 else nfail = nfail + 1; print("FAIL lambda from a defun, 2 args") end
 end
 
+-- a branch compiled twice: the first attempt's cached accessor locals are gone with
+-- its text, and the second must declare its own (count sinking)
+defs("(define sk-pick N X Y -> (if (if (cons? (tl X)) (not (cons? Y)) false) (if (= (hd (tl X)) 1) a b) (/. Q N)))")
+defs("(define sk-second N X Y -> (if (if (cons? (tl X)) (not (cons? Y)) false) (if (= (hd (tl X)) 41) 42 no) (/. Q N)))")
+defs("(define sk-raises N X Y -> (if (if (cons? X) (not (cons? Y)) false) (if (= (hd (tl (tl N))) 1) a no) (/. Q N)))")
+check("a then-branch reads its accessor after a discarded attempt", "(sk-pick 0 [0 1] 0)", "a")
+check("the same with another value", "(sk-second 0 [0 41] 0)", "42")
+check("an accessor that must raise still raises",
+      "(trap-error (sk-raises 7 [0] 0) (/. E raised))", "raised")
+-- trap-error's fast path compiles its default before it knows it applies
+defs("(define sk-trap X Y -> (trap-error (value (hd (tl X))) (/. E (if (= (hd (tl (tl Y))) 1) a b))))")
+defs("(set sk-v 9)")
+check("trap-error with an operand that is not a variable", "(sk-trap [0 sk-v] [0 0 1])", "9")
+
 -- a compile that raises leaves no facts behind
 do
   local C = require("compiler")
