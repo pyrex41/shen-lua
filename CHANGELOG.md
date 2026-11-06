@@ -5,6 +5,35 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ## [Unreleased]
 
+### Changed
+
+- **Startup and compile cost.** `variable?` no longer throws on a non-symbol; the
+  fasl records a global push as a delta (SHENFASL9), the reader has native paths for
+  plain tokens, macroexpansion keeps unchanged cells, the stdlib datatypes replay from
+  the signature sidecar (SHENSIG2), and a replayed `declare` skips the variancy query
+  when the compile run found no old type. The GC pause adapts past a small live heap
+  and stops adapting once the host sets its own; the default stepmul is 1000.
+- **Calls and closures.** Fixed-arity `APPn`/`CURn` helpers, uncurried lambda groups,
+  closed lambdas built once, hot helpers bound as locals, count sinking. `(= F G)` can
+  now be true for two evaluations of the same closed lambda.
+- **Lists, vectors, strings, Prolog.** `hd`/`tl` read directly where `(cons? E)`
+  proves a cons; `address->` stores with `rawset`; a self-tail accumulator is a double
+  from the start; native `shen.mod` below 2^53; the Prolog engine reuses stack
+  segments and has loop-free deref and unify.
+- **Kernel cache key** covers every codegen switch: `SHEN_UNCURRY`,
+  `SHEN_HOIST_LAMBDA`, `SHEN_SINK_COUNT` and `SHEN_FREEZE_CONT` as well as `SHEN_TRMC`.
+
+### Fixed (behaviour changes)
+
+- A test that is not a boolean raises: the test of `if` and `cond`, and both operands
+  of `and`/`or`. `(if 1 a b)` used to give `a`.
+- `(str "a")` gives `"\"a\""`, quoted, as on the other ports.
+- `absvector` rejects a length that is not a non-negative integer; `address->` and
+  `<-address` reject an index outside the vector; `set`/`value` raise on a non-symbol;
+  `hash` raises on a bound that is not a positive integer; `close` is idempotent;
+  `(get-time unix)` is the Unix time; `(eval-kl sym)` gives the symbol.
+- A compile that raises no longer leaves compiler state set for later compiles.
+
 ## [0.12.0] - 2026-11-05
 
 ### Changed
