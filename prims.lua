@@ -285,7 +285,7 @@ local numToStr = R.num_to_str
 defprim("str", 1, function(x)
   local t = type(x)
   if t=="number" then return numToStr(x)
-  elseif t=="string" then return x          -- str of a string is the string (with quotes? Shen: str adds nothing here)
+  elseif t=="string" then return '"' .. x .. '"'   -- quoted, as on shen-cl, shen-scheme, shen-go, shen-c
   elseif t=="boolean" then return x and "true" or "false"
   elseif is_symbol(x) then return x.name
   elseif x==NIL then ERR("str: cannot convert ()")
@@ -515,12 +515,15 @@ defprim("string->symbol", 1, function(s) return intern(s) end)
 defprim("empty?", 1, function(x) return x==NIL end)
 
 -- globals (dual namespace)
+-- Only a symbol names a global: keying on tostring() made (set "x" 1) and
+-- (set x 1) the same variable, and (set 1 2) define one called "1".
 defprim("set", 2, function(sym, v)
-  local key = is_symbol(sym) and sym.name or tostring(sym)
-  GLOBALS[key] = v; return v
+  if not is_symbol(sym) then ERR(R.to_str(sym) .. " is not a symbol") end
+  GLOBALS[sym.name] = v; return v
 end)
 defprim("value", 1, function(sym)
-  local key = is_symbol(sym) and sym.name or tostring(sym)
+  if not is_symbol(sym) then ERR(R.to_str(sym) .. " is not a symbol") end
+  local key = sym.name
   local v = GLOBALS[key]
   if v == nil then ERR("variable " .. key .. " has no value") end
   return v
@@ -537,6 +540,13 @@ end)
 local FAILOBJ = intern("shen.fail!")
 P.FAILOBJ = FAILOBJ
 defprim("absvector", 1, function(n)
+  -- Validate first: a negative or fractional length would build a table whose
+  -- length word disagrees with its slots (and a non-number used to surface as
+  -- a raw Lua arithmetic error), and the printer dies on the result outside
+  -- any handler the program set up.
+  if type(n) ~= "number" or n < 0 or n % 1 ~= 0 then
+    ERR(R.to_str(n) .. " is not a valid vector length")
+  end
   local v = { [1] = n }
   for i=0,n-1 do v[i+2] = FAILOBJ end
   return setmetatable(v, Vmt)
@@ -550,12 +560,17 @@ local function addr_oob(v, i)
   ERR(R.to_str and (tostring(i) .. " is not a valid index") or "invalid index")
 end
 P.addr_oob = addr_oob
+-- A negative index is out of range too: v[1] holds the length word. A write to
+-- a slot that does not exist raises as well, rather than growing the table.
 defprim("<-address", 2, function(v, i)
   local w = v[i+2]
-  if w == nil then addr_oob(v, i) end
+  if w == nil or i < 0 then addr_oob(v, i) end
   return w
 end)
-defprim("address->", 3, function(v, i, x) v[i+2]=x; return v end)
+defprim("address->", 3, function(v, i, x)
+  if v[i+2] == nil or i < 0 then addr_oob(v, i) end
+  v[i+2]=x; return v
+end)
 
 -- freeze/thaw : thunks are 0-arity functions (kernel: (defun thaw (V) (V)))
 -- Hot path in the Prolog/typechecker CPS: a thawed value is always a 0-arity
@@ -575,12 +590,14 @@ defprim("type", 2, function(x, _ty) return x end)
 local load_form  -- fwd (defined below)
 defprim("eval-kl", 1, function(form) return P.eval(form) end)
 
--- get-time : (get-time Sym), Sym in {run, real, unix}
+-- get-time : (get-time Sym), Sym in {run, real, unix}; anything else raises
 local t0_real = os.time()
 defprim("get-time", 1, function(sym)
-  local name = is_symbol(sym) and sym.name or tostring(sym)
+  local name = is_symbol(sym) and sym.name
   if name == "run" then return os.clock()
-  else return os.time() - t0_real end   -- real / unix : wall seconds since boot
+  elseif name == "unix" then return os.time()
+  elseif name == "real" then return os.time() - t0_real  -- wall seconds since boot
+  else ERR("get-time: invalid option: " .. R.to_str(sym)) end
 end)
 
 -- ---- streams -------------------------------------------------------------
@@ -715,7 +732,20 @@ end)
 
 -- close (STREAM) -> ()
 defprim("close", 1, function(st)
-  if is_stream(st) and st.close then st.close() end
+  if not is_stream(st) then ERR("close: not a stream") end
+  -- Closing twice is harmless; using a closed stream raises a Shen error, not
+  -- Lua's "attempt to use a closed file". Replacing the functions keeps the
+  -- read and write paths free of a closed check.
+  if st.close then
+    st.close()
+    st.close = nil
+    if st.kind == "in" then
+      st.readbyte = function() ERR("read-byte: stream is closed") end
+      st.pb, st.eof = nil, false
+    else
+      st.write = function() ERR("write-byte: stream is closed") end
+    end
+  end
   return NIL
 end)
 
@@ -876,9 +906,9 @@ function P.install_native_prolog()
     -- Per-query capacity: shen.prolog-vector allocates ONE absvector of
     -- (value shen.*prolog-memory*) slots per query, so the kernel's
     -- shen.nextticket writes slot n and the query dies once n reaches the
-    -- vector size. Our absvector is a Lua table, and address-> is an
-    -- unchecked store, so without this the vector would silently grow and a
-    -- query that raises on every other port would answer here.
+    -- vector size. This native path stores without going through address->,
+    -- so without this the vector would silently grow and a query that raises
+    -- on every other port would answer here.
     local size = vec[1]
     if type(size) == "number" and n >= size then
       ERR("prolog vector index out of range: a single query may allocate at "
@@ -1252,6 +1282,11 @@ function P.install_native_stdlib()
     end
   end
   local function hash(v, bound)
+    -- The kernel's shen.mod never returns for a bound of 0 or below (non-symbol
+    -- keys hung the process) and x % 0 is NaN (symbol keys returned it).
+    if type(bound) ~= "number" or bound < 1 or bound % 1 ~= 0 then
+      ERR("hash: " .. R.to_str(bound) .. " is not a positive integer")
+    end
     local s
     if is_symbol(v) then s = v.name
     elseif type(v) == "string" then s = v
@@ -2637,10 +2672,13 @@ local ENV = {
   end,
   ADDR = function(v, i)
     local w = v[i + 2]
-    if w == nil then return F["<-address"](v, i) end
+    if w == nil or i < 0 then return F["<-address"](v, i) end
     return w
   end,
-  ADSET = function(v, i, x) v[i + 2] = x; return v end,
+  ADSET = function(v, i, x)
+    if v[i + 2] == nil or i < 0 then return F["address->"](v, i, x) end
+    v[i + 2] = x; return v
+  end,
   VMT = Vmt,
   -- allow compiled code to reach a few Lua builtins safely
   -- trap-error's pcall restores the stack-segment count (runtime.lua, #93)
@@ -2809,13 +2847,9 @@ function P.eval(form)
   local t = type(form)
   if t == "number" or t == "string" or t == "boolean" then return form end
   if form == NIL then return form end
-  if is_symbol(form) then
-    -- Bare symbols evaluate to their value in the global var namespace if
-    -- bound, otherwise to themselves (KL convention).
-    local v = GLOBALS[form.name]
-    if v ~= nil then return v end
-    return form
-  end
+  -- A bare symbol evaluates to itself, bound as a global or not: the global
+  -- namespace is reached only through (value S).
+  if is_symbol(form) then return form end
   if t == "table" and not is_cons(form) then
     -- absvector, stream, exception, or other opaque object: self-evaluating.
     return form

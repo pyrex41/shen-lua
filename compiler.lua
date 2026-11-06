@@ -2585,21 +2585,46 @@ end
 -- expose expression compiler + a returning-chunk helper for eval
 C.cexpr = cexpr
 C.ctail = ctail
+-- Run one whole compile. Its state lives in module locals that each compiler
+-- function saves on entry and restores on the way out, which an error skips: a
+-- malformed form left CTX set, and every later compile then emitted KC[i] or NT
+-- references into a chunk that declares neither, so the session could no longer
+-- evaluate anything. C.ARITY is restored too, so a defun that failed to compile
+-- does not change how later calls to the old definition are compiled.
+local function atomic_compile(arity_name, f, ...)
+  local s_ctx, s_self, s_cont, s_ntcount, s_cnt, s_tcount, s_tailpre = CTX, SELF, CONT, NTCOUNT, CNT, TCOUNT, TAILPRE
+  local s_in, s_dn, s_fl, s_fm, s_cc, s_hoist, s_fnl = IN_IMPL, DEFUN_NAME, FREF_LIST, FREF_MAP, CCACHE, HOIST, FNL
+  local s_wide, s_tf = WIDE, TAIL_FORM
+  local s_arity = arity_name and C.ARITY[arity_name]
+  local ok, res = pcall(f, ...)
+  if ok then return res end
+  CTX, SELF, CONT, NTCOUNT, CNT, TCOUNT, TAILPRE = s_ctx, s_self, s_cont, s_ntcount, s_cnt, s_tcount, s_tailpre
+  IN_IMPL, DEFUN_NAME, FREF_LIST, FREF_MAP, CCACHE, HOIST, FNL = s_in, s_dn, s_fl, s_fm, s_cc, s_hoist, s_fnl
+  WIDE, TAIL_FORM = s_wide, s_tf
+  if arity_name then C.ARITY[arity_name] = s_arity end
+  error(res, 0)
+end
+
 function C.compile_expr_chunk(form)
   -- the chunk's one call is not counted (nt_call): a single frame
-  return "return (" .. cexpr_tail(form, {}) .. ")"
+  return atomic_compile(nil, function()
+    return "return (" .. cexpr_tail(form, {}) .. ")"
+  end)
 end
 
 -- compile any top-level form to a Lua statement string
 function C.compile_top(form, wide)
   if is_cons(form) and is_symbol(car(form)) and car(form).name == "defun" then
-    return cdefun_mode(form, wide)
+    local nm = is_cons(cdr(form)) and car(cdr(form))
+    return atomic_compile(is_symbol(nm) and nm.name or nil, cdefun_mode, form, wide)
   else
     -- a top-level expression: evaluate for side effects. Wrapped in do..end
     -- so a whole kernel file can be concatenated into ONE chunk (boot.lua's
     -- bytecode cache) without accumulating `local _` slots toward Lua's
     -- 200-locals-per-scope limit.
-    return "do local _ = " .. cexpr(form, {}) .. "; end"
+    return atomic_compile(nil, function()
+      return "do local _ = " .. cexpr(form, {}) .. "; end"
+    end)
   end
 end
 
