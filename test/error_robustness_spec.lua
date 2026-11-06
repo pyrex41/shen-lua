@@ -119,8 +119,36 @@ evs("(define rob-ev? 0 -> true N -> (and (number? N) (rob-od? (- N 1))))")
 evs("(define rob-od? 0 -> false N -> (and (number? N) (rob-ev? (- N 1))))")
 evs("(define rob-ev2? 0 -> false N -> (or (not (number? N)) (rob-od2? (- N 1))))")
 evs("(define rob-od2? 0 -> false N -> (or (not (number? N)) (rob-ev2? (- N 1))))")
-check(evs("(rob-ev? 5000000)") == "true", "and: a tail call to another function keeps its frame")
-check(evs("(rob-ev2? 5000000)") == "false", "or: a tail call to another function keeps its frame")
+local function deep(src, want, name)
+  local ok, got = pcall(evs, src)
+  check(ok and got == want, name .. ", got " .. tostring(ok and got or "an error"))
+end
+deep("(rob-ev? 5000000)", "true", "and: a tail call to another function keeps its frame")
+deep("(rob-ev2? 5000000)", "false", "or: a tail call to another function keeps its frame")
+for name, src in pairs({
+  ["and"] = "(define rob-%s 0 -> true N -> (and (number? N) (rob-%s (- N 1))))",
+  ["and-if-then"] = "(define rob-%s 0 -> true N -> (and (number? N) (if (> N 0) (rob-%s (- N 1)) false)))",
+  ["and-if-else"] = "(define rob-%s 0 -> true N -> (and (number? N) (if (= N 0) false (rob-%s (- N 1)))))",
+  ["and-cond"] = "(define rob-%s 0 -> true N -> (and (number? N) (cond ((> N 0) (rob-%s (- N 1))) (true false))))",
+  ["and-let"] = "(define rob-%s 0 -> true N -> (and (number? N) (let M (- N 1) (rob-%s M))))",
+  ["and-do"] = "(define rob-%s 0 -> true N -> (and (number? N) (do 1 (rob-%s (- N 1)))))",
+  ["and-and"] = "(define rob-%s 0 -> true N -> (and (number? N) (and (integer? N) (rob-%s (- N 1)))))",
+  ["and-or"] = "(define rob-%s 0 -> true N -> (and (number? N) (or (string? N) (rob-%s (- N 1)))))",
+  ["if-and"] = "(define rob-%s 0 -> true N -> (if (> N 0) (and (number? N) (rob-%s (- N 1))) false))",
+  ["or"] = "(define rob-%s 0 -> true N -> (or (string? N) (rob-%s (- N 1))))",
+  ["or-if"] = "(define rob-%s 0 -> true N -> (or (string? N) (if (> N 0) (rob-%s (- N 1)) false)))",
+  ["or-cond"] = "(define rob-%s 0 -> true N -> (or (string? N) (cond ((> N 0) (rob-%s (- N 1))) (true false))))",
+  ["freeze-and"] = "(define rob-%s 0 -> true N -> (thaw (freeze (and (number? N) (rob-%s (- N 1))))))",
+  ["lambda-and"] = "(define rob-%s 0 -> true N -> ((/. M (and (number? M) (rob-%s M))) (- N 1)))",
+}) do
+  local a, b = "a-" .. name, "b-" .. name
+  evs(src:format(a, b)); evs(src:format(b, a))
+  local ok, got = pcall(evs, "(rob-" .. a .. " 5000000)")
+  check(ok and got == "true", "mutual tail recursion, depth 5M, through " .. name .. ", got " .. tostring(ok and got or "an error"))
+end
+evs("(define rob-va _ 0 -> true F N -> (and (number? N) (F F (- N 1))))")
+evs("(define rob-vgo N -> (rob-va (/. F M (rob-va F M)) N))")
+deep("(rob-vgo 5000000)", "true", "depth 5M through a variable under and")
 evs("(define rob-apply F X -> (and true (F X)))")
 check(evs("(rob-apply (/. X (rob-ev? X)) 2)") == "true", "and: a tail call through a variable")
 -- the tail call is unchecked; a test of its result, here or in the caller, is not
@@ -129,6 +157,15 @@ evs("(define rob-test X -> (if (rob-last X) yes no))")
 evs("(define rob-inner X -> (if (and true (rob-id X)) yes no))")
 evs("(define rob-let X -> (let Y (and true (rob-id X)) Y))")
 evs("(define rob-prim X -> (and true (+ X 1)))")
+-- the hole, on purpose: Shen/JIT and Shen/Scheme raise on these, shen-go gives 5
+evs("(define rob-lastif X -> (and true (if true (rob-id X) false)))")
+evs("(define rob-lastor X -> (or false (rob-id X)))")
+evs("(define rob-lastfz X -> (thaw (freeze (and true (rob-id X)))))")
+evs("(define rob-lastlam X -> ((/. Y (and true (rob-id Y))) X))")
+check(evs("(rob-lastif 1)") == "1", "unchecked: a tail call under if under and")
+check(evs("(rob-lastor 1)") == "1", "unchecked: a tail call under or")
+check(evs("(rob-lastfz 1)") == "1", "unchecked: a freeze body's tail call")
+check(evs("(rob-lastlam 1)") == "1", "unchecked: a lambda body's tail call")
 check(evs("(rob-last 1)") == "1", "a defun's tail call through and returns its value")
 raises_boolean("(rob-test 1)")
 raises_boolean("(rob-inner 1)")

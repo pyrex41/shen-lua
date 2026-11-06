@@ -2174,7 +2174,8 @@ function cexpr(form, env)
         -- would illegally cross the function boundary. Likewise reset the
         -- chain-hoist state: KC[i] has its own local budget, and locals cached
         -- in the enclosing function are not in scope here.
-        VALUE_NEXT = true
+        -- the whole body of a freeze or a lambda is in tail position (see ccall)
+        VALUE_NEXT = form ~= TAIL_FORM
         local call = hoist_kc(form, env)
         -- The KC call itself may raise or side-effect: later siblings in the
         -- enclosing statement must not hoist chains ahead of it.
