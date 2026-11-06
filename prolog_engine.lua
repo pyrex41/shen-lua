@@ -200,10 +200,23 @@ function M.is_var(v) return v >= VAR_BASE and v < CONS_BASE end
 function M.is_atom(v) return v < VAR_BASE end
 
 -- follow bound-var chains; stops at an unbound var or a non-var
-local function lazyderef(v)
+--
+-- Chains of more than one step are rare, so the loop stays out of line. A loop
+-- here would be an inner loop of every trace through a predicate, and LuaJIT
+-- aborts those: on the Prolog benchmark that was most of the aborted traces.
+local function deref_chain(v)
   while v >= VAR_BASE and v < CONS_BASE do
     local b = vbind[v - VAR_BASE]
     if b >= 0 then v = b else break end
+  end
+  return v
+end
+local function lazyderef(v)
+  if v >= VAR_BASE and v < CONS_BASE then
+    local b = vbind[v - VAR_BASE]
+    if b < 0 then return v end
+    if b >= VAR_BASE and b < CONS_BASE then return deref_chain(b) end
+    return b
   end
   return v
 end
@@ -493,25 +506,16 @@ M.occurs = occurs
 -- On structural success thaws cont; if the cont fails, bindings made HERE are
 -- unwound (batch, to the entry trail mark) — semantically identical to the
 -- legacy per-bind! unwind chain. Returns the cont's value, or false.
-local function unify_core(rootA, rootB, cont, oc)
+local function unify_lists(x, y, cont, oc)
   local n = 1
-  gA[0] = rootA; gB[0] = rootB
+  gA[0] = x; gB[0] = y
   local tmark = trail_top
   local tn = tmark
   local ok = true
   while n > 0 do
     n = n - 1
-    local x = gA[n]
-    local y = gB[n]
-    -- inline lazyderef
-    while x >= VAR_BASE and x < CONS_BASE do
-      local b = vbind[x - VAR_BASE]
-      if b >= 0 then x = b else break end
-    end
-    while y >= VAR_BASE and y < CONS_BASE do
-      local b = vbind[y - VAR_BASE]
-      if b >= 0 then y = b else break end
-    end
+    local x = lazyderef(gA[n])
+    local y = lazyderef(gB[n])
     if x == y then
       -- identical atom / same var / same cons cell: success at this goal
     elseif x >= VAR_BASE and x < CONS_BASE then
@@ -557,6 +561,42 @@ local function unify_core(rootA, rootB, cont, oc)
     -- trail_top was never advanced past tmark on the failure path
     return false
   end
+end
+
+-- Most unifications bind one variable or compare atoms, and those need neither
+-- the goal stack nor a loop, which would be an inner loop of the caller's trace.
+local function unify_core(x, y, cont, oc)
+  x = lazyderef(x)
+  y = lazyderef(y)
+  local idx, val
+  if x == y then
+    return thawH(cont)
+  elseif x >= VAR_BASE and x < CONS_BASE then
+    if oc and y >= CONS_BASE and occurs(x - VAR_BASE, y) then return false end
+    idx, val = x - VAR_BASE, y
+  elseif y >= VAR_BASE and y < CONS_BASE then
+    if oc and x >= CONS_BASE and occurs(y - VAR_BASE, x) then return false end
+    idx, val = y - VAR_BASE, x
+  elseif x >= CONS_BASE and y >= CONS_BASE then
+    return unify_lists(x, y, cont, oc)
+  else
+    return false
+  end
+  vbind[idx] = val
+  local tn = trail_top
+  if tn >= tcap then trail, tcap = grown(trail, tcap, tn + 1) end
+  trail[tn] = idx
+  trail_top = tn + 1
+  local d = seg_depth
+  local r
+  if d < SEG_FRAMES then seg_depth = d + 1; r = thawH(cont); seg_depth = d
+  else r = thaw_segment(cont) end
+  if r == false then
+    vbind[idx] = -1
+    trail_top = tn
+    return false
+  end
+  return r
 end
 
 function M.unify(a, b, cont)    return unify_core(a, b, cont, false) end  -- lzy=

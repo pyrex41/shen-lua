@@ -6,6 +6,8 @@ local C = require("compiler")
 local cons, is_cons, NIL = R.cons, R.is_cons, R.NIL
 local Symbol, intern, is_symbol = R.Symbol, R.intern, R.is_symbol
 local Excn, mkexcn = R.Excn, R.mkexcn
+local rawset = rawset
+local NEGZERO = -0.0
 local Vmt = R.Vmt        -- absvector metatable (pure-array layout; shared with runtime.lua)
 -- counted non-tail calls (runtime.lua stack segments, #93), written inline
 -- where a native calls back into Shen code (a shared trampoline would look
@@ -615,7 +617,7 @@ defprim("<-address", 2, function(v, i)
 end)
 defprim("address->", 3, function(v, i, x)
   if v[i+2] == nil or i < 0 then addr_oob(v, i) end
-  v[i+2]=x; return v
+  rawset(v, i+2, x); return v
 end)
 
 -- freeze/thaw : thunks are 0-arity functions (kernel: (defun thaw (V) (V)))
@@ -1353,6 +1355,21 @@ function P.install_native_stdlib()
   -- is never second-guessed. Boot alone calls hash ~800 times (all on symbol
   -- keys); a native fold there and at runtime avoids the per-call explode
   -- list + map + KL recursion.
+  -- shen.mod (sys.kl:123) builds a list of doubled divisors and subtracts them:
+  -- for N in the range below that takes a few thousand instructions, and gives
+  -- exactly N % D, since every double involved is an exact integer. Anything
+  -- else, including the negative N it returns as is and the divisors it never
+  -- returns from, stays with the kernel's definition.
+  local orig_mod = F["shen.mod"]
+  local function shen_mod(n, d)
+    if type(n) == "number" and type(d) == "number"
+       and n >= 0 and n < 9007199254740992 and d >= 1 and d < 9007199254740992
+       and n == mfloor(n) and d == mfloor(d) then
+      return n % d
+    end
+    return orig_mod(n, d)
+  end
+
   local orig_hash = F["hash"]
   local function hashkey_bytes(s)
     local acc = 1
@@ -1592,6 +1609,10 @@ function P.install_native_stdlib()
   -- else takes the ordered choice below, so these must only ever agree with it:
   -- a digit run followed by . or e, a string with c#, a non-ASCII byte and all
   -- punctuation go to the kernel's rules.
+  -- In a do block: install_native_stdlib is near the limit of 200 locals.
+  local sx_fast
+  local sx_dollar = intern("$")
+  do
   local SX_WS, SX_SYM0, SX_SYMN, SX_CH = {}, {}, {}, {}
   for c = 0, 127 do SX_CH[c] = string.char(c) end
   for _, c in ipairs{ 9, 10, 13, 32 } do SX_WS[c] = true end
@@ -1603,7 +1624,6 @@ function P.install_native_stdlib()
   for c = 48, 57 do SX_SYMN[c] = true; SX_DIGIT[c] = true; SX_NUMCONT[c] = true end
   local sx_buf = {}
   local sx_vector = intern("vector")
-  local sx_dollar = intern("$")
   -- <sym>: the caller knows the first code qualifies
   local function sx_sym(v)
     local n = 0
@@ -1651,7 +1671,7 @@ function P.install_native_stdlib()
     return "item", v, acc
   end
   -- kind, rest, value like sx_step; false to take the ordered choice
-  local function sx_fast(v)
+  sx_fast = function(v)
     if not is_cons(v) then return nil end
     local c = v[1]
     if SX_WS[c] then
@@ -1674,6 +1694,7 @@ function P.install_native_stdlib()
     if c == 34 then return sx_str(v) end
     if SX_DIGIT[c] then return sx_int(v) end
     return false
+  end
   end
   local function sx_step(v, from)
     if from == 1 then
@@ -2491,6 +2512,7 @@ function P.install_native_stdlib()
   install("shen.<whitespaces>", whitespaces, 1)
   install("fn", fn_fast, 1)
   install("hash", hash, 2)
+  install("shen.mod", shen_mod, 2)
   install("pr", pr, 2)
   install("variable?", variable_q, 1)
   install("fail", fail, 0)
@@ -2734,6 +2756,11 @@ local ENV = {
   GE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a>=b end return F[">="](a,b) end,
   LE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a<=b end return F["<="](a,b) end,
   EQ  = function(a,b) if type(a)=="number" then return a==b end return equal(a,b) end,
+  -- A loop's accumulator (compiler.lua accumulator): the same values as ADD,
+  -- SUB and MUL, always as a double. x + -0.0 is x for every x.
+  ADDF = function(a,b) if type(a)=="number" and type(b)=="number" then return a+(b+NEGZERO) end return F["+"](a,b) end,
+  SUBF = function(a,b) if type(a)=="number" and type(b)=="number" then return a-(b+NEGZERO) end return F["-"](a,b) end,
+  MULF = function(a,b) if type(a)=="number" and type(b)=="number" then return a*(b+NEGZERO) end return F["*"](a,b) end,
   -- CALL0..CALLn are generated below the table (see unknown_call in compiler.lua).
   -- TRMC step markers (see TRMC in compiler.lua): never Shen values.
   TRMC_C = setmetatable({}, { __tostring = function() return "#<trmc cons>" end }),
@@ -2873,9 +2900,16 @@ local ENV = {
     if w == nil or i < 0 then return F["<-address"](v, i) end
     return w
   end,
+  -- rawset: a table with a metatable (Vmt has no metamethods) makes the trace
+  -- guard the type of the old value in the slot, so overwriting a vector with
+  -- values of another type left the trace on every element.
+  -- The range check reads the length word and not the slot, for the same reason:
+  -- loading the slot to compare it with nil guards its type too. A write at the
+  -- slot itself is what F["address->"] checks on the way to raising.
   ADSET = function(v, i, x)
-    if v[i + 2] == nil or i < 0 then return F["address->"](v, i, x) end
-    v[i + 2] = x; return v
+    local n = v[1]
+    if type(n) ~= "number" or i < 0 or i >= n or i % 1 ~= 0 then return F["address->"](v, i, x) end
+    rawset(v, i + 2, x); return v
   end,
   VMT = Vmt,
   -- allow compiled code to reach a few Lua builtins safely
@@ -2996,6 +3030,7 @@ if math.tointeger then
   ENV.SUB = function(a,b) if type(a)=="number" and type(b)=="number" then return a+0.0-b end return F["-"](a,b) end
   ENV.MUL = function(a,b) if type(a)=="number" and type(b)=="number" then return (a+0.0)*b end return F["*"](a,b) end
   ENV.DIV = function(a,b) if type(a)=="number" and type(b)=="number" and b~=0 then return (a+0.0)/b end return F["/"](a,b) end
+  ENV.ADDF, ENV.SUBF, ENV.MULF = ENV.ADD, ENV.SUB, ENV.MUL
 end
 
 local loadstring = loadstring or load
