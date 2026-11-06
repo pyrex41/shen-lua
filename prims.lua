@@ -165,6 +165,10 @@ end
 -- (primitives, a host's function), so APP tells the lambda apart here, on the
 -- only path that needs to: applying it to other than one argument.
 local getinfo = debug and debug.getinfo
+-- The source names of chunks load_chunk loaded: compiled Shen, as opposed to a
+-- host's own Lua, whatever it called its chunk. Recording this per chunk costs
+-- nothing per closure, unlike marking each lambda as it is created.
+local COMPILED_SOURCE = {}
 local RAW_LAMBDA = setmetatable({}, {__mode="k"})  -- what getinfo said, per function
 local function is_raw_lambda(f)
   local r = RAW_LAMBDA[f]
@@ -172,12 +176,8 @@ local function is_raw_lambda(f)
   r = false
   if getinfo then
     local i = getinfo(f, "uS")
-    if i.nparams == 1 and not i.isvararg and i.what ~= "main" then
-      -- compiled chunks carry a bare chunkname ("shen:f", "eval", a kernel
-      -- file); host and runtime Lua is "@file" or "=name"
-      local c = i.source:sub(1, 1)
-      r = c ~= "@" and c ~= "="
-    end
+    r = i.nparams == 1 and not i.isvararg and i.what ~= "main"
+        and COMPILED_SOURCE[i.source] == true
   end
   RAW_LAMBDA[f] = r
   return r
@@ -3057,6 +3057,7 @@ local function load_chunk(code, chunkname)
     chunk, err = load(code, chunkname, nil, ENV)
     if not chunk then error("Lua load error: "..tostring(err)) end
   end
+  if getinfo then COMPILED_SOURCE[getinfo(chunk, "S").source] = true end
   return chunk
 end
 P.load_chunk = load_chunk

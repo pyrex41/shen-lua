@@ -133,6 +133,38 @@ check("after the rebinding the new definition answers", "(cp-a2 1 2)", "0")
 check("a result of arity 2 is applied to one more argument",
       "(+ 0 ((let F (/. X Y Z (+ X (+ Y Z))) (F 1)) 2 (do (clog 3) 3)))", "6")
 
+-- a function loaded by the host is called as given, whatever its chunk's name; a
+-- compiled lambda carries its arity
+do
+  local P = require("prims")
+  local APP = P.APP
+  local load1 = loadstring or load
+  local host1 = load1("return function(x) return 'host:' .. tostring(x) end")()
+  local named = load1("return function(x) return 'named:' .. tostring(x) end", "my-chunk")()
+  local at = load1("return function(x) return 'at:' .. tostring(x) end", "=host")()
+  local cur = load1("return function(x) return function(y) return tostring(x) .. tostring(y) end end")()
+  local function same(name, want, ...)
+    local ok, got = pcall(APP, ...)
+    if ok and got == want then npass = npass + 1
+    else nfail = nfail + 1; print("FAIL " .. name .. ": got " .. tostring(got) .. " want " .. tostring(want)) end
+  end
+  same("bare chunk, 2 args", "host:1", host1, 1, 2)
+  same("bare chunk, 0 args", "host:nil", host1)
+  same("bare chunk with a name, 2 args", "named:1", named, 1, 2)
+  same("=named chunk, 2 args", "at:1", at, 1, 2)
+  local ok, r = pcall(APP, cur, 1, 2)
+  if ok and type(r) == "function" and r(9) == "19" then npass = npass + 1
+  else nfail = nfail + 1; print("FAIL bare curried chunk, 2 args: got " .. tostring(r)) end
+  local lam = shen.eval("(/. X (/. Y (+ X Y)))")
+  same("compiled lambda, 2 args", 3, lam, 1, 2)
+  local again = shen.eval("(/. X (+ X 1))")
+  same("compiled lambda, 1 arg", 2, again, 1)
+  defs("(define rawlam-def -> (/. X (/. Y (cons X Y))))")
+  local fromdef = shen.call("rawlam-def")
+  local v = APP(fromdef, 1, 2)
+  if R.is_cons(v) then npass = npass + 1 else nfail = nfail + 1; print("FAIL lambda from a defun, 2 args") end
+end
+
 -- a host function has no recorded arity and is called as given
 local P = require("prims")
 P.F["host-count"] = function(...) return select("#", ...) end
