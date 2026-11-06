@@ -1228,6 +1228,21 @@ function P.install_native_stdlib()
   -- is never second-guessed. Boot alone calls hash ~800 times (all on symbol
   -- keys); a native fold there and at runtime avoids the per-call explode
   -- list + map + KL recursion.
+  -- shen.mod (sys.kl:123) builds a list of doubled divisors and subtracts them:
+  -- for N in the range below that takes a few thousand instructions, and gives
+  -- exactly N % D, since every double involved is an exact integer. Anything
+  -- else, including the negative N it returns as is and the divisors it never
+  -- returns from, stays with the kernel's definition.
+  local orig_mod = F["shen.mod"]
+  local function shen_mod(n, d)
+    if type(n) == "number" and type(d) == "number"
+       and n >= 0 and n < 9007199254740992 and d >= 1 and d < 9007199254740992
+       and n == mfloor(n) and d == mfloor(d) then
+      return n % d
+    end
+    return orig_mod(n, d)
+  end
+
   local orig_hash = F["hash"]
   local function hashkey_bytes(s)
     local acc = 1
@@ -2261,6 +2276,7 @@ function P.install_native_stdlib()
   install("shen.<whitespaces>", whitespaces, 1)
   install("fn", fn_fast, 1)
   install("hash", hash, 2)
+  install("shen.mod", shen_mod, 2)
   install("pr", pr, 2)
   install("variable?", variable_q, 1)
   install("fail", fail, 0)

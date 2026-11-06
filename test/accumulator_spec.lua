@@ -1,5 +1,5 @@
 -- test/accumulator_spec.lua: a self-tail loop's accumulator (compiler.lua
--- accumulator) is computed as a double and must keep the meaning of + - *.
+-- accumulator) is computed as a double and must keep the meaning of + - *; also native shen.mod.
 --   luajit test/accumulator_spec.lua
 package.path = (arg[0]:gsub("test/[^/]*$", "")) .. "?.lua;" .. package.path
 
@@ -45,6 +45,21 @@ ok = pcall(ev, '(ac-sub 1 "3" 1)')
 check(not ok, "string operand in - is an error")
 ok = pcall(ev, '(ac-mul 1 "3" 1)')
 check(not ok, "string operand in * is an error")
+
+-- shen.mod: the native path agrees with the kernel's definition, which the
+-- second table recomputes by the same doubling
+ev("(define ac-mul2 N L -> (if (> (hd L) N) (tl L) (ac-mul2 N [(* 2 (hd L)) | L])))")
+ev("(define ac-modh N L -> (cases (= N 0) 0 (empty? L) N (> (hd L) N) (ac-modh N (tl L)) true (ac-modh (- N (hd L)) L)))")
+for _, p in ipairs{ {0,10}, {5,10}, {10,10}, {25,10}, {1,1}, {2147483648,7},
+                    {1e15,7}, {9007199254740991,3}, {1000000007,1000000006} } do
+  local n, d = string.format("%.0f", p[1]), string.format("%.0f", p[2])
+  local got = ev("(shen.mod " .. n .. " " .. d .. ")")
+  local want = ev("(ac-modh " .. n .. " (ac-mul2 " .. n .. " [" .. d .. "]))")
+  check(got == want, "shen.mod " .. n .. " " .. d .. ": " .. tostring(got) .. " vs " .. tostring(want))
+end
+check(ev("(shen.mod -15 10)") == -15, "shen.mod of a negative stays the kernel's answer")
+check(ev("(shen.mod 7.5 2)") == 1.5, "shen.mod of a fraction stays the kernel's answer")
+check(not pcall(ev, '(shen.mod "a" 2)'), "shen.mod of a string is an error")
 
 io.write(string.format("accumulator_spec: %d pass, %d fail\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)

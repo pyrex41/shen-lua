@@ -1277,7 +1277,7 @@ end
 -- A loop's accumulator, (f V (+ V E)) with E not a literal, may leave int32
 -- range. Under dual-number LuaJIT (arm64) the loop's trace is specialised to an
 -- int V, and once V is a double every iteration fails that guard and runs the
--- loop's head plus a side trace, about 20 times the cost of the loop itself.
+-- loop's head plus a side trace, about 10 times the cost of the loop itself.
 -- ADDF and friends always give a double, so the trace is specialised to that.
 local ACCUMULATOR = { ["+"] = "ADD", ["-"] = "SUB", ["*"] = "MUL" }
 local function accumulator(form, lname, env, code)
