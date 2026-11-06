@@ -191,6 +191,17 @@ do
   else nfail = nfail + 1; print("FAIL proven facts left after a failed compile: " .. C.proven_count()) end
 end
 
+-- thaw of a function that takes arguments is an application to none: a partial, as on
+-- 912596b, never its body run with nil
+check("thaw of a two-parameter lambda", "(let F (thaw (/. X Y (cons X Y))) (F 1 2))", "(1 . 2)")
+check("thaw of a one-parameter lambda", "(let F (thaw (/. X (cons X 1))) (F 2))", "(2 . 1)")
+check("thaw of (fn f)", "(let F (thaw (fn add2)) (F 1 2))", "3")
+check("thaw through a variable", "(let G (/. X Y (cons X Y)) (let F (thaw G) (F 1 2)))", "(1 . 2)")
+defs("(define th-of F -> (thaw F))")
+check("thaw in a defun", "((th-of (/. X Y (cons X Y))) 1 2)", "(1 . 2)")
+check("thaw of a freeze", "(thaw (freeze (+ 1 2)))", "3")
+check("thaw of a freeze in a defun", "(th-of (freeze (+ 1 2)))", "3")
+
 -- a host function has no recorded arity and is called as given
 local P = require("prims")
 P.F["host-count"] = function(...) return select("#", ...) end

@@ -19,6 +19,18 @@ local P = {}
 
 local F  = {}            -- Shen/KL function table: name -> Lua function
 local FA = setmetatable({}, {__mode="k"})  -- Lua function -> arity
+-- thaw: a function to call with no arguments, without asking APP. Arity 0 is a freeze
+-- outside a defun. No arity at all is a host function, or the engine's own continuation,
+-- or a compiled one-parameter lambda, which alone must go to APP: on LuaJIT and 5.1 it is
+-- the one whose environment is the compiled code's (set below with ENV). Asking APP
+-- costs a debug.getinfo per new closure, and the Prolog engine makes one per step.
+local COMPILED_ENV
+local getfenv = getfenv
+local function thaw_direct(x)
+  local ar = rawget(FA, x)
+  if ar == 0 then return true end
+  return ar == nil and getfenv ~= nil and getfenv(x) ~= COMPILED_ENV
+end
 local GLOBALS = {}       -- KL global variable namespace: name -> value
 P.F, P.FA, P.GLOBALS = F, FA, GLOBALS
 
@@ -654,9 +666,11 @@ end)
 -- Lua closure (produced by `freeze` / BIND), so call it directly and skip the
 -- full APP dispatch (symbol check, arity lookup, vararg packing). APP remains
 -- the fallback for the rare symbol case.
+-- a function of no arguments runs (see thaw_direct); APP turns a compiled one that takes
+-- arguments into what applying it to nothing gives
 defprim("thaw", 1, function(x)
   if getmetatable(x) == Thunk then return runthunk(x) end
-  if type(x) == "function" then return x() end
+  if type(x) == "function" and thaw_direct(x) then return x() end
   return APP(x)
 end)
 
@@ -891,7 +905,7 @@ function P.install_native_prolog()
   -- by native lzy= below), so thaw handles both.
   local function thaw(c)
     if getmt(c) == Thunk then return runthunk(c) end
-    if type(c) == "function" then return c() end
+    if type(c) == "function" and thaw_direct(c) then return c() end
     return APP(c)
   end
   -- bindv: prolog-vector[ Var's ticket ] := Val  (KL <-address Var 1 = Var[3])
@@ -1878,7 +1892,7 @@ function P.install_native_stdlib()
   end
   local function thaw(x)
     if getmetatable(x) == Thunk then return runthunk(x) end
-    if type(x) == "function" then return x() end
+    if type(x) == "function" and thaw_direct(x) then return x() end
     return APP(x)
   end
   local function eqeq(a, b) return equal(a, b) end
@@ -2817,7 +2831,7 @@ local ENV = {
   end,
   THAW = function(x)
     if getmetatable(x) == Thunk then return runthunk(x) end
-    if type(x) == "function" then return x() end
+    if type(x) == "function" and thaw_direct(x) then return x() end
     return APP(x)
   end,
   -- Direct GLOBALS access (compiler value/set of literal symbols, and the
@@ -2950,6 +2964,7 @@ local ENV = {
   math = math, string = string, table = table,
 }
 P.ENV = ENV
+COMPILED_ENV = ENV
 
 -- counted non-tail calls (runtime.lua stack segments, #93): the count slot,
 -- the segment runner and the trampoline for code outside a defun
