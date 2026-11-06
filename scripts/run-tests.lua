@@ -32,6 +32,7 @@ local specs = {
   "test/accumulator_spec.lua",
   "test/boot_cache_spec.lua",
   "test/calls_spec.lua",
+  "test/certify_spec.lua",
   "test/cli_spec.lua",
   "test/checked_integer_spec.lua",
   "test/contract_spec.lua",
