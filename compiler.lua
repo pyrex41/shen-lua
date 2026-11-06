@@ -1078,6 +1078,26 @@ local function cexpr_tail(form, env)
   return s
 end
 
+-- what a test can skip its boolean check for (see bc)
+local BOOLEAN_FORMS = {}
+for _, n in ipairs({
+  "not", "cons?", "empty?", "number?", "string?", "symbol?", "boolean?", "absvector?",
+  "integer?", "variable?", "tuple?", "vector?", "shen.+string?", "shen.+vector?",
+  "shen.pvar?", "shen.ccons?", "shen.unlocked?", "shen.bc",
+}) do BOOLEAN_FORMS[n] = 1 end
+for _, n in ipairs({ "=", "==", "<", ">", "<=", ">=", "and", "or", "element?", "shen.hds=?" }) do
+  BOOLEAN_FORMS[n] = 2
+end
+-- only a saturated call: a predicate with too few arguments is a closure
+local function gives_boolean(form, env)
+  if form == true or form == false then return true end
+  if not is_cons(form) then return false end
+  local h = car(form)
+  if not (is_symbol(h) and not env[h.name]) then return false end
+  local want = BOOLEAN_FORMS[h.name]
+  return want ~= nil and #to_array(cdr(form)) == want
+end
+
 -- compile a call (F a1..an) in expression position; `tail`: it is the
 -- value of a Lua `return` (ctail), so it is not counted (nt_call)
 local function ccall(form, env, tail)
@@ -1194,7 +1214,8 @@ local function ccall(form, env, tail)
           return "type(" .. argstr .. ")==\"boolean\""
         end
         if name == "not" and ar == 1 then
-          return "not (" .. argstr .. ")"
+          if gives_boolean(args[1], env) then return "not (" .. argstr .. ")" end
+          return "not BC(" .. argstr .. ")"
         end
         if name == "shen.bc" and ar == 1 then return "BC(" .. argstr .. ")" end
         if name == "hd" and ar == 1 then
@@ -2461,24 +2482,6 @@ end
 -- boolean goes unchecked; anything else is compiled as (shen.bc FORM), which is
 -- BC(FORM), an ordinary call that raises on anything else.
 -- ------------------------------------------------------------------
-local BOOLEAN_FORMS = {}
-for _, n in ipairs({
-  "not", "cons?", "empty?", "number?", "string?", "symbol?", "boolean?", "absvector?",
-  "integer?", "variable?", "tuple?", "vector?", "shen.+string?", "shen.+vector?",
-  "shen.pvar?", "shen.ccons?", "shen.unlocked?", "shen.bc",
-}) do BOOLEAN_FORMS[n] = 1 end
-for _, n in ipairs({ "=", "==", "<", ">", "<=", ">=", "and", "or", "element?", "shen.hds=?" }) do
-  BOOLEAN_FORMS[n] = 2
-end
--- only a saturated call: a predicate with too few arguments is a closure
-local function gives_boolean(form, env)
-  if form == true or form == false then return true end
-  if not is_cons(form) then return false end
-  local h = car(form)
-  if not (is_symbol(h) and not env[h.name]) then return false end
-  local want = BOOLEAN_FORMS[h.name]
-  return want ~= nil and #to_array(cdr(form)) == want
-end
 local function bc(form, env)
   if gives_boolean(form, env) then return form end
   return R.cons(R.intern("shen.bc"), R.cons(form, NIL))

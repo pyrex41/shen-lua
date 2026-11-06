@@ -97,6 +97,10 @@ for _, src in ipairs({
   "(let X (and true 1) X)", "(if (and true 1) a b)", "(and true (if true 1 false))",
   "(and true (let Y 1 Y))", "(and true (do 0 1))", "(or false (cond (true 1)))",
 }) do raises_boolean(src) end
+-- not is a test too, compiled or not
+for _, src in ipairs({ "(not 5)", '(not "a")', "(not [])", "(let X 5 (not X))", "(eval-kl [not 5])" }) do
+  raises_boolean(src)
+end
 -- a predicate with too few arguments is a closure, not a boolean
 for _, src in ipairs({
   "(if (cons?) a b)", "(if (number?) a b)", "(cond ((cons?) a) (true b))", "(and (number?) true)",
@@ -104,6 +108,13 @@ for _, src in ipairs({
   "(eval-kl [if [element? 1] a b])",
 }) do raises_boolean(src) end
 evs("(define rob-id X -> X)")
+raises_boolean("(not (rob-id 5))")
+evs("(define rob-not X -> (not X))")
+raises_boolean("(rob-not 5)")
+check(evs("(rob-not true)") == "false", "not of a variable holding true")
+check(evs("(rob-not false)") == "true", "not of a variable holding false")
+check(evs("(not (rob-id false))") == "true", "not of a call giving false")
+check(evs("(not (cons? 1))") == "true", "not of a predicate")
 raises_boolean("(if (rob-id 1) a b)")
 raises_boolean("(and (rob-id true) (rob-id 1))")
 check(evs("(if (rob-id true) 1 2)") == "1", "a call that gives true passes")
