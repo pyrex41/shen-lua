@@ -449,5 +449,80 @@ shen.call("load", %q)
   os.remove(fpath); os.remove(lpath)
 end
 
+-- ---------------------------------------------------------------------------
+-- A fasl stores shen.*userdefs* as one push per define, not the whole list
+-- each time, which made it quadratic in the file's definitions. A hit must
+-- rebuild the same list, redefinitions included.
+-- ---------------------------------------------------------------------------
+do
+  local fdir = os.tmpname(); os.remove(fdir)
+  local p = os.tmpname() .. ".shen"
+  local parts = { "(define ud-a -> 1)\n(define ud-b -> 2)\n(define ud-a -> 3)\n" }
+  for i = 1, 300 do parts[#parts + 1] = "(define ud-f" .. i .. " -> " .. i .. ")\n" end
+  local fh = io.open(p, "w"); fh:write(table.concat(parts)); fh:close()
+  local cmd = SHEN .. " --hush-load " .. sh_quote(p)
+    .. " -e " .. sh_quote("[(value shen.*userdefs*) (ud-a) (ud-f300)]")
+  local envp = "env SHEN_FASL_DIR=" .. sh_quote(fdir) .. " "
+  local cold, ccode = run(envp .. cmd)
+  local warm, wcode = run(envp .. "SHEN_FASL_DEBUG=1 " .. cmd)
+  local off = run("env SHEN_FASL=off " .. cmd)
+  check(ccode == 0 and wcode == 0, "userdefs: cold and warm runs exit 0")
+  check(warm:find("[fasl] hit", 1, true) ~= nil, "userdefs: second run is a fasl HIT")
+  warm = warm:gsub("%[fasl%][^\n]*\n", "")
+  check(cold:find("ud-f300", 1, true) ~= nil, "userdefs: the list is printed")
+  check(cold == off, "userdefs: cold run matches SHEN_FASL=off")
+  check(warm == off, "userdefs: warm hit rebuilds the same list")
+  local total = 0
+  local ls = io.popen("cat " .. sh_quote(fdir) .. "/*.fasl | wc -c")
+  total = tonumber(ls:read("*a")); ls:close()
+  check(total and total < 250000, "userdefs: fasl of 300 defines stays linear, got " .. tostring(total))
+  os.remove(p); os.execute("rm -rf " .. sh_quote(fdir))
+end
+
+-- ---------------------------------------------------------------------------
+-- A fasl hit skips declare's variancy query when the name has no signature yet,
+-- which is the case with nothing to warn about. Changing a type still warns the
+-- same cold, warm and with SHEN_FASL=off, and the signature takes effect.
+-- ---------------------------------------------------------------------------
+do
+  local fdir = os.tmpname(); os.remove(fdir)
+  local p = os.tmpname() .. ".shen"
+  local fh = io.open(p, "w")
+  fh:write("(define var-g {number --> number} X -> X)\n"
+    .. "(define var-g {string --> string} X -> X)\n"
+    .. "(define var-h {number --> number} X -> (+ X 1))\n"); fh:close()
+  local lp = os.tmpname() .. ".lua"
+  fh = io.open(lp, "w")
+  fh:write("package.path = ", string.format("%q", here .. "?.lua;"), " .. package.path\n",
+    "local shen = require('shen')\nshen.boot{quiet = true}\n",
+    "shen.eval('(tc +)')\nshen.call('load', ", string.format("%q", p), ")\nshen.eval('(tc -)')\n",
+    "print('new type', shen.typecheck('(var-g \"s\")', 'string') ~= false)\n",
+    "print('old type', shen.typecheck('(var-g 1)', 'number') ~= false)\n",
+    "print('other', shen.typecheck('(var-h 1)', 'number') ~= false)\n")
+  fh:close()
+  local cmd = "luajit " .. sh_quote(lp)
+  local envp = "env SHEN_FASL_DIR=" .. sh_quote(fdir) .. " "
+  local function warnings(out)
+    local n = 0
+    for _ in out:gmatch("changing the type of var%-g") do n = n + 1 end
+    return n
+  end
+  local cold, ccode = run(envp .. cmd)
+  local warm, wcode = run(envp .. "SHEN_FASL_DEBUG=1 " .. cmd)
+  local off = run("env SHEN_FASL=off " .. cmd)
+  check(ccode == 0 and wcode == 0, "variancy: cold and warm runs exit 0")
+  check(warm:find("[fasl] hit", 1, true) ~= nil, "variancy: second run is a fasl HIT")
+  check(warnings(off) == 1, "variancy: the warning is printed once: " .. off)
+  check(warnings(cold) == 1, "variancy: cold run warns as SHEN_FASL=off does")
+  check(warnings(warm) == 1, "variancy: warm hit warns as SHEN_FASL=off does")
+  for what, out in pairs({ off = off, cold = cold, warm = warm }) do
+    check(out:find("new type\ttrue", 1, true) ~= nil, "variancy: " .. what .. ": the new type holds")
+    check(out:find("old type\tfalse", 1, true) ~= nil, "variancy: " .. what .. ": the old type is gone")
+    check(out:find("other\ttrue", 1, true) ~= nil, "variancy: " .. what .. ": the other signature holds")
+  end
+  os.remove(lp)
+  os.remove(p); os.execute("rm -rf " .. sh_quote(fdir))
+end
+
 io.write(string.format("cli_spec: %d pass, %d fail\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)

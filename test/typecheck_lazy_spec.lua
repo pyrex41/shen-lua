@@ -29,6 +29,14 @@ local function form(s) return P.F["read-from-string"](s)[1] end
 check("drivers deferred at boot (n_ok == 0)", tn.n_ok == 0)
 check("no failures recorded at boot (n_fail == 0)", tn.n_fail == 0)
 
+-- The kernel signatures wait for the first typecheck too; what a program did to
+-- a signature before then must still stand after.
+local function sym(n) return R.intern(n) end
+check("signatures deferred at boot", tn.NativeSig[sym("append")] == nil)
+P.F["destroy"](sym("reverse"))
+shen.eval("(declare lazy-sig-fn [number --> number])")
+shen.eval("(declare hd [number --> number])")
+
 -- 2) the exported native_typecheck is guarded: a direct call (no dispatch has
 --    run yet) must translate drivers first, not crash on nil NP predicates.
 local ok, res = pcall(tn.native_typecheck, form("1"), form("number"))
@@ -36,6 +44,13 @@ check("direct native_typecheck does not crash", ok)
 check("direct native_typecheck returns a result", ok and res ~= false)
 check("direct call triggered driver translation (n_ok > 0)", tn.n_ok > 0)
 check("driver translation was clean (n_fail == 0)", tn.n_fail == 0)
+
+check("kernel signatures are there after the first typecheck", tn.NativeSig[sym("append")] ~= nil)
+check("complete signature harvest", tn.sigs_complete == true)
+check("a signature destroyed before it stays destroyed", tn.NativeSig[sym("reverse")] == nil)
+check("a signature declared before it stays", tn.NativeSig[sym("lazy-sig-fn")] ~= nil)
+check("a kernel signature redeclared before it keeps the new type",
+      P.F["="](tn.NativeSig[sym("hd")], R.from_table({ sym("number"), sym("-->"), sym("number") })))
 
 -- 3) translated exactly once: a normal typecheck afterwards does not re-run it.
 local n = tn.n_ok

@@ -120,7 +120,7 @@ do
   check(ref:find("arity 2", 1, true) ~= nil,
         "#46: stdlib functions are registered (arity filter = 2)")
   check(kcold == ref, "#46: cold kernel-bytecode-cache boot == uncached boot")
-  check(sidecar_data ~= nil and sidecar_data:sub(1, 8) == "SHENSIG1",
+  check(sidecar_data ~= nil and sidecar_data:sub(1, 8) == "SHENSIG2",
         "#46: a cold boot writes the stdlib signature sidecar")
   check(kwarm == ref, "#46: WARM kernel-bytecode-cache + signature sidecar boot == uncached boot")
   check(kwarm2 == ref, "#46: warm boot with a fresh fasl dir == uncached boot")
@@ -129,7 +129,7 @@ do
   -- or a half-applied replay.
   do
     local w = io.open(kcache .. ".stlib", "wb")
-    w:write((sidecar_data or "SHENSIG1\n"):sub(1, 4000)); w:close()
+    w:write((sidecar_data or "SHENSIG2\n"):sub(1, 4000)); w:close()
     local damaged = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d1))
     check(damaged == ref, "#46: a truncated signature sidecar falls back to the real declares")
     local again = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d1))
