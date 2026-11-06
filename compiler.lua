@@ -433,8 +433,18 @@ end
 -- A one-parameter lambda needs no MKFUN where APP can recover its arity from
 -- debug.getinfo (is_raw_lambda in prims.lua); Lua 5.1 has no nparams.
 local LAM1_RAW = debug and debug.getinfo and debug.getinfo(print, "u").nparams ~= nil
+-- A compiled lambda called with fewer arguments than it takes sees nil in its last
+-- parameter: nil is never a Shen value. It returns the partial application over what it
+-- got (UPART, prims.lua) rather than run its body with nil. Compiled calls pass all the
+-- arguments or go through APP; this is for a host calling it raw, and for thaw.
+local function upart_guard(params, n)
+  local last = params:match("([%w_]+)%s*$")
+  local given = params:match("^(.*),%s*[%w_]+%s*$")
+  return "if " .. last .. " == nil then local p = UPART(" .. n
+    .. (given and (", " .. given) or "") .. "); return p end "
+end
 local function lam1(params, body)
-  local fn = "function(" .. params .. ") " .. body .. " end"
+  local fn = "function(" .. params .. ") " .. upart_guard(params, 1) .. body .. " end"
   if LAM1_RAW then return fn end
   return "MKFUN(1, " .. fn .. ")"
 end
@@ -2324,13 +2334,14 @@ function cexpr(form, env)
         local plist = table.concat(lns, ", ")
         local fnsrc
         if CTX then
-          fnsrc = "function(" .. plist .. ") " .. counted_body(inner, e2, plist) .. " end"
+          fnsrc = "function(" .. plist .. ") " .. upart_guard(plist, depth)
+            .. counted_body(inner, e2, plist) .. " end"
         else
           local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
           HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
           local bodyc = fn_body_tail(inner, e2)
           HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
-          fnsrc = "function(" .. plist .. ") return " .. bodyc .. " end"
+          fnsrc = "function(" .. plist .. ") " .. upart_guard(plist, depth) .. "return " .. bodyc .. " end"
         end
         return hoist_closed(form, env, "MKFUN(" .. depth .. ", " .. fnsrc .. ")")
       end
@@ -2820,7 +2831,7 @@ local HOT_HELPERS = {
   "ADD", "SUB", "MUL", "DIV", "GT", "LT", "GE", "LE", "EQ", "HD", "TL",
   "APP1", "APP2", "APP3", "APP4", "APP", "MKFUN", "F", "NIL",
   "CUR2", "CUR3", "CUR4", "PRE2", "PRE3", "PRE4", "CUR2P", "CUR3P", "CUR4P",
-  "TRMC_C", "TRMC_T", "CMT", "getmetatable", "setmetatable", "BC",
+  "TRMC_C", "TRMC_T", "CMT", "getmetatable", "setmetatable", "BC", "UPART",
 }
 local function helper_imports(a, b, c)
   -- wide mode budgets its upvalues without these

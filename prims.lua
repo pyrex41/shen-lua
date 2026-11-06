@@ -227,6 +227,21 @@ APP = function(f, ...)
 end
 P.APP, P.MKFUN, P.PARTIAL = APP, MKFUN, PARTIAL
 
+-- What a compiled lambda of n parameters returns when called with fewer (see upart_guard
+-- in compiler.lua): the arguments up to the first nil, partially applied. Called from the
+-- lambda itself, not as a tail call, so level 2 is that lambda.
+local getinfo_f = debug and debug.getinfo
+local function UPART(n, ...)
+  local f = getinfo_f(2, "f").func
+  local have, k = { ... }, 0
+  while k < n - 1 and have[k + 1] ~= nil do k = k + 1 end
+  if FA[f] == nil and n > 1 then FA[f] = n end
+  if k == 0 then return f end
+  for i = k + 1, #have do have[i] = nil end
+  return PARTIAL(f, n, have)
+end
+P.UPART = UPART
+
 -- ---- equality ------------------------------------------------------------
 -- Lists are compared by walking the cdr spine in a loop and recursing only
 -- into elements: the old car-and-cdr recursion was one Lua frame per cell,
@@ -2902,6 +2917,7 @@ local ENV = {
     return F["n->string"](n)
   end,
   BC = boolean_check,
+  UPART = UPART,
   ADDR = function(v, i)
     local w = v[i + 2]
     if w == nil or i < 0 then return F["<-address"](v, i) end
