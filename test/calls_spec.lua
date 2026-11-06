@@ -112,6 +112,27 @@ check("body effects run once per frame across segments",
 defs("(define counted-if N -> (if (= N 0) 0 (do (set frames (+ 1 (value frames))) (+ 1 (counted-if (- N 1))))))")
 check("the same under if", "(do (set frames 0) (counted-if 5000) (value frames))", "5000")
 
+-- CURnP: the function is settled before the last argument runs, as a nested
+-- application settles it, however the call is compiled
+for _, n in ipairs({ "a1", "a2", "a3", "a4", "a5", "a6" }) do
+  defs("(define cp-" .. n .. " X Y -> (+ X Y))")
+  defs("(define cp-r" .. n .. " -> (eval-kl [defun cp-" .. n .. " [(intern \"X\") (intern \"Y\")] 0]))")
+end
+defs("(define cp-tail F -> (F 1 (do (cp-ra1) 2)))")
+defs("(define cp-nontail F -> (+ 0 (F 1 (do (cp-ra2) 2))))")
+defs("(define cp-tail-let -> (let F cp-a3 (F 1 (do (cp-ra3) 2))))")
+defs("(define cp-nontail-let -> (let F cp-a4 (+ 0 (F 1 (do (cp-ra4) 2)))))")
+defs("(define cp-nontail-fn F -> (+ 0 (F 1 (do (cp-ra5) 2))))")
+check("symbol head, tail, last argument rebinds", "(cp-tail cp-a1)", "3")
+check("symbol head, non-tail, last argument rebinds", "(cp-nontail cp-a2)", "3")
+check("let-bound symbol, tail", "(cp-tail-let)", "3")
+check("let-bound symbol, non-tail", "(cp-nontail-let)", "3")
+-- (fn f) is late bound here, on 912596b and on Shen/JIT alike
+check("(fn f), non-tail", "(cp-nontail-fn (fn cp-a5))", "0")
+check("after the rebinding the new definition answers", "(cp-a2 1 2)", "0")
+check("a result of arity 2 is applied to one more argument",
+      "(+ 0 ((let F (/. X Y Z (+ X (+ Y Z))) (F 1)) 2 (do (clog 3) 3)))", "6")
+
 -- a host function has no recorded arity and is called as given
 local P = require("prims")
 P.F["host-count"] = function(...) return select("#", ...) end

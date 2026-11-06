@@ -2985,29 +2985,31 @@ do
   -- order-free. PREn runs the partial applications right then, before an is
   -- evaluated, unless the arity is n, when they cannot run code at all.
   local CUR_DIRECT = setmetatable({}, { __tostring = function() return "#<cur direct>" end })
+  -- a symbol head: the function it names now, wrapped so CURnP can tell it from a
+  -- partial application that happens to have arity n. The last argument may rebind
+  -- the name, and a nested application would already have settled on this one.
+  local CUR_RESOLVED = { __tostring = function() return "#<cur resolved>" end }
   for n = 2, C.MAX_CALLN do
     local ps = {}
     for i = 1, n - 1 do ps[i] = "a" .. i end
     local nested = "g"
     for i = 1, n - 1 do nested = "APP(" .. nested .. ", a" .. i .. ")" end
     local plist = table.concat(ps, ", ")
-    local src = "local F, FA, APP, D, rawget, type, getmetatable, Symbol = ...\n"
+    local src = "local F, FA, APP, D, RESOLVED, rawget, setmetatable, getmetatable, Symbol = ...\n"
       .. "return function(g, " .. plist .. ", ...)\n"
       .. "  if rawget(FA, g) == " .. n .. " then return D end\n"
       .. "  if getmetatable(g) == Symbol then\n"
       .. "    local f = F[g.name]\n"
-      .. "    if f ~= nil and rawget(FA, f) == " .. n .. " then return D end\n"
+      .. "    if f ~= nil and rawget(FA, f) == " .. n .. " then return setmetatable({ f }, RESOLVED) end\n"
       .. "  end\n"
       .. "  return " .. nested .. "\n"
       .. "end, function(g, " .. plist .. ", r, an, ...)\n"
-      .. "  if r == D then\n"
-      .. "    if type(g) == 'function' then return g(" .. plist .. ", an) end\n"
-      .. "    return F[g.name](" .. plist .. ", an)\n"
-      .. "  end\n"
+      .. "  if r == D then return g(" .. plist .. ", an) end\n"
+      .. "  if getmetatable(r) == RESOLVED then return r[1](" .. plist .. ", an) end\n"
       .. "  return APP(r, an)\n"
       .. "end\n"
     ENV["PRE" .. n], ENV["CUR" .. n .. "P"] =
-      assert((loadstring or load)(src, "=CUR" .. n .. "P"))(F, FA, APP, CUR_DIRECT, rawget, type, getmetatable, R.Symbol)
+      assert((loadstring or load)(src, "=CUR" .. n .. "P"))(F, FA, APP, CUR_DIRECT, CUR_RESOLVED, rawget, setmetatable, getmetatable, R.Symbol)
   end
   for n = 1, C.MAX_CALLN do
     local ps = {}
