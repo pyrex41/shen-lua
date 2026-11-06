@@ -23,14 +23,6 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 - **Kernel cache key** covers every codegen switch: `SHEN_UNCURRY`,
   `SHEN_HOIST_LAMBDA`, `SHEN_SINK_COUNT` and `SHEN_FREEZE_CONT` as well as `SHEN_TRMC`.
 
-- **Function values crossing the embedding API.** `shen.eval`, `shen.call`, `shen.fn`,
-  `shen.totable` and the Lua interop marshalers (`lua.call` arguments and so on) now give
-  a function taking any number of arguments, with `f(1)(2)` and `f(1, 2)` both valid, and
-  take it back as the same function. This was needed because uncurried lambdas run their
-  body with nil when a raw call passes too few arguments. A function *inside* a list or
-  vector returned by `shen.eval` is not converted: call it with the new `shen.apply(f,
-  ...)`, not directly. `shen.prims.F[name]` remains the raw function, exact arity only.
-
 ### Fixed (behaviour changes)
 
 - A test that is not a boolean raises: the test of `if` and `cond`, and both operands

@@ -93,14 +93,7 @@ end
 
 function shen.eval(src)
   ensure_boot()
-  return P.host_value(R.seg.call(eval_forms, src))
-end
-
--- a function value coming back from the host is the compiled function it stands for
-local function unwrap_args(n, a, ...)
-  if n == 0 then return end
-  if n == 1 then return P.host_unwrap(a) end
-  return P.host_unwrap(a), unwrap_args(n - 1, ...)
+  return R.seg.call(eval_forms, src)
 end
 
 -- ---- call / fn ------------------------------------------------------------
@@ -112,14 +105,7 @@ function shen.call(name, ...)
   ensure_boot()
   local fn = P.F[name]
   if fn == nil then error("shen.call: undefined function: " .. tostring(name), 2) end
-  return P.host_value(R.seg.call(P.APP, fn, unwrap_args(select("#", ...), ...)))
-end
-
--- Apply a Shen function value to any number of arguments, wherever the host got it:
--- what to use for a function inside a returned list or vector, which is not converted.
-function shen.apply(f, ...)
-  ensure_boot()
-  return P.host_value(R.seg.call(P.APP, P.host_unwrap(f), unwrap_args(select("#", ...), ...)))
+  return R.seg.call(P.APP, fn, ...)
 end
 
 -- A plain Lua callable for the Shen function `name`. The F-table lookup is
@@ -130,7 +116,7 @@ function shen.fn(name)
     ensure_boot()
     local fn = P.F[name]
     if fn == nil then error("shen.fn: undefined function: " .. tostring(name), 2) end
-    return P.host_value(P.APP(fn, unwrap_args(select("#", ...), ...)))
+    return P.APP(fn, ...)
   end
 end
 
@@ -194,7 +180,7 @@ function shen.totable(l)
   local out, i = {}, 0
   while R.is_cons(l) do
     i = i + 1
-    out[i] = P.host_value(l[1])
+    out[i] = l[1]
     l = l[2]
   end
   if l ~= R.NIL then error("shen.totable: improper list (tail " .. R.to_str(l) .. ")", 2) end

@@ -145,8 +145,7 @@ end
 
 to_lua_nested = function(v)
   local t = type(v)
-  if t == "function" then return P.host_value(v) end
-  if t ~= "table" then return v end       -- number/string/boolean/nil
+  if t ~= "table" then return v end       -- number/string/boolean/function/nil
   if v == R.NIL then return {} end        -- () as a list ELEMENT: empty array
   local mt = getmetatable(v)
   if mt == LuaBox then return v[1] end
@@ -191,8 +190,7 @@ end
 local function to_shen(v)
   if v == nil then return R.NIL end
   local t = type(v)
-  if t == "function" then return P.host_unwrap(v) end
-  if t == "number" or t == "string" or t == "boolean" then
+  if t == "number" or t == "string" or t == "boolean" or t == "function" then
     return v
   end
   if t == "table" then

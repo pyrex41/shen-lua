@@ -42,7 +42,6 @@ local specs = {
   "test/datatype_consume_spec.lua",
   "test/engine_spec.lua",
   "test/eqterm_spec.lua",
-  "test/embed_values_spec.lua",
   "test/error_robustness_spec.lua",
   "test/eval_order_spec.lua",
   "test/features_spec.lua",

@@ -227,29 +227,6 @@ APP = function(f, ...)
 end
 P.APP, P.MKFUN, P.PARTIAL = APP, MKFUN, PARTIAL
 
--- A compiled function takes exactly its arity: an uncurried lambda called with fewer
--- arguments runs its body with nil. Compiled code gets that right, or goes through APP.
--- A host does not know the arity, so a compiled function crossing the embedding API
--- (shen.lua, lua_interop.lua) becomes one that takes any number of arguments and whose
--- own function results do the same. The same function gives the same wrapper while
--- that wrapper lives. A host's own function has neither arity nor compiled source and
--- crosses as itself.
-local HOST_OF = setmetatable({}, { __mode = "v" })
-local WRAPPED = setmetatable({}, { __mode = "k" })
-local function host_value(v)
-  if type(v) ~= "function" or WRAPPED[v] then return v end
-  local w = HOST_OF[v]
-  if w then return w end
-  local ar = rawget(FA, v)
-  if ar == nil and not is_raw_lambda(v) then return v end
-  w = function(...) return host_value(R.seg.call(APP, v, ...)) end
-  HOST_OF[v], WRAPPED[w] = w, v
-  FA[w] = ar
-  return w
-end
-P.host_value = host_value
-function P.host_unwrap(v) return WRAPPED[v] or v end
-
 -- ---- equality ------------------------------------------------------------
 -- Lists are compared by walking the cdr spine in a loop and recursing only
 -- into elements: the old car-and-cdr recursion was one Lua frame per cell,
