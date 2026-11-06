@@ -2905,10 +2905,10 @@ local ENV = {
   -- values of another type left the trace on every element.
   -- The range check reads the length word and not the slot, for the same reason:
   -- loading the slot to compare it with nil guards its type too. A write at the
-  -- slot itself is what F["address->"] checks on the way to raising.
+  -- slot itself is what F["address->"] checks on the way to raising. A cons has
+  -- v[1] too, so anything but a vector takes that path whatever its head is.
   ADSET = function(v, i, x)
-    local n = v[1]
-    if type(n) ~= "number" or i < 0 or i >= n or i % 1 ~= 0 then return F["address->"](v, i, x) end
+    if getmetatable(v) ~= Vmt or i < 0 or i >= v[1] or i % 1 ~= 0 then return F["address->"](v, i, x) end
     rawset(v, i + 2, x); return v
   end,
   VMT = Vmt,

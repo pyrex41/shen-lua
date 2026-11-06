@@ -136,6 +136,9 @@ check(eval("(contract-load (contract-store (absvector 2) 1 7) 1)") == 7, "in-ran
 check(eval("(let F address-> (<-address (F (absvector 1) 0 8) 0))") == 8, "address-> through a variable")
 check((caught("(let F address-> (F (absvector 1) 3 8))") or ""):find("is not a valid index", 1, true) ~= nil,
       "address-> through a variable checks too")
+check((caught("(address-> (absvector 2) 2 8)") or ""):find("is not a valid index", 1, true) ~= nil, "address-> one past the end raises")
+check((caught("(address-> (absvector 2) 1.5 8)") or ""):find("is not a valid index", 1, true) ~= nil, "address-> at a fraction raises")
+check((caught("(address-> (cons 5 []) 3 8)") or ""):find("is not a valid index", 1, true) ~= nil, "address-> past a cons with a number at its head raises")
 
 io.write(string.format("contract_spec: %d passed, %d failed\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)
