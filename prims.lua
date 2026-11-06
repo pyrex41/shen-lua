@@ -6,6 +6,7 @@ local C = require("compiler")
 local cons, is_cons, NIL = R.cons, R.is_cons, R.NIL
 local Symbol, intern, is_symbol = R.Symbol, R.intern, R.is_symbol
 local Excn, mkexcn = R.Excn, R.mkexcn
+local rawset = rawset
 local Vmt = R.Vmt        -- absvector metatable (pure-array layout; shared with runtime.lua)
 -- counted non-tail calls (runtime.lua stack segments, #93), written inline
 -- where a native calls back into Shen code (a shared trampoline would look
@@ -2640,7 +2641,10 @@ local ENV = {
     if w == nil then return F["<-address"](v, i) end
     return w
   end,
-  ADSET = function(v, i, x) v[i + 2] = x; return v end,
+  -- rawset: a table with a metatable (Vmt has no metamethods) makes the trace
+  -- guard the type of the old value in the slot, so overwriting a vector with
+  -- values of another type left the trace on every element.
+  ADSET = function(v, i, x) rawset(v, i + 2, x); return v end,
   VMT = Vmt,
   -- allow compiled code to reach a few Lua builtins safely
   -- trap-error's pcall restores the stack-segment count (runtime.lua, #93)
