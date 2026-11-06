@@ -1274,6 +1274,29 @@ end
 -- partials / variables, arity mismatches, shadowed name) keeps ordinary
 -- codegen and still works: the loop only replaces the tail self-call; the
 -- function value installed in F is unchanged.
+-- A loop's accumulator, (f V (+ V E)) with E not a literal, may leave int32
+-- range. Under dual-number LuaJIT (arm64) the loop's trace is specialised to an
+-- int V, and once V is a double every iteration fails that guard and runs the
+-- loop's head plus a side trace, about 20 times the cost of the loop itself.
+-- ADDF and friends always give a double, so the trace is specialised to that.
+local ACCUMULATOR = { ["+"] = "ADD", ["-"] = "SUB", ["*"] = "MUL" }
+local function accumulator(form, lname, env, code)
+  if not is_cons(form) or not is_symbol(car(form)) then return code end
+  local helper = ACCUMULATOR[car(form).name]
+  if not helper or env[car(form).name] then return code end
+  local operands = to_array(cdr(form))
+  if #operands ~= 2 then return code end
+  local a, b = operands[1], operands[2]
+  local function is_param(x) return is_symbol(x) and env[x.name] == lname end
+  local other
+  if is_param(a) then other = b
+  elseif is_param(b) and helper ~= "SUB" then other = a
+  else return code end
+  if type(other) == "number" then return code end
+  if code:sub(1, #helper + 1) ~= helper .. "(" then return code end
+  return helper .. "F" .. code:sub(#helper + 1)
+end
+
 local function try_self_tail(form, env)
   if not SELF then return nil end
   local head = car(form)
@@ -1292,7 +1315,9 @@ local function try_self_tail(form, env)
   end
   if #args == 0 then return "goto tco" end
   local cargs = {}
-  for i = 1, #args do cargs[i] = cexpr(args[i], env) end
+  for i = 1, #args do
+    cargs[i] = accumulator(args[i], SELF.lnames[i], env, cexpr(args[i], env))
+  end
   return table.concat(SELF.lnames, ", ") .. " = "
          .. table.concat(cargs, ", ") .. "; goto tco"
 end

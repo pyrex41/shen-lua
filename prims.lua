@@ -7,6 +7,7 @@ local cons, is_cons, NIL = R.cons, R.is_cons, R.NIL
 local Symbol, intern, is_symbol = R.Symbol, R.intern, R.is_symbol
 local Excn, mkexcn = R.Excn, R.mkexcn
 local rawset = rawset
+local NEGZERO = -0.0
 local Vmt = R.Vmt        -- absvector metatable (pure-array layout; shared with runtime.lua)
 -- counted non-tail calls (runtime.lua stack segments, #93), written inline
 -- where a native calls back into Shen code (a shared trampoline would look
@@ -2502,6 +2503,11 @@ local ENV = {
   GE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a>=b end return F[">="](a,b) end,
   LE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a<=b end return F["<="](a,b) end,
   EQ  = function(a,b) if type(a)=="number" then return a==b end return equal(a,b) end,
+  -- A loop's accumulator (compiler.lua accumulator): the same values as ADD,
+  -- SUB and MUL, always as a double. x + -0.0 is x for every x.
+  ADDF = function(a,b) if type(a)=="number" and type(b)=="number" then return a+(b+NEGZERO) end return F["+"](a,b) end,
+  SUBF = function(a,b) if type(a)=="number" and type(b)=="number" then return a-(b+NEGZERO) end return F["-"](a,b) end,
+  MULF = function(a,b) if type(a)=="number" and type(b)=="number" then return a*(b+NEGZERO) end return F["*"](a,b) end,
   -- CALL0..CALLn are generated below the table (see unknown_call in compiler.lua).
   -- TRMC step markers (see TRMC in compiler.lua): never Shen values.
   TRMC_C = setmetatable({}, { __tostring = function() return "#<trmc cons>" end }),
@@ -2711,6 +2717,7 @@ if math.tointeger then
   ENV.SUB = function(a,b) if type(a)=="number" and type(b)=="number" then return a+0.0-b end return F["-"](a,b) end
   ENV.MUL = function(a,b) if type(a)=="number" and type(b)=="number" then return (a+0.0)*b end return F["*"](a,b) end
   ENV.DIV = function(a,b) if type(a)=="number" and type(b)=="number" and b~=0 then return (a+0.0)/b end return F["/"](a,b) end
+  ENV.ADDF, ENV.SUBF, ENV.MULF = ENV.ADD, ENV.SUB, ENV.MUL
 end
 
 local loadstring = loadstring or load
