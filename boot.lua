@@ -1363,8 +1363,13 @@ local function install_fasl()
     -- list each time made a fasl quadratic in its definitions (1500 defines:
     -- 1.1M list cells, 12 of its 14 MB). The recorder runs BEFORE the original
     -- set, so the global still holds the old value: store only what changed.
+    -- A set to the value already there records nothing only if this fasl has recorded
+    -- that value last: the session replaying it need not hold what this one held.
     local old = R.is_symbol(name) and P.GLOBALS[nm]
-    if old and rawequal(old, val) then return nil end
+    rec.last_set = rec.last_set or {}
+    local seen = rec.last_set[nm]
+    rec.last_set[nm] = val
+    if seen ~= nil and rawequal(seen, val) and rawequal(old, val) then return nil end
     if old and R.is_cons(val) and rawequal(val[2], old) then
       return { k = "h", name = name, head = val[1] }
     end

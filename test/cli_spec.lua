@@ -560,5 +560,28 @@ do
   os.remove(p); os.execute("rm -rf " .. sh_quote(fdir))
 end
 
+-- ---------------------------------------------------------------------------
+-- A macro's (set ...) replays on a hit even if the global already held the value when
+-- the file was compiled: the session replaying it may not hold it.
+-- ---------------------------------------------------------------------------
+do
+  local fdir = os.tmpname(); os.remove(fdir)
+  local p = os.tmpname() .. ".shen"
+  local fh = io.open(p, "w")
+  fh:write("(defmacro fa-mm [fa-mark X] -> (do (set fa-cfg 5) X))\n"
+    .. '(output "~S~%" (fa-mark 1))\n'
+    .. '(output "cfg=~S~%" (trap-error (value fa-cfg) (/. E unset)))\n'); fh:close()
+  local envp = "env SHEN_FASL_DIR=" .. sh_quote(fdir) .. " "
+  local shen_bin = "luajit " .. sh_quote(here .. "bin/shen")
+  local off = run("env SHEN_FASL=off " .. shen_bin .. " --hush-load " .. sh_quote(p))
+  local cold = run(envp .. shen_bin .. " -e '(set fa-cfg 5)' --hush-load " .. sh_quote(p))
+  local warm = run(envp .. "SHEN_FASL_DEBUG=1 " .. shen_bin .. " --hush-load " .. sh_quote(p))
+  check(off:find("cfg=5", 1, true) ~= nil, "macro set: uncached: " .. off)
+  check(cold:find("cfg=5", 1, true) ~= nil, "macro set: compile run: " .. cold)
+  check(warm:find("[fasl] hit", 1, true) ~= nil, "macro set: second run is a fasl HIT: " .. warm)
+  check(warm:find("cfg=5", 1, true) ~= nil, "macro set: replay in a fresh session matches: " .. warm)
+  os.remove(p); os.execute("rm -rf " .. sh_quote(fdir))
+end
+
 io.write(string.format("cli_spec: %d pass, %d fail\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)
