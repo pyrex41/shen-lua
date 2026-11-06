@@ -5,6 +5,8 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-05
+
 ### Changed
 
 - **Kernel: ShenOSKernel 43.2** (community `Shen-Language/shen-sources`, tag
@@ -16,8 +18,6 @@ Notable changes to shen-lua. Release notes for earlier versions are under
   path in `shen.by-hypothesis-h` are unaffected. `tests/` gains upstream's
   `benchmark-coverage.shen`. `bin/yggdrasil-build.lua` now expects manifest
   `kernel-version=43.2`.
-
-### Changed
 
 - **Kernel: ShenOSKernel 43.1 at upstream `ec16a9f`** (the 43.1 release plus
   shen-sources#117): `shen.by-hypothesis` and `shen.search-user-datatypes`
