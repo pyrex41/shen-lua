@@ -327,10 +327,50 @@ do
   local function pack(...) return { n = select("#", ...), ... } end
   local S = { SD = SD, FRAMES = SEG_FRAMES }
 
-  -- Run f(...) on a fresh coroutine stack and return its value. Errors are
-  -- rethrown unchanged (Shen exception objects included); a yield from
-  -- inside (an embedding host's) is passed through to the enclosing
-  -- coroutine.
+  -- Run f(...) on a coroutine stack of its own and return its value. Errors
+  -- are rethrown unchanged (Shen exception objects included); a yield from
+  -- inside (an embedding host's) is passed through to the enclosing coroutine.
+  --
+  -- Finished segments are reused. A deep Prolog query or recursion opens a
+  -- segment every few hundred frames, and a fresh coroutine costs its object
+  -- plus a stack regrown from nothing by doubling. A reused one keeps its
+  -- stack, which the collector still shrinks when it stays idle. The pcall in
+  -- seg_body keeps the coroutine alive across an error; DONE tells a finished
+  -- job from a host's yield. A segment left suspended never comes back here.
+  local DONE = {}
+  local pool, npool = {}, 0
+  local POOL_MAX = 32
+  local function seg_body(f, ...)
+    return seg_body(co_yield(DONE, pcall(f, ...)))
+  end
+  local function seg_host(co, res)          -- cold: a host's yield inside f
+    while res[1] and res[2] ~= DONE do
+      if co_status(co) == "dead" then break end
+      local up = pack(pcall(co_yield, unpack(res, 2, res.n)))
+      if not up[1] then return up end       -- no coroutine to yield to
+      res = pack(co_resume(co, unpack(up, 2, up.n)))
+    end
+    return res
+  end
+  local function seg_done(co, saved, saved_n, ok, tag, pok, v, ...)
+    if not (ok and tag == DONE) then
+      local res = seg_host(co, pack(ok, tag, pok, v, ...))
+      if res[1] and res[2] == DONE then
+        ok, tag, pok, v = true, DONE, res[3], res[4]
+      elseif res[1] then                    -- body returned: cannot happen
+        ok, tag, pok, v = true, DONE, true, res[2]
+      else
+        ok, tag, pok, v = true, nil, false, res[2]
+      end
+    end
+    -- assign, not decrement: segments abandoned while suspended never return
+    SD[1], nseg = saved, saved_n
+    if tag == DONE and npool < POOL_MAX then
+      npool = npool + 1; pool[npool] = co
+    end
+    if not pok then error(v, 0) end
+    return v
+  end
   function S.run(f, ...)
     if nseg >= SEG_MAX then
       ERR("Lua stack depth limit exceeded (" .. SEG_MAX .. " stack segments)")
@@ -338,17 +378,13 @@ do
     local saved, saved_n = SD[1], nseg
     nseg = nseg + 1; SD[1] = 0
     total = total + 1
-    local co = co_create(f)
-    local res = pack(co_resume(co, ...))
-    while res[1] and co_status(co) ~= "dead" do
-      local up = pack(pcall(co_yield, unpack(res, 2, res.n)))
-      if not up[1] then res = up; break end   -- no coroutine to yield to
-      res = pack(co_resume(co, unpack(up, 2, up.n)))
+    local co
+    if npool > 0 then
+      co = pool[npool]; pool[npool] = nil; npool = npool - 1
+    else
+      co = co_create(seg_body)
     end
-    -- assign, not decrement: segments abandoned while suspended never return
-    SD[1], nseg = saved, saved_n
-    if not res[1] then error(res[2], 0) end
-    return res[2]
+    return seg_done(co, saved, saved_n, co_resume(co, f, ...))
   end
   local run = S.run
   -- S.run for the function that called it (a lambda has no name to pass)
