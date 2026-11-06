@@ -728,6 +728,11 @@ local function with_cons_facts(test, env, f, ...)
   for i = 1, #added do PROVEN[added[i]] = nil end
   return r
 end
+function C.proven_count()
+  local n = 0
+  for _ in pairs(PROVEN) do n = n + 1 end
+  return n
+end
 local function proven_cons(form, env)
   local k = chain_key(form, env)
   return k ~= nil and PROVEN[k] == true
@@ -2980,6 +2985,7 @@ local function atomic_compile(arity_name, f, ...)
   IN_IMPL, DEFUN_NAME, FREF_LIST, FREF_MAP, CCACHE, HOIST, FNL = s_in, s_dn, s_fl, s_fm, s_cc, s_hoist, s_fnl
   WIDE, TAIL_FORM = s_wide, s_tf
   VALUE_BODY, VALUE_NEXT = s_value, false
+  for k in pairs(PROVEN) do PROVEN[k] = nil end
   if arity_name then C.ARITY[arity_name] = s_arity end
   error(res, 0)
 end

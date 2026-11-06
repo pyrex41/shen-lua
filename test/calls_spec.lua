@@ -165,6 +165,18 @@ do
   if R.is_cons(v) then npass = npass + 1 else nfail = nfail + 1; print("FAIL lambda from a defun, 2 args") end
 end
 
+-- a compile that raises leaves no facts behind
+do
+  local C = require("compiler")
+  local before = C.proven_count()
+  local P = require("prims")
+  local form = P.F["hd"](P.F["read-from-string"]("(defun pv-bad (A) (if (cons? A) (do) 1))"))
+  local ok = pcall(C.compile_top, form)
+  if not ok then npass = npass + 1 else nfail = nfail + 1; print("FAIL the malformed form did not raise") end
+  if C.proven_count() == before then npass = npass + 1
+  else nfail = nfail + 1; print("FAIL proven facts left after a failed compile: " .. C.proven_count()) end
+end
+
 -- a host function has no recorded arity and is called as given
 local P = require("prims")
 P.F["host-count"] = function(...) return select("#", ...) end
