@@ -352,9 +352,13 @@ do
     end
     return res
   end
-  local function seg_done(co, saved, saved_n, ok, tag, pok, v, ...)
+  -- PUC Lua hooks are per thread, and one set during a job would stay on a pooled
+  -- coroutine. LuaJIT's are global.
+  local thread_hook = not jit and debug and debug.gethook
+  local function seg_done(co, saved, saved_n, ...)
+    local ok, tag, pok, v = ...
     if not (ok and tag == DONE) then
-      local res = seg_host(co, pack(ok, tag, pok, v, ...))
+      local res = seg_host(co, pack(...))
       if res[1] and res[2] == DONE then
         ok, tag, pok, v = true, DONE, res[3], res[4]
       elseif res[1] then                    -- body returned: cannot happen
@@ -365,7 +369,7 @@ do
     end
     -- assign, not decrement: segments abandoned while suspended never return
     SD[1], nseg = saved, saved_n
-    if tag == DONE and npool < POOL_MAX then
+    if tag == DONE and npool < POOL_MAX and not (thread_hook and thread_hook(co)) then
       npool = npool + 1; pool[npool] = co
     end
     if not pok then error(v, 0) end
