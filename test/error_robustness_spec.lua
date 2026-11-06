@@ -114,6 +114,28 @@ evs("(define rob-iota 0 V A -> A N V A -> (rob-iota (- N 1) V [V | A]))")
 check(evs("(rob-all (rob-iota 3000000 true []))") == "true", "and: a tail call to itself keeps its frame")
 check(evs("(rob-none (rob-iota 3000000 false []))") == "false", "or: a tail call to itself keeps its frame")
 raises_boolean("(rob-all [true 1 true])")
+-- so does one through another function, however deep
+evs("(define rob-ev? 0 -> true N -> (and (number? N) (rob-od? (- N 1))))")
+evs("(define rob-od? 0 -> false N -> (and (number? N) (rob-ev? (- N 1))))")
+evs("(define rob-ev2? 0 -> false N -> (or (not (number? N)) (rob-od2? (- N 1))))")
+evs("(define rob-od2? 0 -> false N -> (or (not (number? N)) (rob-ev2? (- N 1))))")
+check(evs("(rob-ev? 5000000)") == "true", "and: a tail call to another function keeps its frame")
+check(evs("(rob-ev2? 5000000)") == "false", "or: a tail call to another function keeps its frame")
+evs("(define rob-apply F X -> (and true (F X)))")
+check(evs("(rob-apply (/. X (rob-ev? X)) 2)") == "true", "and: a tail call through a variable")
+-- the tail call is unchecked; a test of its result, here or in the caller, is not
+evs("(define rob-last X -> (and true (rob-id X)))")
+evs("(define rob-test X -> (if (rob-last X) yes no))")
+evs("(define rob-inner X -> (if (and true (rob-id X)) yes no))")
+evs("(define rob-let X -> (let Y (and true (rob-id X)) Y))")
+evs("(define rob-prim X -> (and true (+ X 1)))")
+check(evs("(rob-last 1)") == "1", "a defun's tail call through and returns its value")
+raises_boolean("(rob-test 1)")
+raises_boolean("(rob-inner 1)")
+raises_boolean("(rob-let 1)")
+raises_boolean("(rob-prim 1)")
+check(evs("(rob-test true)") == "yes", "a test of a boolean tail result passes")
+check(evs("(rob-inner false)") == "no", "and in a test passes false")
 
 -- ---------------------------------------------------------------------------
 -- Adversarial sequence: drive several errors in a row through the SAME booted

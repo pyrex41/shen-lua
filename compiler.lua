@@ -502,6 +502,10 @@ end
 -- in scope). Self-calls use `impl` so recursion does not hash F at all.
 local IN_IMPL = false
 local DEFUN_NAME = nil
+-- The body being compiled is a control form in value position, called and
+-- returned from as a helper (see cexpr), so nothing in it is a tail call of the
+-- enclosing function. VALUE_NEXT asks hoist_kc to mark the body it compiles.
+local VALUE_BODY, VALUE_NEXT = false, false
 local FREF_LIST = {}
 local FREF_MAP = {}
 local function callee_ref(name)
@@ -2005,6 +2009,8 @@ local function hoist_kc(form, env, lnames, own)
   local saved_cont = push_inline_cont()
   remap_cont(remap)
   local saved_impl, saved_cnt = IN_IMPL, CNT
+  local saved_value = VALUE_BODY
+  VALUE_BODY, VALUE_NEXT = VALUE_NEXT, false
   SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true, nslots); IN_IMPL = false
   local owner
   if own then
@@ -2018,6 +2024,7 @@ local function hoist_kc(form, env, lnames, own)
   if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
   SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
   CONT = saved_cont; IN_IMPL = saved_impl; CNT = saved_cnt
+  VALUE_BODY = saved_value
   local idx = #CTX.cbodies + 1
   if owner and owner.used then
     local dv = gen("d")
@@ -2081,10 +2088,13 @@ local function counted_body(form, env, params)
   local saved_self, saved_h, saved_cc, saved_fnl = SELF, HOIST, CCACHE, FNL
   local saved_cont = push_inline_cont()
   local saved_impl, saved_cnt = IN_IMPL, CNT
+  local saved_value = VALUE_BODY
+  VALUE_BODY = false
   SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true, 1); IN_IMPL = false
   local owner = { used = false, tok = "\1" .. gen("k") .. "\1" }
   CNT = { owner = owner, ret = true }
   local body = ctail(form, env)
+  VALUE_BODY = saved_value
   if FNL.pt then body = "local PT = {}; " .. body end
   SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
   CONT = saved_cont; IN_IMPL = saved_impl; CNT = saved_cnt
@@ -2164,6 +2174,7 @@ function cexpr(form, env)
         -- would illegally cross the function boundary. Likewise reset the
         -- chain-hoist state: KC[i] has its own local budget, and locals cached
         -- in the enclosing function are not in scope here.
+        VALUE_NEXT = true
         local call = hoist_kc(form, env)
         -- The KC call itself may raise or side-effect: later siblings in the
         -- enclosing statement must not hoist chains ahead of it.
@@ -2462,21 +2473,36 @@ local function bc(form, env)
   if gives_boolean(form, env) then return form end
   return R.cons(R.intern("shen.bc"), R.cons(form, NIL))
 end
--- The last operand of and/or is in tail position. Its check goes to the leaves of
--- its control forms, so they keep their shape, and a call to the function being
--- compiled stays a tail call: a loop written (and (p X) (loop Xs)) must not grow the
--- stack. The result of that call reaches whoever tests this function's result.
+-- The last operand of and/or is in tail position, and a tail call stays one:
+-- (and (p X) (next Xs)) must not grow the stack, whichever function it calls. So
+-- in a defun's tail the check goes to the leaves of its control forms, and a call
+-- is left unchecked. Its value is this function's result, which whoever tests it
+-- checks; only a caller that uses the result without testing it can see a
+-- non-boolean. In a top-level form or a control form in value position nothing is a
+-- tail call, so a call there is checked as well.
+local NOT_A_TAIL_CALL = {}
+for _, n in ipairs({
+  "trap-error", "lambda", "freeze", "+", "-", "*", "/", "cons", "hd", "tl", "@p",
+  "@v", "@s", "cn", "str", "pos", "tlstr", "intern", "absvector", "<-address",
+  "address->", "n->string", "string->n", "value", "set", "get-time",
+}) do NOT_A_TAIL_CALL[n] = true end
+local function leave_as_tail_call(h, env)
+  if not DEFUN_NAME or VALUE_BODY then return false end
+  return not (is_symbol(h) and not env[h.name] and NOT_A_TAIL_CALL[h.name])
+end
 local function bc_tail(form, env)
   if not is_cons(form) then return bc(form, env) end
   local h = car(form)
-  if not is_symbol(h) or env[h.name] then return bc(form, env) end
+  if not is_symbol(h) or env[h.name] then
+    if gives_boolean(form, env) or not leave_as_tail_call(h, env) then return bc(form, env) end
+    return form
+  end
   local op = h.name
   local function rebuild(items)
     local r = NIL
     for i = #items, 1, -1 do r = R.cons(items[i], r) end
     return r
   end
-  if op == DEFUN_NAME and #to_array(cdr(form)) == C.ARITY[op] then return form end
   if op == "if" then
     local a = to_array(form)
     if #a == 4 then return rebuild({ h, a[2], bc_tail(a[3], env), bc_tail(a[4], env) }) end
@@ -2504,7 +2530,8 @@ local function bc_tail(form, env)
     a[2] = bc_tail(a[2], env)
     return rebuild(a)
   end
-  return bc(form, env)
+  if gives_boolean(form, env) or not leave_as_tail_call(h, env) then return bc(form, env) end
+  return form
 end
 
 -- ------------------------------------------------------------------
@@ -2940,12 +2967,14 @@ local function atomic_compile(arity_name, f, ...)
   local s_ctx, s_self, s_cont, s_ntcount, s_cnt, s_tcount, s_tailpre = CTX, SELF, CONT, NTCOUNT, CNT, TCOUNT, TAILPRE
   local s_in, s_dn, s_fl, s_fm, s_cc, s_hoist, s_fnl = IN_IMPL, DEFUN_NAME, FREF_LIST, FREF_MAP, CCACHE, HOIST, FNL
   local s_wide, s_tf = WIDE, TAIL_FORM
+  local s_value = VALUE_BODY
   local s_arity = arity_name and C.ARITY[arity_name]
   local ok, res = pcall(f, ...)
   if ok then return res end
   CTX, SELF, CONT, NTCOUNT, CNT, TCOUNT, TAILPRE = s_ctx, s_self, s_cont, s_ntcount, s_cnt, s_tcount, s_tailpre
   IN_IMPL, DEFUN_NAME, FREF_LIST, FREF_MAP, CCACHE, HOIST, FNL = s_in, s_dn, s_fl, s_fm, s_cc, s_hoist, s_fnl
   WIDE, TAIL_FORM = s_wide, s_tf
+  VALUE_BODY, VALUE_NEXT = s_value, false
   if arity_name then C.ARITY[arity_name] = s_arity end
   error(res, 0)
 end

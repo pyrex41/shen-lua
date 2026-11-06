@@ -27,6 +27,8 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 - A test that is not a boolean raises: the test of `if` and `cond`, and both operands
   of `and`/`or`. `(if 1 a b)` used to give `a`.
+  A call in tail position as the last operand of `and`/`or` in a defun stays a tail
+  call and is not checked itself, so a test of the function's result is what raises.
 - `(str "a")` gives `"\"a\""`, quoted, as on the other ports.
 - `absvector` rejects a length that is not a non-negative integer; `address->` and
   `<-address` reject an index outside the vector; `set`/`value` raise on a non-symbol;
