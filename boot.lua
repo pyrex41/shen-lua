@@ -117,12 +117,18 @@ do
       -- the kernel suite peaked at was 36 MB live. So at the end of each cycle
       -- aim for live + max(live, 48 MB) of heap, within pause 150..400. A small
       -- heap, where the allocation-heavy benchmarks live, stays at 400.
+      -- A pause that is not the one set here was set by the host: leave it, and
+      -- stop adapting.
       local GROW_KB = 48 * 1024
+      local last = 400
       local function arm()
         local sentinel = newproxy(true)
         getmetatable(sentinel).__gc = function()
           local want = 100 + 100 * GROW_KB / collectgarbage("count")
-          collectgarbage("setpause", want > 400 and 400 or want < 150 and 150 or want)
+          want = math.floor(want > 400 and 400 or want < 150 and 150 or want)
+          local current = collectgarbage("setpause", want)
+          if current ~= last then collectgarbage("setpause", current); return end
+          last = want
           arm()
         end
       end
