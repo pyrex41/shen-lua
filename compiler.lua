@@ -506,6 +506,7 @@ local DEFUN_NAME = nil
 -- returned from as a helper (see cexpr), so nothing in it is a tail call of the
 -- enclosing function. VALUE_NEXT asks hoist_kc to mark the body it compiles.
 local VALUE_BODY, VALUE_NEXT = false, false
+local IN_FN_BODY = false
 local FREF_LIST = {}
 local FREF_MAP = {}
 local function callee_ref(name)
@@ -1096,6 +1097,16 @@ local function gives_boolean(form, env)
   if not (is_symbol(h) and not env[h.name]) then return false end
   local want = BOOLEAN_FORMS[h.name]
   return want ~= nil and #to_array(cdr(form)) == want
+end
+
+-- cexpr_tail for the whole body of a lambda or a freeze: whatever enclosed it, its
+-- tail is a tail call of a function of its own (see leave_as_tail_call)
+local function fn_body_tail(form, env)
+  local saved_fn, saved_value = IN_FN_BODY, VALUE_BODY
+  IN_FN_BODY, VALUE_BODY = true, false
+  local s = cexpr_tail(form, env)
+  IN_FN_BODY, VALUE_BODY = saved_fn, saved_value
+  return s
 end
 
 -- compile a call (F a1..an) in expression position; `tail`: it is the
@@ -2261,7 +2272,10 @@ function cexpr(form, env)
       local saved_cont = push_inline_cont()
       local saved_impl = IN_IMPL
       SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true); IN_IMPL = false
+      local saved_value = VALUE_BODY
+      VALUE_BODY = VALUE_BODY or form ~= TAIL_FORM
       local body_stmts = ctail(form, env)
+      VALUE_BODY = saved_value
       if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
       SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
       CONT = saved_cont; IN_IMPL = saved_impl
@@ -2292,7 +2306,7 @@ function cexpr(form, env)
         for i = 1, depth do e2 = extend(e2, vars[i].name, t .. "[" .. i .. "]") end
         local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
         HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
-        local bodyc = cexpr_tail(inner, e2)
+        local bodyc = fn_body_tail(inner, e2)
         HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
         return "CURRY(" .. depth .. ", function(" .. t .. ") return " .. bodyc .. " end)"
       end
@@ -2314,7 +2328,7 @@ function cexpr(form, env)
         else
           local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
           HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
-          local bodyc = cexpr_tail(inner, e2)
+          local bodyc = fn_body_tail(inner, e2)
           HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
           fnsrc = "function(" .. plist .. ") return " .. bodyc .. " end"
         end
@@ -2340,7 +2354,7 @@ function cexpr(form, env)
           local saved_h, saved_impl, saved_cont, saved_cnt = HOIST, IN_IMPL, CONT, CNT
           push_inline_cont(); remap_cont(remap)
           HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
-          local bodyc = cexpr_tail(body, extend(remap_env(env, remap), v.name, ln))
+          local bodyc = fn_body_tail(body, extend(remap_env(env, remap), v.name, ln))
           HOIST = saved_h; IN_IMPL = saved_impl; CONT = saved_cont; CNT = saved_cnt
           local idx = #CTX.cbodies + 1
           CTX.cbodies[idx] = "function(" .. ln .. ", " .. t .. ") return " .. bodyc .. " end"
@@ -2356,7 +2370,7 @@ function cexpr(form, env)
       end
       local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
       HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
-      local bodyc = cexpr_tail(body, e2)
+      local bodyc = fn_body_tail(body, e2)
       HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
       return lam1(ln, "return " .. bodyc)
     elseif op == "freeze" then
@@ -2379,7 +2393,7 @@ function cexpr(form, env)
         local saved_cont = CONT
         if remap then push_inline_cont(); remap_cont(remap) end
         HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
-        local body_str = cexpr_tail(body, remap_env(env, remap))
+        local body_str = fn_body_tail(body, remap_env(env, remap))
         HOIST = saved_h; IN_IMPL = saved_impl; CONT = saved_cont; CNT = saved_cnt
         local idx = #CTX.cbodies + 1
         CTX.cbodies[idx] = "function(" .. params .. ") return "
@@ -2389,7 +2403,7 @@ function cexpr(form, env)
       end
       local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
       HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
-      local bodyc = cexpr_tail(body, env)
+      local bodyc = fn_body_tail(body, env)
       HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
       return "MKFUN(0, function() return " .. bodyc .. " end)"
     elseif op == "defun" then
@@ -2542,8 +2556,9 @@ end
 -- in a defun's tail the check goes to the leaves of its control forms, and a call
 -- is left unchecked. Its value is this function's result, which whoever tests it
 -- checks; only a caller that uses the result without testing it can see a
--- non-boolean. In a top-level form or a control form in value position nothing is a
--- tail call, so a call there is checked as well.
+-- non-boolean. The same goes for a lambda or freeze body with no enclosing defun. In a
+-- top-level form or a control form in value position nothing is a tail call, so a call
+-- there is checked as well.
 local NOT_A_TAIL_CALL = {}
 for _, n in ipairs({
   "trap-error", "lambda", "freeze", "+", "-", "*", "/", "cons", "hd", "tl", "@p",
@@ -2551,7 +2566,7 @@ for _, n in ipairs({
   "address->", "n->string", "string->n", "value", "set", "get-time",
 }) do NOT_A_TAIL_CALL[n] = true end
 local function leave_as_tail_call(h, env)
-  if not DEFUN_NAME or VALUE_BODY then return false end
+  if VALUE_BODY or not (DEFUN_NAME or IN_FN_BODY) then return false end
   return not (is_symbol(h) and not env[h.name] and NOT_A_TAIL_CALL[h.name])
 end
 local function bc_tail(form, env)
@@ -3031,7 +3046,7 @@ local function atomic_compile(arity_name, f, ...)
   local s_ctx, s_self, s_cont, s_ntcount, s_cnt, s_tcount, s_tailpre = CTX, SELF, CONT, NTCOUNT, CNT, TCOUNT, TAILPRE
   local s_in, s_dn, s_fl, s_fm, s_cc, s_hoist, s_fnl = IN_IMPL, DEFUN_NAME, FREF_LIST, FREF_MAP, CCACHE, HOIST, FNL
   local s_wide, s_tf = WIDE, TAIL_FORM
-  local s_value = VALUE_BODY
+  local s_value, s_fn = VALUE_BODY, IN_FN_BODY
   local s_arity = arity_name and C.ARITY[arity_name]
   local ok, res = pcall(f, ...)
   if ok then return res end
@@ -3039,6 +3054,7 @@ local function atomic_compile(arity_name, f, ...)
   IN_IMPL, DEFUN_NAME, FREF_LIST, FREF_MAP, CCACHE, HOIST, FNL = s_in, s_dn, s_fl, s_fm, s_cc, s_hoist, s_fnl
   WIDE, TAIL_FORM = s_wide, s_tf
   VALUE_BODY, VALUE_NEXT = s_value, false
+  IN_FN_BODY = s_fn
   for k in pairs(PROVEN) do PROVEN[k] = nil end
   if arity_name then C.ARITY[arity_name] = s_arity end
   error(res, 0)
