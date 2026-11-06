@@ -80,11 +80,40 @@ do
 end
 
 -- ---------------------------------------------------------------------------
--- DIVERGENCE: shen-lua's `if` does not require a boolean condition. A non-false
--- value is truthy, so (if 42 1 2) returns 1 (shen-go raises "if requires a
--- boolean"). Lock in the port's behavior.
+-- A non-boolean test raises, for the test of if and cond and both operands of
+-- and/or, wherever the form sits. Short-circuited operands are not evaluated.
 -- ---------------------------------------------------------------------------
-check(evs("(if 42 1 2)") == "1", "if with non-boolean condition is truthy (port divergence)")
+local function raises_boolean(src)
+  local ok, err = pcall(evs, src)
+  local msg = not ok and tostring(type(err) == "table" and (err.msg or err[1]) or err) or ""
+  check(not ok, src .. " raises")
+  if not ok then check(msg:find("is not a boolean", 1, true) ~= nil, src .. " says why, got: " .. msg) end
+end
+for _, src in ipairs({
+  "(if 42 1 2)", '(if "a" 1 2)', "(if [] 1 2)", "(if a 1 2)",
+  "(and 1 true)", "(and true 1)", "(or 1 false)", "(or false 1)",
+  "(cond (1 a) (true b))", "(cond (false a) (2 b))",
+  "(let X 1 (if X a b))", "(let F (/. X (if X a b)) (F 1))", "(do 1 (if 3 a b))",
+  "(let X (and true 1) X)", "(if (and true 1) a b)", "(and true (if true 1 false))",
+  "(and true (let Y 1 Y))", "(and true (do 0 1))", "(or false (cond (true 1)))",
+}) do raises_boolean(src) end
+evs("(define rob-id X -> X)")
+raises_boolean("(if (rob-id 1) a b)")
+raises_boolean("(and (rob-id true) (rob-id 1))")
+check(evs("(if (rob-id true) 1 2)") == "1", "a call that gives true passes")
+check(evs("(if (rob-id false) 1 2)") == "2", "a call that gives false passes")
+check(evs("(and false 1)") == "false", "and does not evaluate past false")
+check(evs("(or true 1)") == "true", "or does not evaluate past true")
+check(evs("(and true (rob-id false))") == "false", "and gives its last operand")
+check(evs("(or false (rob-id true))") == "true", "or gives its last operand")
+check(evs("(if (and true (and (rob-id true) (or false (rob-id true)))) 1 2)") == "1", "nested tests")
+-- a loop through and/or stays a loop, and still reaches a bad element
+evs("(define rob-all [] -> true [X | Xs] -> (and (rob-id X) (rob-all Xs)))")
+evs("(define rob-none [] -> false [X | Xs] -> (or (rob-id X) (rob-none Xs)))")
+evs("(define rob-iota 0 V A -> A N V A -> (rob-iota (- N 1) V [V | A]))")
+check(evs("(rob-all (rob-iota 3000000 true []))") == "true", "and: a tail call to itself keeps its frame")
+check(evs("(rob-none (rob-iota 3000000 false []))") == "false", "or: a tail call to itself keeps its frame")
+raises_boolean("(rob-all [true 1 true])")
 
 -- ---------------------------------------------------------------------------
 -- Adversarial sequence: drive several errors in a row through the SAME booted

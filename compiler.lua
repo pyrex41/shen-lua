@@ -1187,6 +1187,7 @@ local function ccall(form, env, tail)
         if name == "not" and ar == 1 then
           return "not (" .. argstr .. ")"
         end
+        if name == "shen.bc" and ar == 1 then return "BC(" .. argstr .. ")" end
         if name == "hd" and ar == 1 then
           if proven_cons(args[1], env) then return cell_field(argstr, 1) end
           return "HD(" .. argstr .. ")"
@@ -2437,6 +2438,76 @@ local function ctail_depth(form, env)
 end
 
 -- ------------------------------------------------------------------
+-- Strict tests: the test of an if or cond clause and both operands of and/or
+-- must be booleans. (if 1 a b) used to take the then branch with no error, since
+-- Lua treats any value but nil and false as true. A form that can only give a
+-- boolean goes unchecked; anything else is compiled as (shen.bc FORM), which is
+-- BC(FORM), an ordinary call that raises on anything else.
+-- ------------------------------------------------------------------
+local BOOLEAN_FORMS = {}
+for _, n in ipairs({
+  "=", "==", "not", "<", ">", "<=", ">=", "and", "or",
+  "cons?", "empty?", "number?", "string?", "symbol?", "boolean?", "absvector?",
+  "integer?", "variable?", "element?", "tuple?", "vector?", "shen.+string?",
+  "shen.+vector?", "shen.pvar?", "shen.ccons?", "shen.hds=?", "shen.unlocked?",
+  "shen.bc",
+}) do BOOLEAN_FORMS[n] = true end
+local function gives_boolean(form, env)
+  if form == true or form == false then return true end
+  if not is_cons(form) then return false end
+  local h = car(form)
+  return is_symbol(h) and not env[h.name] and BOOLEAN_FORMS[h.name] == true
+end
+local function bc(form, env)
+  if gives_boolean(form, env) then return form end
+  return R.cons(R.intern("shen.bc"), R.cons(form, NIL))
+end
+-- The last operand of and/or is in tail position. Its check goes to the leaves of
+-- its control forms, so they keep their shape, and a call to the function being
+-- compiled stays a tail call: a loop written (and (p X) (loop Xs)) must not grow the
+-- stack. The result of that call reaches whoever tests this function's result.
+local function bc_tail(form, env)
+  if not is_cons(form) then return bc(form, env) end
+  local h = car(form)
+  if not is_symbol(h) or env[h.name] then return bc(form, env) end
+  local op = h.name
+  local function rebuild(items)
+    local r = NIL
+    for i = #items, 1, -1 do r = R.cons(items[i], r) end
+    return r
+  end
+  if op == DEFUN_NAME and #to_array(cdr(form)) == C.ARITY[op] then return form end
+  if op == "if" then
+    local a = to_array(form)
+    if #a == 4 then return rebuild({ h, a[2], bc_tail(a[3], env), bc_tail(a[4], env) }) end
+  elseif op == "cond" then
+    local a = to_array(form)
+    for i = 2, #a do
+      local cl = to_array(a[i])
+      a[i] = rebuild({ cl[1], bc_tail(cl[2], env) })
+    end
+    return rebuild(a)
+  elseif op == "do" then
+    local a = to_array(form)
+    a[#a] = bc_tail(a[#a], env)
+    return rebuild(a)
+  elseif op == "let" then
+    local a = to_array(form)
+    if #a == 4 and is_symbol(a[2]) then
+      local inner = {}
+      for k, v in pairs(env) do inner[k] = v end
+      inner[a[2].name] = a[2].name
+      return rebuild({ h, a[2], a[3], bc_tail(a[4], inner) })
+    end
+  elseif op == "type" then
+    local a = to_array(form)
+    a[2] = bc_tail(a[2], env)
+    return rebuild(a)
+  end
+  return bc(form, env)
+end
+
+-- ------------------------------------------------------------------
 -- ctail : tail position (emits statements; control-flow returns)
 -- ------------------------------------------------------------------
 function ctail(form, env)
@@ -2460,7 +2531,7 @@ function ctail(form, env)
       -- was not taken -- semantics identical to the old fully-nested
       -- `if ... then ... else ... end`, but a then-spine of N pattern tests
       -- now costs O(1) nesting instead of N (LuaJIT parser rejects ~200).
-      local pre, testc = cstmt_expr(test, env)
+      local pre, testc = cstmt_expr(bc(test, env), env)
       local dt = ctail_depth(th, env)
       local de = el and ctail_depth(el, env) or 0
       if de <= dt then
@@ -2495,9 +2566,9 @@ function ctail(form, env)
         local resc = with_cons_facts(test, env, ctail, res, env)
         CCACHE = saved_cc
         if i == 1 then
-          parts[#parts+1] = "if (" .. cexpr(test, env) .. ") then " .. resc
+          parts[#parts+1] = "if (" .. cexpr(bc(test, env), env) .. ") then " .. resc
         else
-          parts[#parts+1] = " elseif (" .. cexpr(test, env) .. ") then " .. resc
+          parts[#parts+1] = " elseif (" .. cexpr(bc(test, env), env) .. ") then " .. resc
         end
       end
       parts[#parts+1] = " else return ERR(\"cond failure\") end"
@@ -2538,13 +2609,13 @@ function ctail(form, env)
       -- inside `then` cost one syntax level per test. The early-exit form is
       -- semantically identical and costs O(1) nesting per link.
       local a = car(cdr(form)); local b = car(cdr(cdr(form)))
-      local pre, ac = cstmt_expr(a, env)
+      local pre, ac = cstmt_expr(bc(a, env), env)
       return pre .. "if not (" .. ac .. ") then " .. ret("false") .. " end "
-             .. with_cons_facts(a, env, ctail, b, env)
+             .. with_cons_facts(a, env, ctail, bc_tail(b, env), env)
     elseif op == "or" then
       local a = car(cdr(form)); local b = car(cdr(cdr(form)))
-      local pre, ac = cstmt_expr(a, env)
-      return pre .. "if (" .. ac .. ") then " .. ret("true") .. " end " .. ctail(b, env)
+      local pre, ac = cstmt_expr(bc(a, env), env)
+      return pre .. "if (" .. ac .. ") then " .. ret("true") .. " end " .. ctail(bc_tail(b, env), env)
     elseif op == "trap-error" then
       local n0 = NTCOUNT
       local opt = try_trap_opt(form, env)
@@ -2643,7 +2714,7 @@ local HOT_HELPERS = {
   "ADD", "SUB", "MUL", "DIV", "GT", "LT", "GE", "LE", "EQ", "HD", "TL",
   "APP1", "APP2", "APP3", "APP4", "APP", "MKFUN", "F", "NIL",
   "CUR2", "CUR3", "CUR4", "PRE2", "PRE3", "PRE4", "CUR2P", "CUR3P", "CUR4P",
-  "TRMC_C", "TRMC_T", "CMT", "getmetatable", "setmetatable",
+  "TRMC_C", "TRMC_T", "CMT", "getmetatable", "setmetatable", "BC",
 }
 local function helper_imports(a, b, c)
   -- wide mode budgets its upvalues without these

@@ -314,6 +314,12 @@ defprim("string?", 1, function(x) return type(x)=="string" end)
 defprim("symbol?", 1, function(x) return is_symbol(x) end)
 defprim("boolean?",1, function(x) return type(x)=="boolean" end)
 defprim("not", 1, function(x) if type(x)~="boolean" then ERR("not: not boolean") end return not x end)
+-- what a test of a form that may not give a boolean compiles to (compiler.lua, bc)
+local function boolean_check(x)
+  if x == true or x == false then return x end
+  ERR(R.to_str(x) .. " is not a boolean")
+end
+defprim("shen.bc", 1, boolean_check)
 defprim("integer?",1, function(x) return type(x)=="number" and x==math.floor(x) and x~=math.huge and x~=-math.huge end)
 
 -- symbols / strings
@@ -2895,6 +2901,7 @@ local ENV = {
     end
     return F["n->string"](n)
   end,
+  BC = boolean_check,
   ADDR = function(v, i)
     local w = v[i + 2]
     if w == nil or i < 0 then return F["<-address"](v, i) end
