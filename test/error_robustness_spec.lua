@@ -97,6 +97,12 @@ for _, src in ipairs({
   "(let X (and true 1) X)", "(if (and true 1) a b)", "(and true (if true 1 false))",
   "(and true (let Y 1 Y))", "(and true (do 0 1))", "(or false (cond (true 1)))",
 }) do raises_boolean(src) end
+-- a predicate with too few arguments is a closure, not a boolean
+for _, src in ipairs({
+  "(if (cons?) a b)", "(if (number?) a b)", "(cond ((cons?) a) (true b))", "(and (number?) true)",
+  "(eval-kl [if [= 1] a b])", "(eval-kl [if [cons?] a b])", "(eval-kl [if [not] a b])",
+  "(eval-kl [if [element? 1] a b])",
+}) do raises_boolean(src) end
 evs("(define rob-id X -> X)")
 raises_boolean("(if (rob-id 1) a b)")
 raises_boolean("(and (rob-id true) (rob-id 1))")

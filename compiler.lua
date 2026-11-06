@@ -2458,17 +2458,21 @@ end
 -- ------------------------------------------------------------------
 local BOOLEAN_FORMS = {}
 for _, n in ipairs({
-  "=", "==", "not", "<", ">", "<=", ">=", "and", "or",
-  "cons?", "empty?", "number?", "string?", "symbol?", "boolean?", "absvector?",
-  "integer?", "variable?", "element?", "tuple?", "vector?", "shen.+string?",
-  "shen.+vector?", "shen.pvar?", "shen.ccons?", "shen.hds=?", "shen.unlocked?",
-  "shen.bc",
-}) do BOOLEAN_FORMS[n] = true end
+  "not", "cons?", "empty?", "number?", "string?", "symbol?", "boolean?", "absvector?",
+  "integer?", "variable?", "tuple?", "vector?", "shen.+string?", "shen.+vector?",
+  "shen.pvar?", "shen.ccons?", "shen.unlocked?", "shen.bc",
+}) do BOOLEAN_FORMS[n] = 1 end
+for _, n in ipairs({ "=", "==", "<", ">", "<=", ">=", "and", "or", "element?", "shen.hds=?" }) do
+  BOOLEAN_FORMS[n] = 2
+end
+-- only a saturated call: a predicate with too few arguments is a closure
 local function gives_boolean(form, env)
   if form == true or form == false then return true end
   if not is_cons(form) then return false end
   local h = car(form)
-  return is_symbol(h) and not env[h.name] and BOOLEAN_FORMS[h.name] == true
+  if not (is_symbol(h) and not env[h.name]) then return false end
+  local want = BOOLEAN_FORMS[h.name]
+  return want ~= nil and #to_array(cdr(form)) == want
 end
 local function bc(form, env)
   if gives_boolean(form, env) then return form end
