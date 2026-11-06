@@ -111,6 +111,11 @@ do
   if gc ~= "off" then
     local pause, stepmul
     if gc and gc ~= "" then pause, stepmul = gc:match("^(%d+),?(%d*)$") end
+    -- Lua 5.5 removed "setpause" and "setstepmul" for "param" (and has no newproxy)
+    if _VERSION == "Lua 5.5" then
+      collectgarbage("param", "pause", tonumber(pause) or 400)
+      collectgarbage("param", "stepmul", tonumber(stepmul ~= "" and stepmul) or 1000)
+    else
     collectgarbage("setpause", tonumber(pause) or 400)
     if not pause and newproxy then
       -- 400 is cheap on a small live heap and wasteful on a big one: the 186 MB
@@ -135,6 +140,7 @@ do
       arm()
     end
     collectgarbage("setstepmul", tonumber(stepmul ~= "" and stepmul) or 1000)
+    end
   end
 end
 

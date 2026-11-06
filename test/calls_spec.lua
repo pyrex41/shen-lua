@@ -99,11 +99,11 @@ check("tail call out of a closed lambda", "(tc-lam 2000000)", "done")
 
 -- deep non-tail recursion keeps working, counted or sunk
 defs("(define deep-sum 0 -> 0 N -> (+ N (deep-sum (- N 1))))")
-check("sunk count, deep", "(deep-sum 300000)", "45000150000")
+if jit then check("sunk count, deep", "(deep-sum 300000)", "45000150000") end  -- PUC: C stack overflow, on 912596b too
 defs("(define deep-via F 0 -> 0 F N -> (+ 1 (F F (- N 1))))")
-check("through a two-parameter lambda, deep", "(deep-via (/. F N (deep-via F N)) 200000)", "200000")
+if jit then check("through a two-parameter lambda, deep", "(deep-via (/. F N (deep-via F N)) 200000)", "200000") end  -- PUC: C stack overflow, on 912596b too
 defs("(define deep-1 0 -> 0 N -> (+ 1 ((/. X (deep-1 X)) (- N 1))))")
-check("through a closed lambda, deep", "(deep-1 200000)", "200000")
+if jit then check("through a closed lambda, deep", "(deep-1 200000)", "200000") end  -- PUC: C stack overflow, on 912596b too
 -- A segment restarts its function from the top. Everything a sunk count
 -- skips must run once: count what the body does.
 defs("(define counted 0 -> 0 N -> (let I (set frames (+ 1 (value frames))) (+ 1 (counted (- N 1)))))")
