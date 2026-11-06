@@ -93,6 +93,13 @@ local sq = shen.fn("square")          -- ordinary Lua callable
 shen.typecheck("[1 2]", "(list number)")
 ```
 
+A function value `shen.eval`, `shen.call` or `shen.fn` returns can be called with any
+number of arguments: `f(1)(2)` and `f(1, 2)` are the same, and passing it back into Shen
+gives Shen the function it made. So do `shen.totable`'s elements and functions passed to
+Lua by `lua.call`. A function inside a list or vector you got any other way is the raw
+compiled one, which takes exactly its arity: apply it with `shen.apply(f, ...)`.
+
+
 `shen.prims` / `shen.runtime` expose `F`, the reader, and the printer.
 
 ### Checked integers at external boundaries
