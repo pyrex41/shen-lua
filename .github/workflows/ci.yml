@@ -14,7 +14,7 @@ on:
 jobs:
   test:
     name: Port specs + kernel certification (LuaJIT)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +36,7 @@ jobs:
 
   coverage:
     name: Coverage (best-effort)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4

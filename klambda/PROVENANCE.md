@@ -1,6 +1,20 @@
 # Provenance of the vendored KLambda kernel
 
-## Current: ShenOSKernel 43.1 at upstream `ec16a9f` (community `shen-sources` line)
+## Current: ShenOSKernel 43.2
+
+- **Repository**: `Shen-Language/shen-sources`, tag `shen-43.2`
+  (tag object `7b7563e5`), commit `e6947f507ebc`
+- **Release asset**: `ShenOSKernel-43.2.tar.gz`
+  - SHA-256: `23c71508f0de24785e1f127ea4fab440081904d81c463090bc642ee840417f32`
+  - All 23 `.kl` files and `tests/` are byte-identical to the extracted archive.
+- `(version)` reports `"43.2"` (set in `init.kl`).
+- Relative to the previous vendoring (43.1 at `ec16a9f`, below) only `init.kl`
+  (version) and `extension-type-annotations.kl` (renumbered generated names)
+  differ; `t-star.kl` is identical. `tests/` adds `benchmark-coverage.shen`.
+
+The records of the earlier imports follow.
+
+## Previous: ShenOSKernel 43.1 at upstream `ec16a9f` (community `shen-sources` line)
 
 The 23 `.kl` files are vendored **byte-identical** from the kernel built at upstream
 `Shen-Language/shen-sources` master `ec16a9f`: the 43.1 release plus the type checker's
