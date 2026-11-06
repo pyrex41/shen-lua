@@ -35,6 +35,7 @@ local specs = {
   "test/certify_spec.lua",
   "test/cli_spec.lua",
   "test/checked_integer_spec.lua",
+  "test/codegen_diff_spec.lua",
   "test/contract_spec.lua",
   "test/seg_pool_spec.lua",
   "test/gc_pause_spec.lua",
