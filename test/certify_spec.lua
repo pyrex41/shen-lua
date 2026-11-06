@@ -34,6 +34,20 @@ case("a wrong answer", '(report "t" 1 1 2 3)\n(reset)\n', 2, 1, "Counters: passe
 case("an error in a test", '(report "t" 1 1 (simple-error "x") 2)\n(reset)\n', 2, 1, "Counters: passed=1 failed=1")
 case("too few tests ran", good, 3, 1, "Counters: passed=2 failed=0")
 case("the suite stops early", '(report "t" 1 1)\n(this is not closed\n', 1, 1, "Counters: passed=")
+-- a kernel with no count on record fails and says what to do
+do
+  suite(good)
+  local src = assert(io.open(here .. "run-kernel-tests.lua")):read("*a")
+  src = src:gsub('%["43%.2"%] = 154', '["0.0"] = 1')
+  local copy = dir .. "/rkt.lua"
+  local f = assert(io.open(copy, "w")); f:write(src); f:close()
+  local cmd = "cd " .. sh_quote(here) .. " && SHEN_TESTS_DIR=" .. sh_quote(dir)
+    .. " SHEN_FASL=off " .. LUA .. " " .. sh_quote(copy)
+  local h = io.popen("{ " .. cmd .. " ; } 2>&1; echo \"__EXIT__:$?\"")
+  local out = h:read("*a"); h:close()
+  check(tonumber(out:match("__EXIT__:(%d+)%s*$")) == 1, "unknown kernel: exit 1\n" .. out:sub(-200))
+  check(out:find("no expected test count for kernel", 1, true) ~= nil, "unknown kernel: says why")
+end
 os.execute("rm -rf " .. sh_quote(dir))
 
 print(("certify_spec: %d pass, %d fail"):format(npass, nfail))

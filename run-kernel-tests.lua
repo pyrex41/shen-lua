@@ -133,9 +133,17 @@ end)
 print("\n=== Test run finished ===")
 print("kerneltests result:", ok2 and "ok" or e2)
 
--- The suite passes only if it finished, nothing failed and every test ran. Bump
--- EXPECTED when a new kernel adds tests; SHEN_EXPECTED_TESTS is for this script's spec.
-local EXPECTED = tonumber(os.getenv("SHEN_EXPECTED_TESTS")) or 154
+-- The suite passes only if it finished, nothing failed and every test ran. The number
+-- of tests belongs to the kernel release: a new kernel needs an entry here.
+-- SHEN_EXPECTED_TESTS is for this script's own spec.
+local EXPECTED_BY_KERNEL = { ["43.2"] = 154 }
+local version = P.F["version"]()
+local EXPECTED = tonumber(os.getenv("SHEN_EXPECTED_TESTS")) or EXPECTED_BY_KERNEL[version]
+if not EXPECTED then
+  print("FAILED: no expected test count for kernel " .. tostring(version)
+        .. "; add it to EXPECTED_BY_KERNEL in run-kernel-tests.lua")
+  os.exit(1)
+end
 print(string.format("Counters: passed=%d failed=%d expected=%d", passed, failed, EXPECTED))
 if not ok2 then print("FAILED: the suite stopped early"); os.exit(1) end
 if failed > 0 then print("FAILED: " .. failed .. " test(s) failed"); os.exit(1) end
