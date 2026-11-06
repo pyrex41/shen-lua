@@ -97,10 +97,16 @@ do
   -- the pause to 400 (heap may grow to 4x live before a full cycle) cuts
   -- suite CPU ~15-20% for about 2x peak RSS (30MB -> 60MB on that suite).
   -- (Past a small heap the pause adapts, below.)
+  -- A stepmul of 1000 finishes each cycle sooner, so less garbage allocated
+  -- during the cycle counts as live toward the next threshold. Same
+  -- instructions and CPU; peak footprint on the kernel suite 186 -> 162 MB, on
+  -- nrev 40-56 -> 38 MB. Each GC step does more work at once, which an embedder
+  -- that cares about pause length may want to set back.
+  -- A larger pause is not a free win: 800,1000 costs hof 1132 MB (from 130) and
+  -- the kernel suite 281 MB, for nrev -4% instructions and -20% CPU.
   -- SHEN_GC=off keeps the host's defaults (embedders that manage the GC
   -- themselves should set it); SHEN_GC="pause[,stepmul]" sets explicit
-  -- values (e.g. SHEN_GC=800,100 buys another ~10% on batch runs at ~110MB;
-  -- SHEN_GC=200 is LuaJIT's default pause).
+  -- values (SHEN_GC=200,200 is LuaJIT's default).
   local gc = os.getenv("SHEN_GC")
   if gc ~= "off" then
     local pause, stepmul
@@ -122,7 +128,7 @@ do
       end
       arm()
     end
-    if stepmul and stepmul ~= "" then collectgarbage("setstepmul", tonumber(stepmul)) end
+    collectgarbage("setstepmul", tonumber(stepmul ~= "" and stepmul) or 1000)
   end
 end
 

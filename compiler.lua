@@ -667,6 +667,55 @@ local function chain_key(form, env)
   return (h.name == "hd" and "h" or "t") .. k, d + 1
 end
 
+-- Proven conses. A test (cons? E), E a chain rooted at a bound variable, proves
+-- E is a cons in the code the test dominates, so hd/tl of E there need no check
+-- of their own: E[1] / E[2] instead of an HD/TL call. Pattern-match bodies are
+-- mostly this shape. It saves an interpreted call per access, and on a trace it
+-- keeps recording from stopping at the HD or is_cons root trace, which made
+-- TRMC builders' traces come out differently from run to run (nrev: 185 billion
+-- or 287 billion instructions). Variables never change in a dominated region: a
+-- Lua name is bound once, and the one reassignment, of a self-tail loop's
+-- params, is followed by `goto tco` and the test runs again. Conses are
+-- immutable as to being conses, and HD/TL ignore a redefined hd/tl on a cons
+-- already, so nothing observable changes. Keys are chain_key's.
+local PROVEN = {}
+local function add_cons_facts(test, env, into)
+  if not is_cons(test) then return end
+  local h = test[1]
+  if not (is_symbol(h) and not env[h.name]) then return end
+  local rest = test[2]
+  if not (is_cons(rest)) then return end
+  if h.name == "cons?" and rest[2] == NIL and C.ARITY["cons?"] == 1 then
+    local k = chain_key(rest[1], env)
+    if k then into[k] = true end
+  elseif h.name == "and" and is_cons(rest[2]) and rest[2][2] == NIL then
+    add_cons_facts(rest[1], env, into)
+    add_cons_facts(rest[2][1], env, into)
+  end
+end
+-- f(...) with test's facts added to PROVEN. A flat table with an undo list: a
+-- then-spine nests one scope per pattern test, past Lua's 100 __index links.
+local function with_cons_facts(test, env, f, ...)
+  local facts = {}
+  add_cons_facts(test, env, facts)
+  local added = {}
+  for k in pairs(facts) do
+    if not PROVEN[k] then PROVEN[k] = true; added[#added + 1] = k end
+  end
+  local r = f(...)
+  for i = 1, #added do PROVEN[added[i]] = nil end
+  return r
+end
+local function proven_cons(form, env)
+  local k = chain_key(form, env)
+  return k ~= nil and PROVEN[k] == true
+end
+-- field i of a cons-valued Lua expression
+local function cell_field(expr, i)
+  if expr:match("^[%a_][%w_]*$") then return expr .. "[" .. i .. "]" end
+  return "(" .. expr .. ")[" .. i .. "]"
+end
+
 -- Bind one computed step to a fresh local (or PT slot past the local budget).
 -- Returns the reference string, or nil if no slot is available.
 local function chain_slot(expr)
@@ -693,7 +742,12 @@ local function chain_materialize(form, env)
   local inner = chain_materialize(form[2][1], env)
   -- HD/TL helpers (see ccall): same is_cons check as F["hd"]/F["tl"], but a
   -- direct ENV lookup rather than an F-table hash at every pattern step.
-  local expr = (form[1].name == "hd" and "HD(" or "TL(") .. inner .. ")"
+  local expr
+  if proven_cons(form[2][1], env) then
+    expr = cell_field(inner, form[1].name == "hd" and 1 or 2)
+  else
+    expr = (form[1].name == "hd" and "HD(" or "TL(") .. inner .. ")"
+  end
   local name = chain_slot(expr)
   if not name then return expr end   -- slot budget exhausted: stay inline
   CCACHE[key] = name
@@ -1092,9 +1146,11 @@ local function ccall(form, env, tail)
           return "not (" .. argstr .. ")"
         end
         if name == "hd" and ar == 1 then
+          if proven_cons(args[1], env) then return cell_field(argstr, 1) end
           return "HD(" .. argstr .. ")"
         end
         if name == "tl" and ar == 1 then
+          if proven_cons(args[1], env) then return cell_field(argstr, 2) end
           return "TL(" .. argstr .. ")"
         end
         if name == "thaw" and ar == 1 then
@@ -2241,12 +2297,12 @@ function ctail(form, env)
         local els = el and ctail(el, env) or ret("false")
         CCACHE = saved_cc
         return pre .. "if not (" .. testc .. ") then " .. els .. " end "
-               .. ctail(th, env)
+               .. with_cons_facts(test, env, ctail, th, env)
       else
         -- nest then, flatten else
         local saved_cc = CCACHE
         CCACHE = child_cache()
-        local ths = ctail(th, env)
+        local ths = with_cons_facts(test, env, ctail, th, env)
         CCACHE = saved_cc
         return pre .. "if (" .. testc .. ") then " .. ths .. " end "
                .. ctail(el, env)
@@ -2262,7 +2318,7 @@ function ctail(form, env)
         -- each result sits inside its own then-block: block-scope its chain cache
         local saved_cc = CCACHE
         CCACHE = child_cache()
-        local resc = ctail(res, env)
+        local resc = with_cons_facts(test, env, ctail, res, env)
         CCACHE = saved_cc
         if i == 1 then
           parts[#parts+1] = "if (" .. cexpr(test, env) .. ") then " .. resc
@@ -2309,7 +2365,8 @@ function ctail(form, env)
       -- semantically identical and costs O(1) nesting per link.
       local a = car(cdr(form)); local b = car(cdr(cdr(form)))
       local pre, ac = cstmt_expr(a, env)
-      return pre .. "if not (" .. ac .. ") then " .. ret("false") .. " end " .. ctail(b, env)
+      return pre .. "if not (" .. ac .. ") then " .. ret("false") .. " end "
+             .. with_cons_facts(a, env, ctail, b, env)
     elseif op == "or" then
       local a = car(cdr(form)); local b = car(cdr(cdr(form)))
       local pre, ac = cstmt_expr(a, env)
