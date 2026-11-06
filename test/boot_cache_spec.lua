@@ -166,6 +166,32 @@ do
                .. env .. " SHEN_FASL=off luajit " .. shen_bin .. " -e '(+ 1 2)'")
   end
 
+  -- A warm kernel cache built with a codegen switch one way is not reused the
+  -- other way: the boot rebuilds it, so the file changes.
+  do
+    local root = fresh()
+    local xdg, home = root .. "/xdg", root .. "/home"
+    local base = "XDG_CACHE_HOME=" .. sh_quote(xdg) .. " HOME=" .. sh_quote(home)
+    local function cache_data()
+      local name = ls(xdg .. "/shen-lua"):match("kernel%-%x+%.bin")
+      local h = name and io.open(xdg .. "/shen-lua/" .. name, "rb")
+      if not h then return nil end
+      local d = h:read("*a"); h:close(); return d
+    end
+    local out = boot_in(root .. "/cwd", base)
+    check(out:match("3%s*$") ~= nil, "codegen switches: default boot works")
+    local before = cache_data()
+    boot_in(root .. "/cwd", base)
+    check(before ~= nil and cache_data() == before, "codegen switches: a repeated boot hits the cache")
+    for _, sw in ipairs({ "SHEN_TRMC", "SHEN_UNCURRY", "SHEN_HOIST_LAMBDA", "SHEN_SINK_COUNT", "SHEN_FREEZE_CONT" }) do
+      before = cache_data()
+      out = boot_in(root .. "/cwd", base .. " " .. sw .. "=off")
+      check(out:match("3%s*$") ~= nil, "codegen switches: boot with " .. sw .. "=off works (got " .. out .. ")")
+      check(cache_data() ~= before, sw .. "=off does not reuse the default kernel cache")
+      boot_in(root .. "/cwd", base)
+    end
+  end
+
   local root = fresh()
   local cwd, xdg, home = root .. "/cwd", root .. "/xdg", root .. "/home"
   local out = boot_in(cwd, "XDG_CACHE_HOME=" .. sh_quote(xdg) .. " HOME=" .. sh_quote(home))

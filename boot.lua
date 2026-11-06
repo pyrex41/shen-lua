@@ -310,8 +310,11 @@ end
 local function cache_key()
   local h = fnv1a(jit and (jit.version .. jit.arch) or _VERSION)
   h = fnv1a(CACHE_FORMAT .. table.concat(FILES, ","), h)
-  -- codegen switches that change compiled output (SHEN_TRMC -> compiler.lua C.TRMC)
-  h = fnv1a("trmc=" .. tostring(os.getenv("SHEN_TRMC") ~= "off"), h)
+  -- codegen switches that change compiled output (compiler.lua): each is read as
+  -- "off" or not there, so a cache built one way is not reused the other way
+  for _, sw in ipairs({ "SHEN_TRMC", "SHEN_UNCURRY", "SHEN_HOIST_LAMBDA", "SHEN_SINK_COUNT", "SHEN_FREEZE_CONT" }) do
+    h = fnv1a(sw .. "=" .. tostring(os.getenv(sw) ~= "off"), h)
+  end
   for _, m in ipairs({ "compiler", "runtime", "prims" }) do
     h = fnv1a(module_source(m), h)
   end
