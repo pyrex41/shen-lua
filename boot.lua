@@ -834,7 +834,9 @@ end
 -- Known: (destroy ...) at the REPL between loads is not in the key.
 -- SHEN_FASL=off disables; SHEN_FASL_DIR overrides ~/.cache/shen-lua-fasl;
 -- SHEN_FASL_DEBUG=1 logs hits/misses to stderr.
-local FASL_FORMAT = "SHENFASL8"  -- 8: "h" pushes onto a global instead of
+local FASL_FORMAT = "SHENFASL9"  -- 9: "d" records whether variancy found an old
+                                 -- type, so replay can skip the query otherwise;
+                                 -- 8: "h" pushes onto a global instead of
                                  -- storing its whole list at each step;
                                  -- 7: a nested load run inside a chunk is no
                                  -- longer spliced into the outer fasl (#92);
@@ -908,6 +910,7 @@ local function fasl_serialize(rec, arity0)
       parts[#parts+1] = "D\n"
       kdata_ser(r.name, parts)
       kdata_ser(r.typ, parts)
+      kdata_ser(r.old == true, parts)
     elseif r.k == "m" then
       parts[#parts+1] = "M\n"
       kdata_ser(r.name, parts)
@@ -1004,8 +1007,8 @@ local function fasl_parse(data, pos)
       recs[i] = { k = "c", name = nm, dump = data:sub(pos, pos + len - 1) }
       pos = pos + len
     elseif k == "D" then
-      local v = de_n(2); if not v then return nil end
-      recs[i] = { k = "d", name = v[1], typ = v[2] }
+      local v = de_n(3); if not v then return nil end
+      recs[i] = { k = "d", name = v[1], typ = v[2], old = v[3] }
     elseif k == "M" then
       local v = de_n(1); if not v then return nil end
       recs[i] = { k = "m", name = v[1] }
@@ -1068,7 +1071,7 @@ local function fasl_replay(cached)
       P.load_chunk(r.dump, r.name)()
     elseif r.k == "d" then
       -- through the live F["declare"] so engine sig-table wrappers see it
-      local declared = false
+      local declared = r.old
       local t = P.GLOBALS["shen.*sigf*"]
       while R.is_cons(t) and not declared do
         declared = R.is_cons(t[1]) and t[1][1] == r.name
@@ -1080,8 +1083,9 @@ local function fasl_replay(cached)
         -- declare's check that a new type agrees with the old one, which is
         -- a System S query on the kernel's Prolog: 70M instructions each, 80%
         -- of the kernel suite on a warm fasl. It only warns, and with no old
-        -- type there is nothing to warn about. This is what a hit promises:
-        -- it typechecked when compiled.
+        -- type there is nothing to warn about: neither a signature, nor a type
+        -- from a datatype rule for (fn F), which the compile run recorded in
+        -- r.old and the key's datatype names hold to this load.
         local variancy = P.F["shen.variancy"]
         P.F["shen.variancy"] = function() return false end
         local ok, err = pcall(P.F["declare"], r.name, r.typ)
@@ -1242,8 +1246,18 @@ local function install_fasl()
   end
 
   wrap_recorded("declare", function(rec, name, typ)
-    return { k = "d", name = name, typ = typ }
+    rec.declaring = { k = "d", name = name, typ = typ }
+    return rec.declaring
   end)
+  -- shen.variancy reaches this only when (fn F) already has a type
+  do
+    local variants = F["shen.variants?"]
+    F["shen.variants?"] = function(...)
+      local rec = FASL_STACK[#FASL_STACK]
+      if rec and rec.declaring then rec.declaring.old = true end
+      return variants(...)
+    end
+  end
   wrap_recorded("shen.record-macro", function(rec, name, fn)
     return { k = "m", name = name }
   end)

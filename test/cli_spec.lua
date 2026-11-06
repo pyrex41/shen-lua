@@ -524,5 +524,41 @@ do
   os.remove(p); os.execute("rm -rf " .. sh_quote(fdir))
 end
 
+-- ---------------------------------------------------------------------------
+-- The same for a name with no signature that a user datatype rule types through
+-- (fn F): its warning does not depend on the cache either.
+-- ---------------------------------------------------------------------------
+do
+  local fdir = os.tmpname(); os.remove(fdir)
+  local p = os.tmpname() .. ".shen"
+  local fh = io.open(p, "w")
+  fh:write("(datatype var-dt\n  ______\n  (fn var-d) : (number --> number);)\n"
+    .. "(define var-d {string --> string} X -> X)\n"
+    .. "(define var-e {string --> string} X -> X)\n"); fh:close()
+  local lp = os.tmpname() .. ".lua"
+  fh = io.open(lp, "w")
+  fh:write("package.path = ", string.format("%q", here .. "?.lua;"), " .. package.path\n",
+    "local shen = require('shen')\nshen.boot{quiet = true}\n",
+    "shen.eval('(tc +)')\nshen.call('load', ", string.format("%q", p), ")\nshen.eval('(tc -)')\n")
+  fh:close()
+  local cmd = "luajit " .. sh_quote(lp)
+  local envp = "env SHEN_FASL_DIR=" .. sh_quote(fdir) .. " "
+  local function count(out, what)
+    local n = 0
+    for _ in out:gmatch("changing the type of " .. what) do n = n + 1 end
+    return n
+  end
+  local off = run("env SHEN_FASL=off " .. cmd)
+  local cold = run(envp .. cmd)
+  local warm = run(envp .. "SHEN_FASL_DEBUG=1 " .. cmd)
+  check(warm:find("[fasl] hit", 1, true) ~= nil, "variancy (fn F): second run is a fasl HIT")
+  check(count(off, "var%-d") == 1, "variancy (fn F): warns without a fasl: " .. off)
+  check(count(cold, "var%-d") == 1, "variancy (fn F): cold run warns: " .. cold)
+  check(count(warm, "var%-d") == 1, "variancy (fn F): warm hit warns: " .. warm)
+  check(count(warm, "var%-e") == 0, "variancy (fn F): no warning for a name no rule types")
+  os.remove(lp)
+  os.remove(p); os.execute("rm -rf " .. sh_quote(fdir))
+end
+
 io.write(string.format("cli_spec: %d pass, %d fail\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)
