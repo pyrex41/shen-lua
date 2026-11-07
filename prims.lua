@@ -6,6 +6,8 @@ local C = require("compiler")
 local cons, is_cons, NIL = R.cons, R.is_cons, R.NIL
 local Symbol, intern, is_symbol = R.Symbol, R.intern, R.is_symbol
 local Excn, mkexcn = R.Excn, R.mkexcn
+local rawset = rawset
+local NEGZERO = -0.0
 local Vmt = R.Vmt        -- absvector metatable (pure-array layout; shared with runtime.lua)
 -- counted non-tail calls (runtime.lua stack segments, #93), written inline
 -- where a native calls back into Shen code (a shared trampoline would look
@@ -127,9 +129,25 @@ end
 P.Thunk = Thunk
 
 local APP  -- fwd
+local MAX_PARTIAL1 = 12
+local PARTIAL1 = {}
+for ar = 2, MAX_PARTIAL1 do
+  local ps = {}
+  for i = 1, ar - 1 do ps[i] = "x" .. i end
+  local plist = table.concat(ps, ", ")
+  PARTIAL1[ar] = assert((loadstring or load)(
+    "return function(f, a) return function(" .. plist .. ") return f(a, " .. plist .. ") end end",
+    "=PARTIAL1"))()
+end
 local function PARTIAL(f, ar, have)
   local need = ar - #have
   local g
+  -- One argument at a time is what a curried chain does: a closure over it,
+  -- and no tables on the call. (A chain through a defun of arity n calls n-1
+  -- of these per use.)
+  if #have == 1 and ar <= MAX_PARTIAL1 then
+    return MKFUN(need, PARTIAL1[ar](f, have[1]))
+  end
   g = function(...)
     local extra = {...}
     local all = {}
@@ -141,6 +159,30 @@ local function PARTIAL(f, ar, have)
   return MKFUN(need, g)
 end
 
+-- A compiled one-parameter lambda carries no FA entry (see the lambda case of
+-- cexpr in compiler.lua): recording it was a new key in a weak table for every
+-- closure created. An unrecorded function otherwise means "assume exact"
+-- (primitives, a host's function), so APP tells the lambda apart here, on the
+-- only path that needs to: applying it to other than one argument.
+local getinfo = debug and debug.getinfo
+-- The source names of chunks load_chunk loaded: compiled Shen, as opposed to a
+-- host's own Lua, whatever it called its chunk. Recording this per chunk costs
+-- nothing per closure, unlike marking each lambda as it is created.
+local COMPILED_SOURCE = {}
+local RAW_LAMBDA = setmetatable({}, {__mode="k"})  -- what getinfo said, per function
+local function is_raw_lambda(f)
+  local r = RAW_LAMBDA[f]
+  if r ~= nil then return r end
+  r = false
+  if getinfo then
+    local i = getinfo(f, "uS")
+    r = i.nparams == 1 and not i.isvararg and i.what ~= "main"
+        and COMPILED_SOURCE[i.source] == true
+  end
+  RAW_LAMBDA[f] = r
+  return r
+end
+
 APP = function(f, ...)
   -- Fast path: the operand is overwhelmingly a Lua function (a compiled Shen
   -- function or a continuation/thunk). Check that first so the common case
@@ -149,7 +191,13 @@ APP = function(f, ...)
   if type(f) == "function" then
     local n = select("#", ...)
     local ar = FA[f]
-    if ar == nil or ar == n then     -- primitive/unknown-arity fn: assume exact
+    if ar == nil then
+      if n == 1 or not is_raw_lambda(f) then  -- primitive/unknown-arity fn: assume exact
+        return f(...)
+      end
+      ar = 1
+    end
+    if ar == n then
       return f(...)
     elseif n < ar then
       return PARTIAL(f, ar, {...})
@@ -178,6 +226,21 @@ APP = function(f, ...)
   ERR("attempt to apply a non-function")
 end
 P.APP, P.MKFUN, P.PARTIAL = APP, MKFUN, PARTIAL
+
+-- What a compiled lambda of n parameters returns when called with fewer (see upart_guard
+-- in compiler.lua): the arguments up to the first nil, partially applied. Called from the
+-- lambda itself, not as a tail call, so level 2 is that lambda.
+local getinfo_f = debug and debug.getinfo
+local function UPART(n, ...)
+  local f = getinfo_f(2, "f").func
+  local have, k = { ... }, 0
+  while k < n - 1 and have[k + 1] ~= nil do k = k + 1 end
+  if FA[f] == nil and n > 1 then FA[f] = n end
+  if k == 0 then return f end
+  for i = k + 1, #have do have[i] = nil end
+  return PARTIAL(f, n, have)
+end
+P.UPART = UPART
 
 -- ---- equality ------------------------------------------------------------
 -- Lists are compared by walking the cdr spine in a loop and recursing only
@@ -266,6 +329,12 @@ defprim("string?", 1, function(x) return type(x)=="string" end)
 defprim("symbol?", 1, function(x) return is_symbol(x) end)
 defprim("boolean?",1, function(x) return type(x)=="boolean" end)
 defprim("not", 1, function(x) if type(x)~="boolean" then ERR("not: not boolean") end return not x end)
+-- what a test of a form that may not give a boolean compiles to (compiler.lua, bc)
+local function boolean_check(x)
+  if x == true or x == false then return x end
+  ERR(R.to_str(x) .. " is not a boolean")
+end
+defprim("shen.bc", 1, boolean_check)
 defprim("integer?",1, function(x) return type(x)=="number" and x==math.floor(x) and x~=math.huge and x~=-math.huge end)
 
 -- symbols / strings
@@ -285,7 +354,7 @@ local numToStr = R.num_to_str
 defprim("str", 1, function(x)
   local t = type(x)
   if t=="number" then return numToStr(x)
-  elseif t=="string" then return x          -- str of a string is the string (with quotes? Shen: str adds nothing here)
+  elseif t=="string" then return '"' .. x .. '"'   -- quoted, as on shen-cl, shen-scheme, shen-go, shen-c
   elseif t=="boolean" then return x and "true" or "false"
   elseif is_symbol(x) then return x.name
   elseif x==NIL then ERR("str: cannot convert ()")
@@ -515,12 +584,15 @@ defprim("string->symbol", 1, function(s) return intern(s) end)
 defprim("empty?", 1, function(x) return x==NIL end)
 
 -- globals (dual namespace)
+-- Only a symbol names a global: keying on tostring() made (set "x" 1) and
+-- (set x 1) the same variable, and (set 1 2) define one called "1".
 defprim("set", 2, function(sym, v)
-  local key = is_symbol(sym) and sym.name or tostring(sym)
-  GLOBALS[key] = v; return v
+  if not is_symbol(sym) then ERR(R.to_str(sym) .. " is not a symbol") end
+  GLOBALS[sym.name] = v; return v
 end)
 defprim("value", 1, function(sym)
-  local key = is_symbol(sym) and sym.name or tostring(sym)
+  if not is_symbol(sym) then ERR(R.to_str(sym) .. " is not a symbol") end
+  local key = sym.name
   local v = GLOBALS[key]
   if v == nil then ERR("variable " .. key .. " has no value") end
   return v
@@ -537,6 +609,13 @@ end)
 local FAILOBJ = intern("shen.fail!")
 P.FAILOBJ = FAILOBJ
 defprim("absvector", 1, function(n)
+  -- Validate first: a negative or fractional length would build a table whose
+  -- length word disagrees with its slots (and a non-number used to surface as
+  -- a raw Lua arithmetic error), and the printer dies on the result outside
+  -- any handler the program set up.
+  if type(n) ~= "number" or n < 0 or n % 1 ~= 0 then
+    ERR(R.to_str(n) .. " is not a valid vector length")
+  end
   local v = { [1] = n }
   for i=0,n-1 do v[i+2] = FAILOBJ end
   return setmetatable(v, Vmt)
@@ -550,12 +629,17 @@ local function addr_oob(v, i)
   ERR(R.to_str and (tostring(i) .. " is not a valid index") or "invalid index")
 end
 P.addr_oob = addr_oob
+-- A negative index is out of range too: v[1] holds the length word. A write to
+-- a slot that does not exist raises as well, rather than growing the table.
 defprim("<-address", 2, function(v, i)
   local w = v[i+2]
-  if w == nil then addr_oob(v, i) end
+  if w == nil or i < 0 then addr_oob(v, i) end
   return w
 end)
-defprim("address->", 3, function(v, i, x) v[i+2]=x; return v end)
+defprim("address->", 3, function(v, i, x)
+  if v[i+2] == nil or i < 0 then addr_oob(v, i) end
+  rawset(v, i+2, x); return v
+end)
 
 -- freeze/thaw : thunks are 0-arity functions (kernel: (defun thaw (V) (V)))
 -- Hot path in the Prolog/typechecker CPS: a thawed value is always a 0-arity
@@ -575,12 +659,14 @@ defprim("type", 2, function(x, _ty) return x end)
 local load_form  -- fwd (defined below)
 defprim("eval-kl", 1, function(form) return P.eval(form) end)
 
--- get-time : (get-time Sym), Sym in {run, real, unix}
+-- get-time : (get-time Sym), Sym in {run, real, unix}; anything else raises
 local t0_real = os.time()
 defprim("get-time", 1, function(sym)
-  local name = is_symbol(sym) and sym.name or tostring(sym)
+  local name = is_symbol(sym) and sym.name
   if name == "run" then return os.clock()
-  else return os.time() - t0_real end   -- real / unix : wall seconds since boot
+  elseif name == "unix" then return os.time()
+  elseif name == "real" then return os.time() - t0_real  -- wall seconds since boot
+  else ERR("get-time: invalid option: " .. R.to_str(sym)) end
 end)
 
 -- ---- streams -------------------------------------------------------------
@@ -715,7 +801,20 @@ end)
 
 -- close (STREAM) -> ()
 defprim("close", 1, function(st)
-  if is_stream(st) and st.close then st.close() end
+  if not is_stream(st) then ERR("close: not a stream") end
+  -- Closing twice is harmless; using a closed stream raises a Shen error, not
+  -- Lua's "attempt to use a closed file". Replacing the functions keeps the
+  -- read and write paths free of a closed check.
+  if st.close then
+    st.close()
+    st.close = nil
+    if st.kind == "in" then
+      st.readbyte = function() ERR("read-byte: stream is closed") end
+      st.pb, st.eof = nil, false
+    else
+      st.write = function() ERR("write-byte: stream is closed") end
+    end
+  end
   return NIL
 end)
 
@@ -876,9 +975,9 @@ function P.install_native_prolog()
     -- Per-query capacity: shen.prolog-vector allocates ONE absvector of
     -- (value shen.*prolog-memory*) slots per query, so the kernel's
     -- shen.nextticket writes slot n and the query dies once n reaches the
-    -- vector size. Our absvector is a Lua table, and address-> is an
-    -- unchecked store, so without this the vector would silently grow and a
-    -- query that raises on every other port would answer here.
+    -- vector size. This native path stores without going through address->,
+    -- so without this the vector would silently grow and a query that raises
+    -- on every other port would answer here.
     local size = vec[1]
     if type(size) == "number" and n >= size then
       ERR("prolog vector index out of range: a single query may allocate at "
@@ -1147,14 +1246,65 @@ function P.install_native_stdlib()
   end
   local function map(f, lst) return map_h(f, lst, NIL) end
 
+  -- shen.walk (macros.kl): apply a macro to a form bottom-up, as
+  -- (F (map (/. Z (shen.walk F Z)) X)). macroexpand makes one walk per macro,
+  -- several per form, and nearly always nothing changes, yet the kernel's rebuilds
+  -- the whole tree each time and macroexpand then compares it to the old one
+  -- cell by cell. Keep the old cells until a child really changes, so the usual
+  -- walk allocates nothing and that comparison ends at once. Same calls in the
+  -- same order; forms are immutable, so sharing is not observable. An improper
+  -- list goes to the kernel's, for its error.
+  local orig_walk = F["shen.walk"]
+  local function walk(f, x)
+    if not is_cons(x) then return APP(f, x) end
+    local t = x
+    repeat t = t[2] until not is_cons(t)
+    if t ~= NIL then return orig_walk(f, x) end
+    local head, last = nil, nil
+    local cell = x
+    repeat
+      local e = cell[1]
+      local v
+      if is_cons(e) then
+        -- a counted call, as in map_h
+        local d = SD[1]
+        if d < SEG_FRAMES then SD[1] = d + 1; v = walk(f, e); SD[1] = d
+        else v = SEGRUN(walk, f, e) end
+      else
+        v = APP(f, e)
+      end
+      if head then
+        local c = cons(v, NIL)
+        last[2] = c; last = c
+      elseif v ~= e then
+        -- first change: copy the cells before this one
+        local p = x
+        while p ~= cell do
+          local c = cons(p[1], NIL)
+          if head then last[2] = c else head = c end
+          last = c
+          p = p[2]
+        end
+        local c = cons(v, NIL)
+        if head then last[2] = c else head = c end
+        last = c
+      end
+      cell = cell[2]
+    until cell == NIL
+    return APP(f, head or x)
+  end
+
   -- variable? : a symbol whose name is an uppercase letter followed by
   -- alphanums (kernel chain variable?/analyse-variable?/uppercase?/alphanums?,
   -- where alphanum = letter | digit | the misc set "=-*/+_?$!@~.><&%'#`").
   -- The kernel version walks the name char-by-char through trap-error +
   -- hdstr/tlstr string churn; here one pattern match, memoized on the
-  -- interned symbol itself so each distinct symbol pays it once. Non-symbols
-  -- delegate to the original for byte-identical edge semantics.
-  local orig_variable = F["variable?"]
+  -- interned symbol itself so each distinct symbol pays it once. A non-symbol
+  -- is never a variable: the kernel version answers false outright for
+  -- booleans, numbers and strings, and for anything else (str V) raises inside
+  -- its trap-error, so it is false again, by way of a thrown error. Thrown
+  -- errors are expensive here (on arm64 LuaJIT unwinds through the system
+  -- unwinder) and the define/yacc parser asks this about every cons it meets.
   local VARPAT = "^[A-Z][%w=%-%*/%+_%?%$!@~%.><&%%'#`]*$"
   local function variable_q(x)
     if is_symbol(x) then
@@ -1165,7 +1315,7 @@ function P.install_native_stdlib()
       end
       return v
     end
-    return orig_variable(x)
+    return false
   end
 
   -- pr (issue #22): the canonical kernel `pr` (klambda/writer.kl) gates ALL
@@ -1226,6 +1376,21 @@ function P.install_native_stdlib()
   -- is never second-guessed. Boot alone calls hash ~800 times (all on symbol
   -- keys); a native fold there and at runtime avoids the per-call explode
   -- list + map + KL recursion.
+  -- shen.mod (sys.kl:123) builds a list of doubled divisors and subtracts them:
+  -- for N in the range below that takes a few thousand instructions, and gives
+  -- exactly N % D, since every double involved is an exact integer. Anything
+  -- else, including the negative N it returns as is and the divisors it never
+  -- returns from, stays with the kernel's definition.
+  local orig_mod = F["shen.mod"]
+  local function shen_mod(n, d)
+    if type(n) == "number" and type(d) == "number"
+       and n >= 0 and n < 9007199254740992 and d >= 1 and d < 9007199254740992
+       and n == mfloor(n) and d == mfloor(d) then
+      return n % d
+    end
+    return orig_mod(n, d)
+  end
+
   local orig_hash = F["hash"]
   local function hashkey_bytes(s)
     local acc = 1
@@ -1252,6 +1417,11 @@ function P.install_native_stdlib()
     end
   end
   local function hash(v, bound)
+    -- The kernel's shen.mod never returns for a bound of 0 or below (non-symbol
+    -- keys hung the process) and x % 0 is NaN (symbol keys returned it).
+    if type(bound) ~= "number" or bound < 1 or bound % 1 ~= 0 then
+      ERR("hash: " .. R.to_str(bound) .. " is not a positive integer")
+    end
     local s
     if is_symbol(v) then s = v.name
     elseif type(v) == "string" then s = v
@@ -1453,7 +1623,105 @@ function P.install_native_stdlib()
   }
   -- try the alternatives from number `from` on at v: returns the kind
   -- ("open", "item", "skip", or nil for <e>), the rest, and the value
+  --
+  -- Fast paths, by the token's first code. A token's first code rules out most
+  -- alternatives, and the plain cases of the rest take a few lines here, where
+  -- the KL combinators spent about 20,000 instructions per input byte. Anything
+  -- else takes the ordered choice below, so these must only ever agree with it:
+  -- a digit run followed by . or e, a string with c#, a non-ASCII byte and all
+  -- punctuation go to the kernel's rules.
+  -- In a do block: install_native_stdlib is near the limit of 200 locals.
+  local sx_fast
+  local sx_dollar = intern("$")
+  do
+  local SX_WS, SX_SYM0, SX_SYMN, SX_CH = {}, {}, {}, {}
+  for c = 0, 127 do SX_CH[c] = string.char(c) end
+  for _, c in ipairs{ 9, 10, 13, 32 } do SX_WS[c] = true end
+  for c = 97, 122 do SX_SYM0[c] = true end
+  for c = 65, 90 do SX_SYM0[c] = true end
+  for ch in ("=-*/+_?$!@~.><&%'#`"):gmatch(".") do SX_SYM0[ch:byte()] = true end
+  for c in pairs(SX_SYM0) do SX_SYMN[c] = true end
+  local SX_DIGIT, SX_NUMCONT = {}, { [45] = true, [43] = true, [46] = true }
+  for c = 48, 57 do SX_SYMN[c] = true; SX_DIGIT[c] = true; SX_NUMCONT[c] = true end
+  local sx_buf = {}
+  local sx_vector = intern("vector")
+  -- <sym>: the caller knows the first code qualifies
+  local function sx_sym(v)
+    local n = 0
+    local buf, ch, symn = sx_buf, SX_CH, SX_SYMN
+    repeat
+      n = n + 1; buf[n] = ch[v[1]]
+      v = v[2]
+    until not is_cons(v) or not symn[v[1]]
+    local s = table.concat(buf, "", 1, n)
+    if s == "<>" then return "item", v, cons(sx_vector, cons(0, NIL)) end
+    return "item", v, F["intern"](s)
+  end
+  -- <str> with no c# escape and only ASCII, else false
+  local function sx_str(v)
+    local n = 0
+    local buf, ch = sx_buf, SX_CH
+    v = v[2]
+    while is_cons(v) do
+      local c = v[1]
+      if c == 34 then return "item", v[2], table.concat(buf, "", 1, n) end
+      if c == 99 or type(c) ~= "number" or c > 127 or c < 0 then
+        -- c can begin c#NN; so leave only that case to the kernel's rules
+        if c ~= 99 or (is_cons(v[2]) and v[2][1] == 35) then return false end
+      end
+      n = n + 1; buf[n] = ch[c]
+      v = v[2]
+    end
+    return false
+  end
+  -- <number> for a run of at most 15 digits not followed by . or e: exact in a
+  -- double, so the kernel's sum of digit * 10^k reaches the same value
+  local function sx_int(v)
+    local acc, n = 0, 0
+    while is_cons(v) do
+      local c = v[1]
+      if not SX_DIGIT[c] then
+        if c == 46 or c == 101 then return false end
+        break
+      end
+      acc = acc * 10 + (c - 48)
+      n = n + 1
+      if n > 15 then return false end
+      v = v[2]
+    end
+    return "item", v, acc
+  end
+  -- kind, rest, value like sx_step; false to take the ordered choice
+  sx_fast = function(v)
+    if not is_cons(v) then return nil end
+    local c = v[1]
+    if SX_WS[c] then
+      repeat v = v[2] until not is_cons(v) or not SX_WS[v[1]]
+      return "skip", v
+    end
+    if c == 91 then return "open", v[2], SX_LSB end
+    if c == 40 then return "open", v[2], SX_LRB end
+    if c == 93 or c == 41 then return nil end   -- no alternative takes a closer
+    if SX_SYM0[c] then
+      local t = v[2]
+      local d = is_cons(t) and t[1]
+      if c == 45 or c == 43 then        -- - and +: <number> takes signs
+        if SX_NUMCONT[d] then return false end
+      elseif c == 46 then               -- .: <number> takes .digits
+        if SX_DIGIT[d] then return false end
+      end
+      return sx_sym(v)
+    end
+    if c == 34 then return sx_str(v) end
+    if SX_DIGIT[c] then return sx_int(v) end
+    return false
+  end
+  end
   local function sx_step(v, from)
+    if from == 1 then
+      local kind, rest, val = sx_fast(v)
+      if kind ~= false then return kind, rest, val end
+    end
     if from <= SX_LSB then
       local r = F["shen.<lsb>"](v)
       if r ~= fail_sym then return "open", r[1], SX_LSB end
@@ -1498,17 +1766,23 @@ function P.install_native_stdlib()
         for i = frame.n, 1, -1 do
           local it = frame[i]
           if it.alt == SX_LSB then acc = cons(F["shen.cons-form"](it.inner), acc)
-          elseif it.alt == SX_LRB then acc = F["shen.add-sexpr"](it.inner, acc)
+          elseif it.alt == SX_LRB then
+            local inner = it.inner
+            -- add-sexpr only treats ($ X) specially
+            if is_cons(inner) and inner[1] == sx_dollar then
+              acc = F["shen.add-sexpr"](inner, acc)
+            else
+              acc = cons(inner, acc)
+            end
           else acc = cons(it[1], acc) end
         end
         if sp == 0 then return cons(v, cons(acc, NIL)) end
         local closed = frame
         frame = stack[sp]; stack[sp] = nil; sp = sp - 1
-        local r = F[closed.alt == SX_LSB and "shen.<rsb>" or "shen.<rrb>"](v)
-        if r ~= fail_sym then
+        if is_cons(v) and v[1] == (closed.alt == SX_LSB and 93 or 41) then
           frame.n = frame.n + 1
           frame[frame.n] = { alt = closed.alt, inner = acc }
-          v = r[1]
+          v = v[2]
         else
           -- no closer: the bracket alternative fails; try the next ones there
           v = closed.pos
@@ -2259,6 +2533,7 @@ function P.install_native_stdlib()
   install("shen.<whitespaces>", whitespaces, 1)
   install("fn", fn_fast, 1)
   install("hash", hash, 2)
+  install("shen.mod", shen_mod, 2)
   install("pr", pr, 2)
   install("variable?", variable_q, 1)
   install("fail", fail, 0)
@@ -2274,6 +2549,7 @@ function P.install_native_stdlib()
   install("reverse", reverse, 1)
   install("shen.map-h", map_h, 3)
   install("map", map, 2)
+  install("shen.walk", walk, 2)
   install("not", native_not, 1)
   install("boolean?", boolean_q, 1)
   install("empty?", empty_q, 1)
@@ -2501,6 +2777,11 @@ local ENV = {
   GE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a>=b end return F[">="](a,b) end,
   LE  = function(a,b) if type(a)=="number" and type(b)=="number" then return a<=b end return F["<="](a,b) end,
   EQ  = function(a,b) if type(a)=="number" then return a==b end return equal(a,b) end,
+  -- A loop's accumulator (compiler.lua accumulator): the same values as ADD,
+  -- SUB and MUL, always as a double. x + -0.0 is x for every x.
+  ADDF = function(a,b) if type(a)=="number" and type(b)=="number" then return a+(b+NEGZERO) end return F["+"](a,b) end,
+  SUBF = function(a,b) if type(a)=="number" and type(b)=="number" then return a-(b+NEGZERO) end return F["-"](a,b) end,
+  MULF = function(a,b) if type(a)=="number" and type(b)=="number" then return a*(b+NEGZERO) end return F["*"](a,b) end,
   -- CALL0..CALLn are generated below the table (see unknown_call in compiler.lua).
   -- TRMC step markers (see TRMC in compiler.lua): never Shen values.
   TRMC_C = setmetatable({}, { __tostring = function() return "#<trmc cons>" end }),
@@ -2635,12 +2916,24 @@ local ENV = {
     end
     return F["n->string"](n)
   end,
+  BC = boolean_check,
+  UPART = UPART,
   ADDR = function(v, i)
     local w = v[i + 2]
-    if w == nil then return F["<-address"](v, i) end
+    if w == nil or i < 0 then return F["<-address"](v, i) end
     return w
   end,
-  ADSET = function(v, i, x) v[i + 2] = x; return v end,
+  -- rawset: a table with a metatable (Vmt has no metamethods) makes the trace
+  -- guard the type of the old value in the slot, so overwriting a vector with
+  -- values of another type left the trace on every element.
+  -- The range check reads the length word and not the slot, for the same reason:
+  -- loading the slot to compare it with nil guards its type too. A write at the
+  -- slot itself is what F["address->"] checks on the way to raising. A cons has
+  -- v[1] too, so anything but a vector takes that path whatever its head is.
+  ADSET = function(v, i, x)
+    if getmetatable(v) ~= Vmt or i < 0 or i >= v[1] or i % 1 ~= 0 then return F["address->"](v, i, x) end
+    rawset(v, i + 2, x); return v
+  end,
   VMT = Vmt,
   -- allow compiled code to reach a few Lua builtins safely
   -- trap-error's pcall restores the stack-segment count (runtime.lua, #93)
@@ -2680,20 +2973,75 @@ do
       .. "end\n"
     ENV["CALL" .. n] = assert((loadstring or load)(src, "=CALL" .. n))(F, FA, APP, intern)
   end
+  -- APP1..APPn: APP with the argument count fixed, so the common exact call
+  -- is a plain call instead of a vararg forward. Anything else takes APP.
+  for n = 1, C.MAX_APPN do
+    local ps = {}
+    for i = 1, n do ps[i] = "a" .. i end
+    local plist = table.concat(ps, ", ")
+    local exact = n == 1 and "ar == 1 or ar == nil" or ("ar == " .. n)
+    local src = "local F, FA, APP, type, rawget, getmetatable, Symbol = ...\n"
+      .. "return function(f, " .. plist .. ", ...)\n"
+      .. "  if type(f) ~= 'function' and getmetatable(f) == Symbol then\n"
+      .. "    local g = F[f.name]\n"
+      .. "    if g ~= nil then f = g end\n"
+      .. "  end\n"
+      .. "  if type(f) == 'function' then\n"
+      .. "    local ar = rawget(FA, f)\n"
+      .. "    if " .. exact .. " then return f(" .. plist .. ") end\n"
+      .. "  end\n"
+      .. "  return APP(f, " .. plist .. ")\n"
+      .. "end\n"
+    ENV["APP" .. n] = assert((loadstring or load)(src, "=APP" .. n))(F, FA, APP, type, rawget, getmetatable, R.Symbol)
+  end
   -- CUR1..CURn: a curried chain ((((fn f) a1) a2) ... an) whose (fn f) has
   -- already been evaluated to g (see curried_call in compiler.lua). Arity n:
   -- one direct call. Otherwise the original nested applications, verbatim.
+  -- CURnP(g, a1..an-1, PREn(g, a1..an-1), an): the same chain when an is not
+  -- order-free. PREn runs the partial applications right then, before an is
+  -- evaluated, unless the arity is n, when they cannot run code at all.
+  local CUR_DIRECT = setmetatable({}, { __tostring = function() return "#<cur direct>" end })
+  -- a symbol head: the function it names now, wrapped so CURnP can tell it from a
+  -- partial application that happens to have arity n. The last argument may rebind
+  -- the name, and a nested application would already have settled on this one.
+  local CUR_RESOLVED = { __tostring = function() return "#<cur resolved>" end }
+  for n = 2, C.MAX_CALLN do
+    local ps = {}
+    for i = 1, n - 1 do ps[i] = "a" .. i end
+    local nested = "g"
+    for i = 1, n - 1 do nested = "APP(" .. nested .. ", a" .. i .. ")" end
+    local plist = table.concat(ps, ", ")
+    local src = "local F, FA, APP, D, RESOLVED, rawget, setmetatable, getmetatable, Symbol = ...\n"
+      .. "return function(g, " .. plist .. ", ...)\n"
+      .. "  if rawget(FA, g) == " .. n .. " then return D end\n"
+      .. "  if getmetatable(g) == Symbol then\n"
+      .. "    local f = F[g.name]\n"
+      .. "    if f ~= nil and rawget(FA, f) == " .. n .. " then return setmetatable({ f }, RESOLVED) end\n"
+      .. "  end\n"
+      .. "  return " .. nested .. "\n"
+      .. "end, function(g, " .. plist .. ", r, an, ...)\n"
+      .. "  if r == D then return g(" .. plist .. ", an) end\n"
+      .. "  if getmetatable(r) == RESOLVED then return r[1](" .. plist .. ", an) end\n"
+      .. "  return APP(r, an)\n"
+      .. "end\n"
+    ENV["PRE" .. n], ENV["CUR" .. n .. "P"] =
+      assert((loadstring or load)(src, "=CUR" .. n .. "P"))(F, FA, APP, CUR_DIRECT, CUR_RESOLVED, rawget, setmetatable, getmetatable, R.Symbol)
+  end
   for n = 1, C.MAX_CALLN do
     local ps = {}
     for i = 1, n do ps[i] = "a" .. i end
     local nested = "g"
     for i = 1, n do nested = "APP(" .. nested .. ", a" .. i .. ")" end
-    local src = "local FA, APP = ...\n"
-      .. "return function(g, " .. table.concat(ps, ", ") .. ")\n"
-      .. "  if FA[g] == " .. n .. " then return g(" .. table.concat(ps, ", ") .. ") end\n"
+    local src = "local F, FA, APP, rawget, getmetatable, Symbol = ...\n"
+      .. "return function(g, " .. table.concat(ps, ", ") .. ", ...)\n"
+      .. "  if rawget(FA, g) == " .. n .. " then return g(" .. table.concat(ps, ", ") .. ") end\n"
+      .. "  if getmetatable(g) == Symbol then\n"
+      .. "    local f = F[g.name]\n"
+      .. "    if f ~= nil and rawget(FA, f) == " .. n .. " then return f(" .. table.concat(ps, ", ") .. ") end\n"
+      .. "  end\n"
       .. "  return " .. nested .. "\n"
       .. "end\n"
-    ENV["CUR" .. n] = assert((loadstring or load)(src, "=CUR" .. n))(FA, APP)
+    ENV["CUR" .. n] = assert((loadstring or load)(src, "=CUR" .. n))(F, FA, APP, rawget, getmetatable, R.Symbol)
   end
 end
 
@@ -2707,6 +3055,7 @@ if math.tointeger then
   ENV.SUB = function(a,b) if type(a)=="number" and type(b)=="number" then return a+0.0-b end return F["-"](a,b) end
   ENV.MUL = function(a,b) if type(a)=="number" and type(b)=="number" then return (a+0.0)*b end return F["*"](a,b) end
   ENV.DIV = function(a,b) if type(a)=="number" and type(b)=="number" and b~=0 then return (a+0.0)/b end return F["/"](a,b) end
+  ENV.ADDF, ENV.SUBF, ENV.MULF = ENV.ADD, ENV.SUB, ENV.MUL
 end
 
 local loadstring = loadstring or load
@@ -2724,6 +3073,7 @@ local function load_chunk(code, chunkname)
     chunk, err = load(code, chunkname, nil, ENV)
     if not chunk then error("Lua load error: "..tostring(err)) end
   end
+  if getinfo then COMPILED_SOURCE[getinfo(chunk, "S").source] = true end
   return chunk
 end
 P.load_chunk = load_chunk
@@ -2809,13 +3159,9 @@ function P.eval(form)
   local t = type(form)
   if t == "number" or t == "string" or t == "boolean" then return form end
   if form == NIL then return form end
-  if is_symbol(form) then
-    -- Bare symbols evaluate to their value in the global var namespace if
-    -- bound, otherwise to themselves (KL convention).
-    local v = GLOBALS[form.name]
-    if v ~= nil then return v end
-    return form
-  end
+  -- A bare symbol evaluates to itself, bound as a global or not: the global
+  -- namespace is reached only through (value S).
+  if is_symbol(form) then return form end
   if t == "table" and not is_cons(form) then
     -- absvector, stream, exception, or other opaque object: self-evaluating.
     return form

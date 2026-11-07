@@ -148,5 +148,43 @@ do
   check(ok and v == DEEP, "deep recursion works again after the cap")
 end
 
+-- segments are reused once finished: arguments, errors and a host's yield
+-- all behave as on a fresh coroutine, and a segment reused after each of them
+-- starts clean
+do
+  local run1 = R.seg.run
+  check(run1(function(a, b) return a + b end, 2, 3) == 5, "reuse: arguments and value")
+  check(select("#", run1(function() return 1, 2 end)) == 1, "reuse: one value, as before")
+  local obj = {}
+  for _ = 1, 3 do
+    local ok, e = pcall(run1, function() error(obj, 0) end)
+    check(not ok and e == obj, "reuse: error object unchanged")
+    check(run1(function() return 7 end) == 7, "reuse: runs after an error")
+  end
+  -- a host's yield passes through, in both directions, and repeatedly
+  for _ = 1, 3 do
+    local co = coroutine.wrap(function()
+      return run1(function(a)
+        local b = coroutine.yield(a + 1)
+        local c = coroutine.yield(b + 1)
+        return c * 2
+      end, 1)
+    end)
+    check(co() == 2 and co(10) == 11 and co(21) == 42, "reuse: host yield through a segment")
+  end
+  -- a yield with no coroutine above it is an error, and a segment left
+  -- suspended by it is not reused
+  local ok = pcall(run1, function() coroutine.yield(1) end)
+  check(not ok, "reuse: yield outside any coroutine is an error")
+  check(run1(function() return 8 end) == 8, "reuse: runs after a stray yield")
+  -- a segment abandoned by its host never comes back
+  local co = coroutine.wrap(function() return run1(function() coroutine.yield(1); return 2 end) end)
+  check(co() == 1, "reuse: suspended by its host")
+  check(run1(function() return 9 end) == 9, "reuse: runs with another segment suspended")
+  check(co() == 2, "reuse: suspended segment resumes later")
+  local _, n = R.seg.stats()
+  check(n == 0 and R.seg.SD[1] == 0, "reuse: state restored")
+end
+
 io.write(string.format("stack_segments_spec: %d pass, %d fail\n", npass, nfail))
 os.exit(nfail == 0 and 0 or 1)

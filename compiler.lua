@@ -371,6 +371,7 @@ for _, n in ipairs({
   "difference", "union", "intersection", "occurrences", "subst", "==",
   "fail", "get", "put", "unput", "hdstr", "string->symbol", "pr",
 }) do LEAF[n] = true end
+local sink_branch  -- fwd (count sinking)
 local function nt_call(fexpr, argstr, n)
   NTCOUNT = NTCOUNT + 1
   if CNT then
@@ -422,6 +423,31 @@ local function unknown_call(name, argstr, n, tail)
   return "APP(" .. symlit(name) .. ", " .. argstr .. ")"
 end
 C.MAX_CALLN = MAX_CALLN
+-- APP with a fixed argument count (prims.lua), for a call through a value
+local MAX_APPN = 4
+C.MAX_APPN = MAX_APPN
+local function app_name(n)
+  if n >= 1 and n <= MAX_APPN then return "APP" .. n end
+  return "APP"
+end
+-- A one-parameter lambda needs no MKFUN where APP can recover its arity from
+-- debug.getinfo (is_raw_lambda in prims.lua); Lua 5.1 has no nparams.
+local LAM1_RAW = debug and debug.getinfo and debug.getinfo(print, "u").nparams ~= nil
+-- A compiled lambda called with fewer arguments than it takes sees nil in its last
+-- parameter: nil is never a Shen value. It returns the partial application over what it
+-- got (UPART, prims.lua) rather than run its body with nil. Compiled calls pass all the
+-- arguments or go through APP; this is for a host calling it raw, and for thaw.
+local function upart_guard(params, n)
+  local last = params:match("([%w_]+)%s*$")
+  local given = params:match("^(.*),%s*[%w_]+%s*$")
+  return "if " .. last .. " == nil then local p = UPART(" .. n
+    .. (given and (", " .. given) or "") .. "); return p end "
+end
+local function lam1(params, body)
+  local fn = "function(" .. params .. ") " .. upart_guard(params, 1) .. body .. " end"
+  if LAM1_RAW then return fn end
+  return "MKFUN(1, " .. fn .. ")"
+end
 
 -- ------------------------------------------------------------------
 -- atom / literal compilation
@@ -486,11 +512,18 @@ end
 -- in scope). Self-calls use `impl` so recursion does not hash F at all.
 local IN_IMPL = false
 local DEFUN_NAME = nil
+-- The body being compiled is a control form in value position, called and
+-- returned from as a helper (see cexpr), so nothing in it is a tail call of the
+-- enclosing function. VALUE_NEXT asks hoist_kc to mark the body it compiles.
+local VALUE_BODY, VALUE_NEXT = false, false
+local IN_FN_BODY = false
 local FREF_LIST = {}
 local FREF_MAP = {}
 local function callee_ref(name)
   if not IN_IMPL then return ftab_ref(name) end
   if DEFUN_NAME and name == DEFUN_NAME then return "impl" end
+  -- the fall-through clause of a define: looked up only if it runs
+  if name == "shen.f-error" then return ftab_ref(name) end
   local ln = FREF_MAP[name]
   if ln then return ln end
   ln = "f" .. (#FREF_LIST + 1)
@@ -667,6 +700,60 @@ local function chain_key(form, env)
   return (h.name == "hd" and "h" or "t") .. k, d + 1
 end
 
+-- Proven conses. A test (cons? E), E a chain rooted at a bound variable, proves
+-- E is a cons in the code the test dominates, so hd/tl of E there need no check
+-- of their own: E[1] / E[2] instead of an HD/TL call. Pattern-match bodies are
+-- mostly this shape. It saves an interpreted call per access, and on a trace it
+-- keeps recording from stopping at the HD or is_cons root trace, which made
+-- TRMC builders' traces come out differently from run to run (nrev: 185 billion
+-- or 287 billion instructions). Variables never change in a dominated region: a
+-- Lua name is bound once, and the one reassignment, of a self-tail loop's
+-- params, is followed by `goto tco` and the test runs again. Conses are
+-- immutable as to being conses, and HD/TL ignore a redefined hd/tl on a cons
+-- already, so nothing observable changes. Keys are chain_key's.
+local PROVEN = {}
+local function add_cons_facts(test, env, into)
+  if not is_cons(test) then return end
+  local h = test[1]
+  if not (is_symbol(h) and not env[h.name]) then return end
+  local rest = test[2]
+  if not (is_cons(rest)) then return end
+  if h.name == "cons?" and rest[2] == NIL and C.ARITY["cons?"] == 1 then
+    local k = chain_key(rest[1], env)
+    if k then into[k] = true end
+  elseif h.name == "and" and is_cons(rest[2]) and rest[2][2] == NIL then
+    add_cons_facts(rest[1], env, into)
+    add_cons_facts(rest[2][1], env, into)
+  end
+end
+-- f(...) with test's facts added to PROVEN. A flat table with an undo list: a
+-- then-spine nests one scope per pattern test, past Lua's 100 __index links.
+local function with_cons_facts(test, env, f, ...)
+  local facts = {}
+  add_cons_facts(test, env, facts)
+  local added = {}
+  for k in pairs(facts) do
+    if not PROVEN[k] then PROVEN[k] = true; added[#added + 1] = k end
+  end
+  local r = f(...)
+  for i = 1, #added do PROVEN[added[i]] = nil end
+  return r
+end
+function C.proven_count()
+  local n = 0
+  for _ in pairs(PROVEN) do n = n + 1 end
+  return n
+end
+local function proven_cons(form, env)
+  local k = chain_key(form, env)
+  return k ~= nil and PROVEN[k] == true
+end
+-- field i of a cons-valued Lua expression
+local function cell_field(expr, i)
+  if expr:match("^[%a_][%w_]*$") then return expr .. "[" .. i .. "]" end
+  return "(" .. expr .. ")[" .. i .. "]"
+end
+
 -- Bind one computed step to a fresh local (or PT slot past the local budget).
 -- Returns the reference string, or nil if no slot is available.
 local function chain_slot(expr)
@@ -693,7 +780,12 @@ local function chain_materialize(form, env)
   local inner = chain_materialize(form[2][1], env)
   -- HD/TL helpers (see ccall): same is_cons check as F["hd"]/F["tl"], but a
   -- direct ENV lookup rather than an F-table hash at every pattern step.
-  local expr = (form[1].name == "hd" and "HD(" or "TL(") .. inner .. ")"
+  local expr
+  if proven_cons(form[2][1], env) then
+    expr = cell_field(inner, form[1].name == "hd" and 1 or 2)
+  else
+    expr = (form[1].name == "hd" and "HD(" or "TL(") .. inner .. ")"
+  end
   local name = chain_slot(expr)
   if not name then return expr end   -- slot budget exhausted: stay inline
   CCACHE[key] = name
@@ -928,7 +1020,7 @@ local function order_free(form, env)
   return true   -- number/string/boolean/(), symbol literal or local variable
 end
 
-local function curried_call(form, env, tail)
+local function curried_call(form, env, tail, last)
   local args = {}
   local cur = form
   while is_cons(cur) and is_cons(car(cur)) do
@@ -937,29 +1029,53 @@ local function curried_call(form, env, tail)
     table.insert(args, 1, car(rest))
     cur = car(cur)
   end
-  -- cur must be (fn SYM): `fn` not rebound, SYM a symbol literal
-  if not (is_cons(cur) and is_symbol(car(cur)) and car(cur).name == "fn"
-          and not env["fn"]) then
+  if not is_cons(cur) then return nil end
+  local chead, rest = car(cur), cdr(cur)
+  if not (is_symbol(chead) and is_cons(rest) and cdr(rest) == NIL) then return nil end
+  local gref
+  if chead.name == "fn" and not env["fn"] then
+    -- (fn SYM): SYM a symbol literal
+    local sym = car(rest)
+    if not (is_symbol(sym) and not env[sym.name]) then return nil end
+    if #args < 1 or #args > MAX_CALLN then return nil end
+    for i = 2, #args do
+      if not order_free(args[i], env) then return nil end
+    end
+    gref = callee_ref("fn") .. "(" .. symlit(sym.name) .. ")"
+  elseif env[chead.name] then
+    -- a call through a local variable, ((((G a1) a2) ... an)): Shen's
+    -- (G a1 ... an) for a G it knows nothing about. G and a1 go first in
+    -- both forms, whatever a1 is.
+    table.insert(args, 1, car(rest))
+    if #args < 2 or #args > MAX_CALLN then return nil end
+    gref = env[chead.name]
+    local n = #args
+    local free = true
+    for i = 2, n do free = free and order_free(args[i], env) end
+    if not free then
+      -- only the last argument may do anything: the earlier ones are read
+      -- twice, and PRE needs them before it runs
+      for i = 1, n - 1 do
+        if not order_free(args[i], env) then return nil end
+      end
+      local cs = {}
+      for i = 1, n - 1 do cs[i] = cexpr(args[i], env) end
+      local head = gref .. ", " .. table.concat(cs, ", ")
+      local a = head .. ", PRE" .. n .. "(" .. head .. "), " .. (last or cexpr(args[n], env))
+      if not tail then return nt_call("CUR" .. n .. "P", a, n + 2) end
+      return "CUR" .. n .. "P(" .. a .. ")"
+    end
+  else
     return nil
   end
-  local rest = cdr(cur)
-  if not (is_cons(rest) and cdr(rest) == NIL) then return nil end
-  local sym = car(rest)
-  if not (is_symbol(sym) and not env[sym.name]) then return nil end
   local n = #args
-  if n < 1 or n > MAX_CALLN then return nil end
-  for i = 2, n do
-    if not order_free(args[i], env) then return nil end
-  end
-  local fnref = callee_ref("fn")
   local cargs = {}
-  for i = 1, n do cargs[i] = cexpr(args[i], env) end
+  for i = 1, n - 1 do cargs[i] = cexpr(args[i], env) end
+  cargs[n] = last or cexpr(args[n], env)
   if not tail then
-    return nt_call("CUR" .. n, fnref .. "(" .. symlit(sym.name) .. "), "
-                   .. table.concat(cargs, ", "), n + 1)
+    return nt_call("CUR" .. n, gref .. ", " .. table.concat(cargs, ", "), n + 1)
   end
-  return "CUR" .. n .. "(" .. fnref .. "(" .. symlit(sym.name) .. "), "
-         .. table.concat(cargs, ", ") .. ")"
+  return "CUR" .. n .. "(" .. gref .. ", " .. table.concat(cargs, ", ") .. ")"
 end
 
 -- The form whose call cexpr_tail is compiling: the body of a lambda or
@@ -970,6 +1086,36 @@ local function cexpr_tail(form, env)
   TAIL_FORM = form
   local s = cexpr(form, env)
   TAIL_FORM = saved
+  return s
+end
+
+-- what a test can skip its boolean check for (see bc)
+local BOOLEAN_FORMS = {}
+for _, n in ipairs({
+  "not", "cons?", "empty?", "number?", "string?", "symbol?", "boolean?", "absvector?",
+  "integer?", "variable?", "tuple?", "vector?", "shen.+string?", "shen.+vector?",
+  "shen.pvar?", "shen.ccons?", "shen.unlocked?", "shen.bc",
+}) do BOOLEAN_FORMS[n] = 1 end
+for _, n in ipairs({ "=", "==", "<", ">", "<=", ">=", "and", "or", "element?", "shen.hds=?" }) do
+  BOOLEAN_FORMS[n] = 2
+end
+-- only a saturated call: a predicate with too few arguments is a closure
+local function gives_boolean(form, env)
+  if form == true or form == false then return true end
+  if not is_cons(form) then return false end
+  local h = car(form)
+  if not (is_symbol(h) and not env[h.name]) then return false end
+  local want = BOOLEAN_FORMS[h.name]
+  return want ~= nil and #to_array(cdr(form)) == want
+end
+
+-- cexpr_tail for the whole body of a lambda or a freeze: whatever enclosed it, its
+-- tail is a tail call of a function of its own (see leave_as_tail_call)
+local function fn_body_tail(form, env)
+  local saved_fn, saved_value = IN_FN_BODY, VALUE_BODY
+  IN_FN_BODY, VALUE_BODY = true, false
+  local s = cexpr_tail(form, env)
+  IN_FN_BODY, VALUE_BODY = saved_fn, saved_value
   return s
 end
 
@@ -1089,12 +1235,16 @@ local function ccall(form, env, tail)
           return "type(" .. argstr .. ")==\"boolean\""
         end
         if name == "not" and ar == 1 then
-          return "not (" .. argstr .. ")"
+          if gives_boolean(args[1], env) then return "not (" .. argstr .. ")" end
+          return "not BC(" .. argstr .. ")"
         end
+        if name == "shen.bc" and ar == 1 then return "BC(" .. argstr .. ")" end
         if name == "hd" and ar == 1 then
+          if proven_cons(args[1], env) then return cell_field(argstr, 1) end
           return "HD(" .. argstr .. ")"
         end
         if name == "tl" and ar == 1 then
+          if proven_cons(args[1], env) then return cell_field(argstr, 2) end
           return "TL(" .. argstr .. ")"
         end
         if name == "thaw" and ar == 1 then
@@ -1177,7 +1327,7 @@ local function ccall(form, env, tail)
       return unknown_call(name, argstr, #args, tail)
     end
   else
-    local cur = curried_call(form, env, tail)
+    local cur = curried_call(form, env, tail, #cargs == 1 and cargs[1] or nil)
     if cur and not (hoist and NTCOUNT ~= n0) then return cur end
     -- head is a bound variable or a compound expression -> generic apply
     local hv = cexpr(head, env)
@@ -1185,11 +1335,12 @@ local function ccall(form, env, tail)
       hv = hoist_args(hv)
       argstr = table.concat(cargs, ", ")
     end
+    local app = app_name(#args)
     if not tail then
-      return nt_call("APP", hv .. (#args > 0 and (", " .. argstr) or ""), #args + 1)
+      return nt_call(app, hv .. (#args > 0 and (", " .. argstr) or ""), #args + 1)
     end
     if #args == 0 then return "APP(" .. hv .. ")" end
-    return "APP(" .. hv .. ", " .. argstr .. ")"
+    return app .. "(" .. hv .. ", " .. argstr .. ")"
   end
 end
 
@@ -1274,6 +1425,29 @@ end
 -- partials / variables, arity mismatches, shadowed name) keeps ordinary
 -- codegen and still works: the loop only replaces the tail self-call; the
 -- function value installed in F is unchanged.
+-- A loop's accumulator, (f V (+ V E)) with E not a literal, may leave int32
+-- range. Under dual-number LuaJIT (arm64) the loop's trace is specialised to an
+-- int V, and once V is a double every iteration fails that guard and runs the
+-- loop's head plus a side trace, about 10 times the cost of the loop itself.
+-- ADDF and friends always give a double, so the trace is specialised to that.
+local ACCUMULATOR = { ["+"] = "ADD", ["-"] = "SUB", ["*"] = "MUL" }
+local function accumulator(form, lname, env, code)
+  if not is_cons(form) or not is_symbol(car(form)) then return code end
+  local helper = ACCUMULATOR[car(form).name]
+  if not helper or env[car(form).name] then return code end
+  local operands = to_array(cdr(form))
+  if #operands ~= 2 then return code end
+  local a, b = operands[1], operands[2]
+  local function is_param(x) return is_symbol(x) and env[x.name] == lname end
+  local other
+  if is_param(a) then other = b
+  elseif is_param(b) and helper ~= "SUB" then other = a
+  else return code end
+  if type(other) == "number" then return code end
+  if code:sub(1, #helper + 1) ~= helper .. "(" then return code end
+  return helper .. "F" .. code:sub(#helper + 1)
+end
+
 local function try_self_tail(form, env)
   if not SELF then return nil end
   local head = car(form)
@@ -1292,7 +1466,9 @@ local function try_self_tail(form, env)
   end
   if #args == 0 then return "goto tco" end
   local cargs = {}
-  for i = 1, #args do cargs[i] = cexpr(args[i], env) end
+  for i = 1, #args do
+    cargs[i] = accumulator(args[i], SELF.lnames[i], env, cexpr(args[i], env))
+  end
   return table.concat(SELF.lnames, ", ") .. " = "
          .. table.concat(cargs, ", ") .. "; goto tco"
 end
@@ -1520,7 +1696,53 @@ local function const_lua(form, env)
   return nil
 end
 
+-- Compiling a form and then throwing away its text must throw away what compiling
+-- left behind as well. Above all CCACHE: a cached accessor names a local whose
+-- declaration was in the discarded text, and reading it afterwards reads an undeclared
+-- global, so nil, with no error. Returns the function that undoes the attempt. The
+-- attempt runs with a child CCACHE, which it restores on either outcome.
+local function compile_attempt()
+  local cc, fnl = CCACHE, FNL
+  local np, npt, pt, nloc, nosplit = fnl.np, fnl.npt, fnl.pt, fnl.nloc, fnl.nosplit
+  local nbodies, ctx_nt, ctx_sd = CTX and #CTX.cbodies, CTX and CTX.nt, CTX and CTX.sd
+  local ntcount, tcount, tailpre = NTCOUNT, TCOUNT, TAILPRE
+  local hoist, nhoist, hpure = HOIST, HOIST and #HOIST.out, HOIST and HOIST.pure
+  local self_, self_used = SELF, SELF and SELF.used
+  local nfref = FREF_LIST and #FREF_LIST
+  CCACHE = child_cache()
+  local function keep() CCACHE = cc end
+  local function undo()
+    CCACHE = cc
+    fnl.np, fnl.npt, fnl.pt, fnl.nloc, fnl.nosplit = np, npt, pt, nloc, nosplit
+    if CTX then
+      for i = #CTX.cbodies, nbodies + 1, -1 do CTX.cbodies[i] = nil end
+      CTX.nt, CTX.sd = ctx_nt, ctx_sd
+    end
+    NTCOUNT, TCOUNT, TAILPRE = ntcount, tcount, tailpre
+    if hoist then
+      for i = #hoist.out, nhoist + 1, -1 do hoist.out[i] = nil end
+      hoist.pure = hpure
+    end
+    if self_ then self_.used = self_used end
+    if FREF_LIST then
+      for i = #FREF_LIST, nfref + 1, -1 do
+        FREF_MAP[FREF_LIST[i].name] = nil
+        FREF_LIST[i] = nil
+      end
+    end
+  end
+  return undo, keep
+end
+
+local try_trap_opt_body
 local function try_trap_opt(form, env)
+  local undo, keep = compile_attempt()
+  local r = try_trap_opt_body(form, env)
+  if r == nil then undo() else keep() end
+  return r
+end
+
+try_trap_opt_body = function(form, env)
   if not (is_cons(form) and is_symbol(form[1]) and form[1].name == "trap-error"
           and not env["trap-error"]) then
     return nil
@@ -1785,6 +2007,10 @@ local WIDE_SPLIT_LOCALS = 80
 
 -- see the lambda case of cexpr; deeper than any curried chain in the kernel
 local CURRY_DEPTH = 32
+-- Deepest lambda group compiled as one function; parameters hold registers.
+local MAX_UNCURRY = 4
+C.UNCURRY = os.getenv("SHEN_UNCURRY") ~= "off"
+C.HOIST_LAMBDA = os.getenv("SHEN_HOIST_LAMBDA") ~= "off"
 
 local function is_ident(s)
   return type(s) == "string" and s:match("^[%a_][%w_]*$") ~= nil
@@ -1876,6 +2102,8 @@ local function hoist_kc(form, env, lnames, own)
   local saved_cont = push_inline_cont()
   remap_cont(remap)
   local saved_impl, saved_cnt = IN_IMPL, CNT
+  local saved_value = VALUE_BODY
+  VALUE_BODY, VALUE_NEXT = VALUE_NEXT, false
   SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true, nslots); IN_IMPL = false
   local owner
   if own then
@@ -1889,6 +2117,7 @@ local function hoist_kc(form, env, lnames, own)
   if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
   SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
   CONT = saved_cont; IN_IMPL = saved_impl; CNT = saved_cnt
+  VALUE_BODY = saved_value
   local idx = #CTX.cbodies + 1
   if owner and owner.used then
     local dv = gen("d")
@@ -1929,6 +2158,21 @@ local function try_split_let(form, env)
   return ret(hoist_kc(form, env, lnames, true))
 end
 
+-- A lambda that reads no outer local is a constant: built once when its defun
+-- is loaded, in KC, instead of per evaluation. Creating a closure (FNEW) is a
+-- bytecode LuaJIT cannot trace, so the defun creating one per iteration would
+-- otherwise never compile. Only its identity changes: two evaluations of one
+-- such lambda are now the same function.
+local function hoist_closed(form, env, src)
+  if not (CTX and C.HOIST_LAMBDA) then return src end
+  local fv = {}
+  collect_free(form, env, {}, fv)
+  if next(fv) ~= nil then return src end
+  local idx = #CTX.cbodies + 1
+  CTX.cbodies[idx] = src
+  return "KC[" .. idx .. "]"
+end
+
 -- The statements of a lambda body (`params`: its parameter list), compiled
 -- as a function of its own that counts itself like a defun's impl (see
 -- NT_SRC): a lambda called by a tail call holds no counted caller frame.
@@ -1937,10 +2181,13 @@ local function counted_body(form, env, params)
   local saved_self, saved_h, saved_cc, saved_fnl = SELF, HOIST, CCACHE, FNL
   local saved_cont = push_inline_cont()
   local saved_impl, saved_cnt = IN_IMPL, CNT
+  local saved_value = VALUE_BODY
+  VALUE_BODY = false
   SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true, 1); IN_IMPL = false
   local owner = { used = false, tok = "\1" .. gen("k") .. "\1" }
   CNT = { owner = owner, ret = true }
   local body = ctail(form, env)
+  VALUE_BODY = saved_value
   if FNL.pt then body = "local PT = {}; " .. body end
   SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
   CONT = saved_cont; IN_IMPL = saved_impl; CNT = saved_cnt
@@ -2020,6 +2267,8 @@ function cexpr(form, env)
         -- would illegally cross the function boundary. Likewise reset the
         -- chain-hoist state: KC[i] has its own local budget, and locals cached
         -- in the enclosing function are not in scope here.
+        -- the whole body of a freeze or a lambda is in tail position (see ccall)
+        VALUE_NEXT = form ~= TAIL_FORM
         local call = hoist_kc(form, env)
         -- The KC call itself may raise or side-effect: later siblings in the
         -- enclosing statement must not hoist chains ahead of it.
@@ -2033,7 +2282,10 @@ function cexpr(form, env)
       local saved_cont = push_inline_cont()
       local saved_impl = IN_IMPL
       SELF = nil; HOIST = nil; CCACHE = {}; FNL = new_fnl(true); IN_IMPL = false
+      local saved_value = VALUE_BODY
+      VALUE_BODY = VALUE_BODY or form ~= TAIL_FORM
       local body_stmts = ctail(form, env)
+      VALUE_BODY = saved_value
       if FNL.pt then body_stmts = "local PT = {}; " .. body_stmts end
       SELF = saved_self; HOIST = saved_h; CCACHE = saved_cc; FNL = saved_fnl
       CONT = saved_cont; IN_IMPL = saved_impl
@@ -2064,9 +2316,34 @@ function cexpr(form, env)
         for i = 1, depth do e2 = extend(e2, vars[i].name, t .. "[" .. i .. "]") end
         local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
         HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
-        local bodyc = cexpr_tail(inner, e2)
+        local bodyc = fn_body_tail(inner, e2)
         HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
         return "CURRY(" .. depth .. ", function(" .. t .. ") return " .. bodyc .. " end)"
+      end
+      -- (lambda X (lambda Y B)) is one function of the whole group. Creating
+      -- the inner closure had no effect but the allocation, and a call with
+      -- every argument (CURn, APPn) now makes none. A partial application
+      -- goes through PARTIAL, as for a defun.
+      -- (Not in wide mode, which budgets each closure's upvalues below.)
+      if depth >= 2 and depth <= MAX_UNCURRY and C.UNCURRY and not WIDE then
+        local lns, e2 = {}, env
+        for i = 1, depth do
+          lns[i] = gen("v")
+          e2 = extend(e2, vars[i].name, lns[i])
+        end
+        local plist = table.concat(lns, ", ")
+        local fnsrc
+        if CTX then
+          fnsrc = "function(" .. plist .. ") " .. upart_guard(plist, depth)
+            .. counted_body(inner, e2, plist) .. " end"
+        else
+          local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
+          HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
+          local bodyc = fn_body_tail(inner, e2)
+          HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
+          fnsrc = "function(" .. plist .. ") " .. upart_guard(plist, depth) .. "return " .. bodyc .. " end"
+        end
+        return hoist_closed(form, env, "MKFUN(" .. depth .. ", " .. fnsrc .. ")")
       end
       local ln = gen("v")
       if WIDE and CTX then
@@ -2088,7 +2365,7 @@ function cexpr(form, env)
           local saved_h, saved_impl, saved_cont, saved_cnt = HOIST, IN_IMPL, CONT, CNT
           push_inline_cont(); remap_cont(remap)
           HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
-          local bodyc = cexpr_tail(body, extend(remap_env(env, remap), v.name, ln))
+          local bodyc = fn_body_tail(body, extend(remap_env(env, remap), v.name, ln))
           HOIST = saved_h; IN_IMPL = saved_impl; CONT = saved_cont; CNT = saved_cnt
           local idx = #CTX.cbodies + 1
           CTX.cbodies[idx] = "function(" .. ln .. ", " .. t .. ") return " .. bodyc .. " end"
@@ -2100,13 +2377,13 @@ function cexpr(form, env)
       -- Not impl-scope: `fN` locals live in impl, not this nested function.
       if CTX then
         -- a function of its own that counts itself, like a defun's impl
-        return "MKFUN(1, function(" .. ln .. ") " .. counted_body(body, e2, ln) .. " end)"
+        return hoist_closed(form, env, lam1(ln, counted_body(body, e2, ln)))
       end
       local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
       HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
-      local bodyc = cexpr_tail(body, e2)
+      local bodyc = fn_body_tail(body, e2)
       HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
-      return "MKFUN(1, function(" .. ln .. ") return " .. bodyc .. " end)"
+      return lam1(ln, "return " .. bodyc)
     elseif op == "freeze" then
       local body = car(cdr(form))
       if CTX then
@@ -2127,7 +2404,7 @@ function cexpr(form, env)
         local saved_cont = CONT
         if remap then push_inline_cont(); remap_cont(remap) end
         HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
-        local body_str = cexpr_tail(body, remap_env(env, remap))
+        local body_str = fn_body_tail(body, remap_env(env, remap))
         HOIST = saved_h; IN_IMPL = saved_impl; CONT = saved_cont; CNT = saved_cnt
         local idx = #CTX.cbodies + 1
         CTX.cbodies[idx] = "function(" .. params .. ") return "
@@ -2137,7 +2414,7 @@ function cexpr(form, env)
       end
       local saved_h, saved_impl, saved_cnt = HOIST, IN_IMPL, CNT
       HOIST = nil; IN_IMPL = false; CNT = nil   -- runs outside this frame
-      local bodyc = cexpr_tail(body, env)
+      local bodyc = fn_body_tail(body, env)
       HOIST = saved_h; IN_IMPL = saved_impl; CNT = saved_cnt
       return "MKFUN(0, function() return " .. bodyc .. " end)"
     elseif op == "defun" then
@@ -2155,6 +2432,72 @@ function cexpr(form, env)
     if ct then return ct end
     return ccall(form, env)
   end
+end
+
+-- Count sinking. A counting defun only needs its count on the paths that make
+-- a non-tail call, and in pattern-matching code half the calls take a clause
+-- that makes none: a function's leading tests run uncounted, and each branch
+-- opens the count itself if it needs it. The segment path restarts the
+-- function from the top, so everything before the count must be safe to run
+-- twice: tests built from SINK_TEST primitives over variables and literals,
+-- which change nothing (one that raises never reaches the count).
+local SINK_TEST = {}
+for _, n in ipairs({
+  "=", ">", "<", ">=", "<=", "cons?", "number?", "string?", "symbol?",
+  "boolean?", "empty?", "absvector?", "tuple?", "integer?", "variable?",
+  "hd", "tl", "not", "and", "or", "if", "+", "-", "*",
+}) do SINK_TEST[n] = true end
+local function sink_test(form, env)
+  if not is_cons(form) then return true end
+  local h = car(form)
+  if not (is_symbol(h) and not env[h.name] and SINK_TEST[h.name]) then return false end
+  local cur = cdr(form)
+  while is_cons(cur) do
+    if not sink_test(car(cur), env) then return false end
+    cur = cdr(cur)
+  end
+  return true
+end
+local function sinkable(form, env)
+  if not is_cons(form) then return false end
+  local h = car(form)
+  if not (is_symbol(h) and not env[h.name]) then return false end
+  if h.name == "if" then return sink_test(car(cdr(form)), env) end
+  if h.name == "cond" then
+    local cur = cdr(form)
+    while is_cons(cur) do
+      if not sink_test(car(car(cur)), env) then return false end
+      cur = cdr(cur)
+    end
+    return true
+  end
+  return false
+end
+-- `form` in tail position of a counting defun with no count open yet.
+sink_branch = function(form, env)
+  local saved = CNT
+  local owner = { used = false, tok = "\1" .. gen("k") .. "\1" }
+  local sink = sinkable(form, env)
+  CNT = { owner = owner, ret = true, sink = sink, params = saved.params }
+  local undo, keep = compile_attempt()
+  local src = ctail(form, env)
+  if sink and owner.used then
+    -- a test made a counted call after all: the count opens here. Starting over
+    -- discards this text, so discard what compiling it left behind too.
+    undo()
+    sink = false
+    CNT.sink = false
+    owner.used = false
+    src = ctail(form, env)
+  else
+    keep()
+  end
+  CNT = saved
+  if sink or not owner.used then return (src:gsub(owner.tok, "")) end
+  local dv = gen("d")
+  return "local " .. dv .. " = SD[1]; if " .. dv .. " >= " .. SEG_FRAMES
+    .. " then return SEG(impl" .. saved.params .. ") end; SD[1] = " .. dv .. " + 1; "
+    .. (src:gsub(owner.tok, "SD[1] = " .. dv .. "; "))
 end
 
 -- ------------------------------------------------------------------
@@ -2209,6 +2552,79 @@ local function ctail_depth(form, env)
 end
 
 -- ------------------------------------------------------------------
+-- Strict tests: the test of an if or cond clause and both operands of and/or
+-- must be booleans. (if 1 a b) used to take the then branch with no error, since
+-- Lua treats any value but nil and false as true. A form that can only give a
+-- boolean goes unchecked; anything else is compiled as (shen.bc FORM), which is
+-- BC(FORM), an ordinary call that raises on anything else.
+-- ------------------------------------------------------------------
+local function bc(form, env)
+  if gives_boolean(form, env) then return form end
+  return R.cons(R.intern("shen.bc"), R.cons(form, NIL))
+end
+-- The last operand of and/or is in tail position, and a tail call stays one:
+-- (and (p X) (next Xs)) must not grow the stack, whichever function it calls. So
+-- in a defun's tail the check goes to the leaves of its control forms, and a call
+-- is left unchecked. Its value is this function's result, which whoever tests it
+-- checks; only a caller that uses the result without testing it can see a
+-- non-boolean. The same goes for a lambda or freeze body with no enclosing defun. In a
+-- top-level form or a control form in value position nothing is a tail call, so a call
+-- there is checked as well.
+local NOT_A_TAIL_CALL = {}
+for _, n in ipairs({
+  "trap-error", "lambda", "freeze", "+", "-", "*", "/", "cons", "hd", "tl", "@p",
+  "@v", "@s", "cn", "str", "pos", "tlstr", "intern", "absvector", "<-address",
+  "address->", "n->string", "string->n", "value", "set", "get-time",
+}) do NOT_A_TAIL_CALL[n] = true end
+local function leave_as_tail_call(h, env)
+  if VALUE_BODY or not (DEFUN_NAME or IN_FN_BODY) then return false end
+  return not (is_symbol(h) and not env[h.name] and NOT_A_TAIL_CALL[h.name])
+end
+local function bc_tail(form, env)
+  if not is_cons(form) then return bc(form, env) end
+  local h = car(form)
+  if not is_symbol(h) or env[h.name] then
+    if gives_boolean(form, env) or not leave_as_tail_call(h, env) then return bc(form, env) end
+    return form
+  end
+  local op = h.name
+  local function rebuild(items)
+    local r = NIL
+    for i = #items, 1, -1 do r = R.cons(items[i], r) end
+    return r
+  end
+  if op == "if" then
+    local a = to_array(form)
+    if #a == 4 then return rebuild({ h, a[2], bc_tail(a[3], env), bc_tail(a[4], env) }) end
+  elseif op == "cond" then
+    local a = to_array(form)
+    for i = 2, #a do
+      local cl = to_array(a[i])
+      a[i] = rebuild({ cl[1], bc_tail(cl[2], env) })
+    end
+    return rebuild(a)
+  elseif op == "do" then
+    local a = to_array(form)
+    a[#a] = bc_tail(a[#a], env)
+    return rebuild(a)
+  elseif op == "let" then
+    local a = to_array(form)
+    if #a == 4 and is_symbol(a[2]) then
+      local inner = {}
+      for k, v in pairs(env) do inner[k] = v end
+      inner[a[2].name] = a[2].name
+      return rebuild({ h, a[2], a[3], bc_tail(a[4], inner) })
+    end
+  elseif op == "type" then
+    local a = to_array(form)
+    a[2] = bc_tail(a[2], env)
+    return rebuild(a)
+  end
+  if gives_boolean(form, env) or not leave_as_tail_call(h, env) then return bc(form, env) end
+  return form
+end
+
+-- ------------------------------------------------------------------
 -- ctail : tail position (emits statements; control-flow returns)
 -- ------------------------------------------------------------------
 function ctail(form, env)
@@ -2218,6 +2634,8 @@ function ctail(form, env)
   local head = car(form)
   if is_symbol(head) and not env[head.name] then
     local op = head.name
+    -- under count sinking (see sink_branch) a branch opens its own count
+    local ctail = (CNT and CNT.sink) and sink_branch or ctail
     if op == "if" then
       local test = car(cdr(form))
       local th   = car(cdr(cdr(form)))
@@ -2230,7 +2648,7 @@ function ctail(form, env)
       -- was not taken -- semantics identical to the old fully-nested
       -- `if ... then ... else ... end`, but a then-spine of N pattern tests
       -- now costs O(1) nesting instead of N (LuaJIT parser rejects ~200).
-      local pre, testc = cstmt_expr(test, env)
+      local pre, testc = cstmt_expr(bc(test, env), env)
       local dt = ctail_depth(th, env)
       local de = el and ctail_depth(el, env) or 0
       if de <= dt then
@@ -2241,12 +2659,12 @@ function ctail(form, env)
         local els = el and ctail(el, env) or ret("false")
         CCACHE = saved_cc
         return pre .. "if not (" .. testc .. ") then " .. els .. " end "
-               .. ctail(th, env)
+               .. with_cons_facts(test, env, ctail, th, env)
       else
         -- nest then, flatten else
         local saved_cc = CCACHE
         CCACHE = child_cache()
-        local ths = ctail(th, env)
+        local ths = with_cons_facts(test, env, ctail, th, env)
         CCACHE = saved_cc
         return pre .. "if (" .. testc .. ") then " .. ths .. " end "
                .. ctail(el, env)
@@ -2262,12 +2680,12 @@ function ctail(form, env)
         -- each result sits inside its own then-block: block-scope its chain cache
         local saved_cc = CCACHE
         CCACHE = child_cache()
-        local resc = ctail(res, env)
+        local resc = with_cons_facts(test, env, ctail, res, env)
         CCACHE = saved_cc
         if i == 1 then
-          parts[#parts+1] = "if (" .. cexpr(test, env) .. ") then " .. resc
+          parts[#parts+1] = "if (" .. cexpr(bc(test, env), env) .. ") then " .. resc
         else
-          parts[#parts+1] = " elseif (" .. cexpr(test, env) .. ") then " .. resc
+          parts[#parts+1] = " elseif (" .. cexpr(bc(test, env), env) .. ") then " .. resc
         end
       end
       parts[#parts+1] = " else return ERR(\"cond failure\") end"
@@ -2308,12 +2726,13 @@ function ctail(form, env)
       -- inside `then` cost one syntax level per test. The early-exit form is
       -- semantically identical and costs O(1) nesting per link.
       local a = car(cdr(form)); local b = car(cdr(cdr(form)))
-      local pre, ac = cstmt_expr(a, env)
-      return pre .. "if not (" .. ac .. ") then " .. ret("false") .. " end " .. ctail(b, env)
+      local pre, ac = cstmt_expr(bc(a, env), env)
+      return pre .. "if not (" .. ac .. ") then " .. ret("false") .. " end "
+             .. with_cons_facts(a, env, ctail, bc_tail(b, env), env)
     elseif op == "or" then
       local a = car(cdr(form)); local b = car(cdr(cdr(form)))
-      local pre, ac = cstmt_expr(a, env)
-      return pre .. "if (" .. ac .. ") then " .. ret("true") .. " end " .. ctail(b, env)
+      local pre, ac = cstmt_expr(bc(a, env), env)
+      return pre .. "if (" .. ac .. ") then " .. ret("true") .. " end " .. ctail(bc_tail(b, env), env)
     elseif op == "trap-error" then
       local n0 = NTCOUNT
       local opt = try_trap_opt(form, env)
@@ -2398,6 +2817,38 @@ end
 -- top-level form compilation
 -- ------------------------------------------------------------------
 -- compile (defun NAME (PARAMS) BODY) -> Lua source registering into F-table.
+local function SD_REF_SEEN(src) return src:find("SD[1]", 1, true) ~= nil end
+C.SINK_COUNT = os.getenv("SHEN_SINK_COUNT") ~= "off"
+
+-- Hot runtime helpers a defun's chunk binds as locals. A chunk global is a
+-- hash lookup in ENV plus an identity guard on every use, in the interpreter
+-- and on a trace alike; a never-reassigned local is an immutable upvalue,
+-- which a trace folds to a constant. Only ENV entries fixed before any chunk
+-- runs may be listed (not GET_OR, say, which install_native_stdlib sets later).
+-- Only the names a body mentions are bound: each is an upvalue, and Lua allows
+-- 60 per function (past that the width retry recompiles in wide mode).
+local HOT_HELPERS = {
+  "ADD", "SUB", "MUL", "DIV", "GT", "LT", "GE", "LE", "EQ", "HD", "TL",
+  "APP1", "APP2", "APP3", "APP4", "APP", "MKFUN", "F", "NIL",
+  "CUR2", "CUR3", "CUR4", "PRE2", "PRE3", "PRE4", "CUR2P", "CUR3P", "CUR4P",
+  "TRMC_C", "TRMC_T", "CMT", "getmetatable", "setmetatable", "BC", "UPART",
+}
+local function helper_imports(a, b, c)
+  -- wide mode budgets its upvalues without these
+  if WIDE then return "" end
+  local names = {}
+  local find = string.find
+  for i = 1, #HOT_HELPERS do
+    local h = HOT_HELPERS[i]
+    if find(a, h, 1, true) or find(b, h, 1, true) or (c and find(c, h, 1, true)) then
+      names[#names + 1] = h
+    end
+  end
+  if #names == 0 then return "" end
+  local l = table.concat(names, ", ")
+  return "local " .. l .. " = " .. l .. "; "
+end
+
 local function cdefun(form)
   local name = car(cdr(form)).name
   local params = to_array(car(cdr(cdr(form))))
@@ -2459,7 +2910,15 @@ local function cdefun(form)
     owner = { used = false, tok = "\1" .. gen("k") .. "\1" }
     CNT = { owner = owner, ret = true }
   end
-  local body_src = ctail(body, env)
+  local body_src
+  if owner and SELF == nil and C.SINK_COUNT then
+    CNT.params = #lnames > 0 and (", " .. table.concat(lnames, ", ")) or ""
+    body_src = sink_branch(body, env)
+    -- each branch that needs the count opens it; none is left for the top
+    CTX.sd = CTX.sd or SD_REF_SEEN(body_src)
+  else
+    body_src = ctail(body, env)
+  end
   CNT = saved_cnt
   local fref_decls = {}
   for i, r in ipairs(FREF_LIST) do
@@ -2527,6 +2986,9 @@ local function cdefun(form)
   if CTX.nt or CTX.sd or (owner and owner.used) then
     nt_init = "local SD, SEG, SEGSELF = SD, SEG, SEGSELF; " .. (CTX.nt and NT_SRC or "")
   end
+  -- (TLOOP below uses these whether or not the body names them)
+  nt_init = helper_imports(kc_init, body_src, trmc_used and "setmetatable CMT NIL TRMC_C TRMC_T")
+    .. nt_init
   CTX = saved
   local plist = table.concat(lnames, ", ")
   local src
@@ -2585,21 +3047,50 @@ end
 -- expose expression compiler + a returning-chunk helper for eval
 C.cexpr = cexpr
 C.ctail = ctail
+-- Run one whole compile. Its state lives in module locals that each compiler
+-- function saves on entry and restores on the way out, which an error skips: a
+-- malformed form left CTX set, and every later compile then emitted KC[i] or NT
+-- references into a chunk that declares neither, so the session could no longer
+-- evaluate anything. C.ARITY is restored too, so a defun that failed to compile
+-- does not change how later calls to the old definition are compiled.
+local function atomic_compile(arity_name, f, ...)
+  local s_ctx, s_self, s_cont, s_ntcount, s_cnt, s_tcount, s_tailpre = CTX, SELF, CONT, NTCOUNT, CNT, TCOUNT, TAILPRE
+  local s_in, s_dn, s_fl, s_fm, s_cc, s_hoist, s_fnl = IN_IMPL, DEFUN_NAME, FREF_LIST, FREF_MAP, CCACHE, HOIST, FNL
+  local s_wide, s_tf = WIDE, TAIL_FORM
+  local s_value, s_fn = VALUE_BODY, IN_FN_BODY
+  local s_arity = arity_name and C.ARITY[arity_name]
+  local ok, res = pcall(f, ...)
+  if ok then return res end
+  CTX, SELF, CONT, NTCOUNT, CNT, TCOUNT, TAILPRE = s_ctx, s_self, s_cont, s_ntcount, s_cnt, s_tcount, s_tailpre
+  IN_IMPL, DEFUN_NAME, FREF_LIST, FREF_MAP, CCACHE, HOIST, FNL = s_in, s_dn, s_fl, s_fm, s_cc, s_hoist, s_fnl
+  WIDE, TAIL_FORM = s_wide, s_tf
+  VALUE_BODY, VALUE_NEXT = s_value, false
+  IN_FN_BODY = s_fn
+  for k in pairs(PROVEN) do PROVEN[k] = nil end
+  if arity_name then C.ARITY[arity_name] = s_arity end
+  error(res, 0)
+end
+
 function C.compile_expr_chunk(form)
   -- the chunk's one call is not counted (nt_call): a single frame
-  return "return (" .. cexpr_tail(form, {}) .. ")"
+  return atomic_compile(nil, function()
+    return "return (" .. cexpr_tail(form, {}) .. ")"
+  end)
 end
 
 -- compile any top-level form to a Lua statement string
 function C.compile_top(form, wide)
   if is_cons(form) and is_symbol(car(form)) and car(form).name == "defun" then
-    return cdefun_mode(form, wide)
+    local nm = is_cons(cdr(form)) and car(cdr(form))
+    return atomic_compile(is_symbol(nm) and nm.name or nil, cdefun_mode, form, wide)
   else
     -- a top-level expression: evaluate for side effects. Wrapped in do..end
     -- so a whole kernel file can be concatenated into ONE chunk (boot.lua's
     -- bytecode cache) without accumulating `local _` slots toward Lua's
     -- 200-locals-per-scope limit.
-    return "do local _ = " .. cexpr(form, {}) .. "; end"
+    return atomic_compile(nil, function()
+      return "do local _ = " .. cexpr(form, {}) .. "; end"
+    end)
   end
 end
 

@@ -27,8 +27,8 @@ ffi.cdef[[int chdir(const char*); char *getcwd(char*, size_t);]]
 local cwdbuf = ffi.new("char[4096]")
 assert(ffi.C.getcwd(cwdbuf, 4096) ~= nil)
 local ROOT = ffi.string(cwdbuf)
-assert(ffi.C.chdir("../cl-source/ShenOSKernel-42/tests") == 0,
-       "tests dir not found (expected ../cl-source/ShenOSKernel-42/tests)")
+local TESTS = os.getenv("SHEN_TESTS_DIR") or "tests"
+assert(ffi.C.chdir(TESTS) == 0, "tests dir not found: " .. TESTS)
 
 -- same environment fixes typecheck_alloc.lua needs
 local mf = P.F["shen.macros"]
@@ -136,10 +136,13 @@ local GOLDEN = ROOT .. "/" .. (arg[0]:gsub("[^/]*$", "")) .. "golden_typecheck.g
 local mode = arg[1] or "compare"
 
 local results = {}
+local INFERENCES
 for _, entry in ipairs(CORPUS) do
   local name, fn = entry[1], entry[2]
+  local infs0 = P.F["inferences"]()
   local ok, res = pcall(fn)
   results[name] = ok and serialize(res) or ("#<error: " .. tostring(res) .. ">")
+  if name == "tc-ycombinator" then INFERENCES = P.F["inferences"]() - infs0 end
 end
 
 if mode == "capture" then
@@ -170,6 +173,11 @@ elseif mode == "compare" then
     else
       pass = pass + 1
     end
+  end
+  -- the kernel's own count for the y-combinator: engines must agree with it too
+  if INFERENCES ~= 431741 then
+    fail = fail + 1
+    io.write("FAIL tc-ycombinator inferences: ", tostring(INFERENCES), ", wanted 431741\n")
   end
   io.write(string.format("golden compare: %d pass, %d fail\n", pass, fail))
   os.exit(fail == 0 and 0 or 1)

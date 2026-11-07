@@ -96,16 +96,51 @@ do
   -- pause=200), and most of that churn is short-lived list cells. Raising
   -- the pause to 400 (heap may grow to 4x live before a full cycle) cuts
   -- suite CPU ~15-20% for about 2x peak RSS (30MB -> 60MB on that suite).
+  -- (Past a small heap the pause adapts, below.)
+  -- A stepmul of 1000 finishes each cycle sooner, so less garbage allocated
+  -- during the cycle counts as live toward the next threshold. Same
+  -- instructions and CPU; peak footprint on the kernel suite 186 -> 162 MB, on
+  -- nrev 40-56 -> 38 MB. Each GC step does more work at once, which an embedder
+  -- that cares about pause length may want to set back.
+  -- A larger pause is not a free win: 800,1000 costs hof 1132 MB (from 130) and
+  -- the kernel suite 281 MB, for nrev -4% instructions and -20% CPU.
   -- SHEN_GC=off keeps the host's defaults (embedders that manage the GC
   -- themselves should set it); SHEN_GC="pause[,stepmul]" sets explicit
-  -- values (e.g. SHEN_GC=800,100 buys another ~10% on batch runs at ~110MB;
-  -- SHEN_GC=200 is LuaJIT's default pause).
+  -- values (SHEN_GC=200,200 is LuaJIT's default).
   local gc = os.getenv("SHEN_GC")
   if gc ~= "off" then
     local pause, stepmul
     if gc and gc ~= "" then pause, stepmul = gc:match("^(%d+),?(%d*)$") end
+    -- Lua 5.5 removed "setpause" and "setstepmul" for "param" (and has no newproxy)
+    if _VERSION == "Lua 5.5" then
+      collectgarbage("param", "pause", tonumber(pause) or 400)
+      collectgarbage("param", "stepmul", tonumber(stepmul ~= "" and stepmul) or 1000)
+    else
     collectgarbage("setpause", tonumber(pause) or 400)
-    if stepmul and stepmul ~= "" then collectgarbage("setstepmul", tonumber(stepmul)) end
+    if not pause and newproxy then
+      -- 400 is cheap on a small live heap and wasteful on a big one: the 186 MB
+      -- the kernel suite peaked at was 36 MB live. So at the end of each cycle
+      -- aim for live + max(live, 48 MB) of heap, within pause 150..400. A small
+      -- heap, where the allocation-heavy benchmarks live, stays at 400.
+      -- A pause that is not the one set here was set by the host: leave it, and
+      -- stop adapting.
+      local GROW_KB = 48 * 1024
+      local last = 400
+      local function arm()
+        local sentinel = newproxy(true)
+        getmetatable(sentinel).__gc = function()
+          local want = 100 + 100 * GROW_KB / collectgarbage("count")
+          want = math.floor(want > 400 and 400 or want < 150 and 150 or want)
+          local current = collectgarbage("setpause", want)
+          if current ~= last then collectgarbage("setpause", current); return end
+          last = want
+          arm()
+        end
+      end
+      arm()
+    end
+    collectgarbage("setstepmul", tonumber(stepmul ~= "" and stepmul) or 1000)
+    end
   end
 end
 
@@ -287,8 +322,11 @@ end
 local function cache_key()
   local h = fnv1a(jit and (jit.version .. jit.arch) or _VERSION)
   h = fnv1a(CACHE_FORMAT .. table.concat(FILES, ","), h)
-  -- codegen switches that change compiled output (SHEN_TRMC -> compiler.lua C.TRMC)
-  h = fnv1a("trmc=" .. tostring(os.getenv("SHEN_TRMC") ~= "off"), h)
+  -- codegen switches that change compiled output (compiler.lua): each is read as
+  -- "off" or not there, so a cache built one way is not reused the other way
+  for _, sw in ipairs({ "SHEN_TRMC", "SHEN_UNCURRY", "SHEN_HOIST_LAMBDA", "SHEN_SINK_COUNT", "SHEN_FREEZE_CONT" }) do
+    h = fnv1a(sw .. "=" .. tostring(os.getenv(sw) ~= "off"), h)
+  end
   for _, m in ipairs({ "compiler", "runtime", "prims" }) do
     h = fnv1a(module_source(m), h)
   end
@@ -802,7 +840,11 @@ end
 -- Known: (destroy ...) at the REPL between loads is not in the key.
 -- SHEN_FASL=off disables; SHEN_FASL_DIR overrides ~/.cache/shen-lua-fasl;
 -- SHEN_FASL_DEBUG=1 logs hits/misses to stderr.
-local FASL_FORMAT = "SHENFASL7"  -- 7: a nested load run inside a chunk is no
+local FASL_FORMAT = "SHENFASL9"  -- 9: "d" records whether variancy found an old
+                                 -- type, so replay can skip the query otherwise;
+                                 -- 8: "h" pushes onto a global instead of
+                                 -- storing its whole list at each step;
+                                 -- 7: a nested load run inside a chunk is no
                                  -- longer spliced into the outer fasl (#92);
                                  -- 6: "dv" (shen.*datatypes* by name) replaces
                                  -- "dt" (re-run shen.process-datatype);
@@ -859,7 +901,9 @@ end
 --   | E\n #bytes\n bytes                per-form value/type echo (stoutput)
 --   | A\n <ser names>                   shen.*lambdatable* delta (entries
 --                                       rebuilt by name via shen.lambda-entry)
---   | G\n <ser name><ser val> }*        (set ...) outside any chunk
+--   | G\n <ser name><ser val>           (set ...) outside any chunk
+--   | H\n <ser name><ser head> }*       ditto, when the value is the global's
+--                                       old value with one element pushed
 --   narity\n {ar SP name\n}*  kbase\n nkdata\n entries  gensym\n
 local function fasl_serialize(rec, arity0)
   if rec.uncacheable then error(rec.uncacheable) end
@@ -872,6 +916,7 @@ local function fasl_serialize(rec, arity0)
       parts[#parts+1] = "D\n"
       kdata_ser(r.name, parts)
       kdata_ser(r.typ, parts)
+      kdata_ser(r.old == true, parts)
     elseif r.k == "m" then
       parts[#parts+1] = "M\n"
       kdata_ser(r.name, parts)
@@ -902,6 +947,10 @@ local function fasl_serialize(rec, arity0)
       -- mirrors the "C" chunk framing — no trailing separator, the next
       -- record's kind letter starts immediately after the bytes.
       parts[#parts+1] = "E\n" .. #r.bytes .. "\n" .. r.bytes
+    elseif r.k == "h" then
+      parts[#parts+1] = "H\n"
+      kdata_ser(r.name, parts)
+      kdata_ser(r.head, parts)
     else -- "g"
       parts[#parts+1] = "G\n"
       kdata_ser(r.name, parts)
@@ -964,8 +1013,8 @@ local function fasl_parse(data, pos)
       recs[i] = { k = "c", name = nm, dump = data:sub(pos, pos + len - 1) }
       pos = pos + len
     elseif k == "D" then
-      local v = de_n(2); if not v then return nil end
-      recs[i] = { k = "d", name = v[1], typ = v[2] }
+      local v = de_n(3); if not v then return nil end
+      recs[i] = { k = "d", name = v[1], typ = v[2], old = v[3] }
     elseif k == "M" then
       local v = de_n(1); if not v then return nil end
       recs[i] = { k = "m", name = v[1] }
@@ -995,6 +1044,9 @@ local function fasl_parse(data, pos)
     elseif k == "G" then
       local v = de_n(2); if not v then return nil end
       recs[i] = { k = "g", name = v[1], val = v[2] }
+    elseif k == "H" then
+      local v = de_n(2); if not v then return nil end
+      recs[i] = { k = "h", name = v[1], head = v[2] }
     else return nil end
   end
   local na = tonumber(line() or ""); if not na then return nil end
@@ -1025,7 +1077,27 @@ local function fasl_replay(cached)
       P.load_chunk(r.dump, r.name)()
     elseif r.k == "d" then
       -- through the live F["declare"] so engine sig-table wrappers see it
-      P.F["declare"](r.name, r.typ)
+      local declared = r.old
+      local t = P.GLOBALS["shen.*sigf*"]
+      while R.is_cons(t) and not declared do
+        declared = R.is_cons(t[1]) and t[1][1] == r.name
+        t = t[2]
+      end
+      if declared then
+        P.F["declare"](r.name, r.typ)
+      else
+        -- declare's check that a new type agrees with the old one, which is
+        -- a System S query on the kernel's Prolog: 70M instructions each, 80%
+        -- of the kernel suite on a warm fasl. It only warns, and with no old
+        -- type there is nothing to warn about: neither a signature, nor a type
+        -- from a datatype rule for (fn F), which the compile run recorded in
+        -- r.old and the key's datatype names hold to this load.
+        local variancy = P.F["shen.variancy"]
+        P.F["shen.variancy"] = function() return false end
+        local ok, err = pcall(P.F["declare"], r.name, r.typ)
+        P.F["shen.variancy"] = variancy
+        if not ok then error(err, 0) end
+      end
     elseif r.k == "m" then
       -- the macro's defun chunk replayed above; rebuild the (name . fn) pair
       local fn = P.F[r.name.name]
@@ -1086,6 +1158,9 @@ local function fasl_replay(cached)
       if not P.HUSH_LOAD_ECHO then
         P.F["pr"](r.bytes, P.GLOBALS["*stoutput*"])
       end
+    elseif r.k == "h" then
+      local cur = P.GLOBALS[r.name.name]
+      P.F["set"](r.name, R.cons(r.head, cur == nil and R.NIL or cur))
     else -- "g"
       P.F["set"](r.name, r.val)
     end
@@ -1177,8 +1252,18 @@ local function install_fasl()
   end
 
   wrap_recorded("declare", function(rec, name, typ)
-    return { k = "d", name = name, typ = typ }
+    rec.declaring = { k = "d", name = name, typ = typ }
+    return rec.declaring
   end)
+  -- shen.variancy reaches this only when (fn F) already has a type
+  do
+    local variants = F["shen.variants?"]
+    F["shen.variants?"] = function(...)
+      local rec = FASL_STACK[#FASL_STACK]
+      if rec and rec.declaring then rec.declaring.old = true end
+      return variants(...)
+    end
+  end
   wrap_recorded("shen.record-macro", function(rec, name, fn)
     return { k = "m", name = name }
   end)
@@ -1218,7 +1303,8 @@ local function install_fasl()
     return { k = "p", x = x, pointer = pointer, y = y }
   end)
   wrap_recorded("set", function(rec, name, val)
-    local nm = R.is_symbol(name) and name.name or tostring(name)
+    if not R.is_symbol(name) then return nil end  -- the primitive will raise
+    local nm = name.name
     -- the gensym counter churns on every expansion-time gensym; the replay
     -- fast-forward (max) covers it without hundreds of noise records
     if nm == "shen.*gensym*" then return nil end
@@ -1278,6 +1364,20 @@ local function install_fasl()
       local names = R.NIL
       for i = #rev, 1, -1 do names = R.cons(rev[i], names) end
       return { k = "dv", global = name, names = names }
+    end
+    -- shen.record-kl sets shen.*userdefs* at every define, and storing the whole
+    -- list each time made a fasl quadratic in its definitions (1500 defines:
+    -- 1.1M list cells, 12 of its 14 MB). The recorder runs BEFORE the original
+    -- set, so the global still holds the old value: store only what changed.
+    -- A set to the value already there records nothing only if this fasl has recorded
+    -- that value last: the session replaying it need not hold what this one held.
+    local old = R.is_symbol(name) and P.GLOBALS[nm]
+    rec.last_set = rec.last_set or {}
+    local seen = rec.last_set[nm]
+    rec.last_set[nm] = val
+    if seen ~= nil and rawequal(seen, val) and rawequal(old, val) then return nil end
+    if old and R.is_cons(val) and rawequal(val[2], old) then
+      return { k = "h", name = name, head = val[1] }
     end
     return { k = "g", name = name, val = val }
   end)
@@ -1428,20 +1528,26 @@ local STDLIB_LOADED = false
 -- replays them into shen.*sigf* (and the native typechecker's signature
 -- table) in the original order. SHEN_KERNEL_CACHE=off disables it with the
 -- kernel cache.
-local SIGS_FORMAT = "SHENSIG1"
+--
+-- The file also holds the record stream of (stlib.initialise-datatypes), in the
+-- user fasl's format: its two datatypes run the whole rule compiler and were
+-- 40% of a warm boot's instructions. The records need the fasl recorder, so a
+-- boot with SHEN_FASL=off stores none and runs the phase.
+local SIGS_FORMAT = "SHENSIG2"  -- 2: datatype records after the counters
 local function stlib_sigs_path()
   if P.KERNEL_CACHE_DATA then return nil end   -- single-file bundle
   local p = cache_path()
   return p and (p .. ".stlib") or nil
 end
 
-local function write_sigs(path, key, decl, counters)
+local function write_sigs(path, key, decl, counters, datatypes)
   local parts = { SIGS_FORMAT, "\n", key, "\n", tostring(#decl), "\n" }
   for _, e in ipairs(decl) do
     parts[#parts+1] = e.name .. "\n" .. #e.dump .. "\n" .. e.dump
     kdata_ser(e.typ, parts)
   end
   parts[#parts+1] = tostring(counters.gensym) .. "\n" .. tostring(counters.infs) .. "\n"
+  parts[#parts+1] = datatypes or ""
   local tmp = path .. ".tmp"
   local fh = open_for_write(tmp)
   if not fh then return end
@@ -1478,7 +1584,50 @@ local function read_sigs(path, key)
   if not ok then return nil end
   local gensym = tonumber(line() or ""); if not gensym then return nil end
   local infs = tonumber(line() or ""); if not infs then return nil end
-  return { decl = decl, gensym = gensym, infs = infs }
+  local datatypes
+  if pos <= #data then
+    datatypes = fasl_parse(data, pos)
+    if not datatypes then return nil end
+  end
+  return { decl = decl, gensym = gensym, infs = infs, datatypes = datatypes }
+end
+
+-- The sidecar, read once per boot: both phases below use it.
+local STLIB_SIGS, STLIB_SIGS_READ
+local function stlib_cached()
+  if not STLIB_SIGS_READ then
+    STLIB_SIGS_READ = true
+    local path = stlib_sigs_path()
+    if path then
+      STLIB_SIGS = read_sigs(path, kernel_key() .. "|" .. SIGS_FORMAT)
+    end
+  end
+  return STLIB_SIGS
+end
+
+-- (stlib.initialise-datatypes), from its records when the sidecar has them,
+-- else for real, recording them for write_sigs (stlib_types, the next phase
+-- that matters) when the fasl recorder is live.
+local STLIB_DT_BLOB
+local function stlib_datatypes()
+  local run = P.F["stlib.initialise-datatypes"]
+  local cached = stlib_cached()
+  if cached and cached.datatypes then return fasl_replay(cached.datatypes) end
+  if cached or not FASL_INSTALLED or not stlib_sigs_path() then return run() end
+  local rec = { n = 0, in_chunk = false }
+  local arity0 = {}
+  for k, v in pairs(C.ARITY) do arity0[k] = v end
+  FASL_STACK[#FASL_STACK + 1] = rec
+  local saved_rec, saved_nokdata = P.FASL_REC, C.NO_KDATA
+  P.FASL_REC = rec
+  C.NO_KDATA = true            -- recorded chunks must be relocatable
+  local ok, err = pcall(run)
+  FASL_STACK[#FASL_STACK] = nil
+  P.FASL_REC = saved_rec
+  C.NO_KDATA = saved_nokdata
+  if not ok then error(err, 0) end
+  local sok, blob = pcall(fasl_serialize, rec, arity0)
+  if sok then STLIB_DT_BLOB = blob end
 end
 
 local function stlib_types(verbose)
@@ -1488,7 +1637,7 @@ local function stlib_types(verbose)
   local key = kernel_key() .. "|" .. SIGS_FORMAT
   local tn = package.loaded["typecheck_native"]
   local on_sig = tn and tn.record_sig or nil
-  local cached = read_sigs(path, key)
+  local cached = stlib_cached()
   if cached then
     -- load every dump before running any, so a foreign-arch file falls back
     -- to the real declares with nothing half-applied
@@ -1529,7 +1678,7 @@ local function stlib_types(verbose)
     write_sigs(path, key, out, {
       gensym = type(P.GLOBALS["shen.*gensym*"]) == "number" and P.GLOBALS["shen.*gensym*"] or 0,
       infs   = type(P.GLOBALS["shen.*infs*"]) == "number" and P.GLOBALS["shen.*infs*"] or 0,
-    })
+    }, STLIB_DT_BLOB)
   end
 end
 
@@ -1563,6 +1712,7 @@ local function load_stdlib(verbose)
     local pok, perr = pcall(function()
       for _, ph in ipairs(STDLIB_PHASES) do
         if ph == "types" then stlib_types(verbose)
+        elseif ph == "datatypes" then stlib_datatypes()
         else P.F["stlib.initialise-" .. ph]() end
       end
     end)

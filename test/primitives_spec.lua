@@ -128,6 +128,13 @@ checkeq("(symbol? hello)", "true")
 checkeq("(symbol? 1)", "false")
 checkeq("(variable? X)", "true")       -- uppercase first char => variable
 checkeq("(variable? x)", "false")
+checkeq("(variable? [X])", "false")   -- a non-symbol is false, without throwing
+checkeq("(variable? [])", "false")
+checkeq("(variable? (vector 1))", "false")
+checkeq("(variable? (lambda X X))", "false")
+checkeq("(variable? 1)", "false")
+checkeq("(variable? \"X\")", "false")
+checkeq("(variable? true)", "false")
 checkeq("(cons? (cons 1 ()))", "true")
 checkeq("(cons? 1)", "false")
 checkeq("(absvector? (absvector 3))", "true")

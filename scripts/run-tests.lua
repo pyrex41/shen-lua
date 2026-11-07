@@ -27,14 +27,22 @@ if not LUA or LUA == "" then
   LUA = have("luajit") and "luajit" or "lua"
 end
 
--- Discover specs deterministically (sorted) so the run order is stable.
+-- The specs, sorted so the run order is stable; a spec missing here fails the run.
 local specs = {
+  "test/accumulator_spec.lua",
   "test/boot_cache_spec.lua",
+  "test/calls_spec.lua",
+  "test/certify_spec.lua",
   "test/cli_spec.lua",
   "test/checked_integer_spec.lua",
+  "test/codegen_diff_spec.lua",
+  "test/contract_spec.lua",
+  "test/seg_pool_spec.lua",
+  "test/gc_pause_spec.lua",
   "test/datatype_consume_spec.lua",
   "test/engine_spec.lua",
   "test/eqterm_spec.lua",
+  "test/embed_values_spec.lua",
   "test/error_robustness_spec.lua",
   "test/eval_order_spec.lua",
   "test/features_spec.lua",
@@ -54,6 +62,7 @@ local specs = {
   "test/stack_segments_spec.lua",
   "test/stdlib_spec.lua",
   "test/tailcall_spec.lua",
+  "test/system_s_sigf_spec.lua",
   "test/typecheck_api_spec.lua",
   "test/typecheck_lazy_spec.lua",
   "test/utf8_strings_spec.lua",
@@ -61,6 +70,18 @@ local specs = {
 }
 
 local function sh_quote(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+
+-- A spec not in this list would never run, and nothing would say so.
+local unlisted = {}
+do
+  local listed = {}
+  for _, s in ipairs(specs) do listed[s] = true end
+  local h = io.popen("cd " .. sh_quote(root ~= "" and root or ".") .. " && ls test/*_spec.lua")
+  for s in h:lines() do
+    if not listed[s] then unlisted[#unlisted + 1] = s end
+  end
+  h:close()
+end
 
 -- Run one spec, echo its output, and recover its exit code via a sentinel
 -- (LuaJIT io.popen:close does not report child status).
@@ -100,6 +121,7 @@ end
 print("============================================")
 print(string.format("TOTAL: %d pass, %d fail across %d specs",
   total_pass, total_fail, #specs))
+for _, s in ipairs(unlisted) do failed_specs[#failed_specs + 1] = s .. " (not in the list in scripts/run-tests.lua)" end
 if #failed_specs > 0 then
   print("FAILED SPECS:")
   for _, s in ipairs(failed_specs) do print("  - " .. s) end

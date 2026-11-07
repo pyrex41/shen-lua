@@ -106,6 +106,20 @@ if not ok1 then
 end
 
 -- Now the big one
+-- Count what the harness reports as each test ends. Its own *passed* and *failed*
+-- will not do: kerneltests.shen ends with (reset), which zeroes them.
+local passed, failed = 0, 0
+for name, count in pairs({
+  ["passed"] = function() passed = passed + 1 end,   -- exported by its package
+  ["failed"] = function() failed = failed + 1 end,
+  ["test-harness.err"] = function() failed = failed + 1 end,
+}) do
+  local orig = assert(P.F[name], name .. " is not defined by the harness")
+  local wrapped = function(...) count(); return orig(...) end
+  P.F[name] = wrapped
+  P.FA[wrapped] = P.FA[orig]
+end
+
 print("Loading kerneltests.shen (this runs the actual reports)...")
 local ok2, e2 = xpcall(function()
   P.F["load"]("kerneltests.shen")
@@ -119,18 +133,21 @@ end)
 print("\n=== Test run finished ===")
 print("kerneltests result:", ok2 and "ok" or e2)
 
--- Final counters from the harness. The harness defines *passed* / *failed*
--- inside its `(package test-harness ...)` block, so the bare symbol names get
--- prefixed to `test-harness.*passed*` / `test-harness.*failed*`.
-local function getg(...)
-  for _, name in ipairs({...}) do
-    local v = P.GLOBALS[name]
-    if v ~= nil then return v end
-  end
-  return "?"
+-- The suite passes only if it finished, nothing failed and every test ran. The number
+-- of tests belongs to the kernel release: a new kernel needs an entry here.
+-- SHEN_EXPECTED_TESTS is for this script's own spec.
+local EXPECTED_BY_KERNEL = { ["43.2"] = 154 }
+local version = P.F["version"]()
+local EXPECTED = tonumber(os.getenv("SHEN_EXPECTED_TESTS")) or EXPECTED_BY_KERNEL[version]
+if not EXPECTED then
+  print("FAILED: no expected test count for kernel " .. tostring(version)
+        .. "; add it to EXPECTED_BY_KERNEL in run-kernel-tests.lua")
+  os.exit(1)
 end
-print(string.format("Counters: passed=%s failed=%s",
-  getg("test-harness.*passed*", "*passed*"),
-  getg("test-harness.*failed*", "*failed*")))
-
+print(string.format("Counters: passed=%d failed=%d expected=%d", passed, failed, EXPECTED))
+if not ok2 then print("FAILED: the suite stopped early"); os.exit(1) end
+if failed > 0 then print("FAILED: " .. failed .. " test(s) failed"); os.exit(1) end
+if passed ~= EXPECTED then
+  print("FAILED: " .. passed .. " test(s) ran, expected " .. EXPECTED); os.exit(1)
+end
 print("\nDone.")

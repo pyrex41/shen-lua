@@ -8,13 +8,14 @@
 # LUA selects the interpreter (default: luajit, the project's primary host).
 LUA ?= luajit
 
-.PHONY: all test certify test-all coverage help
+.PHONY: all test certify golden test-all coverage help
 
 all: test
 
 help:
 	@echo "make test      - run the port-authored spec suite (fast)"
 	@echo "make certify   - run the canonical Shen kernel certification suite"
+	@echo "make golden    - typechecker and Prolog results against the golden corpus (LuaJIT)"
 	@echo "make test-all  - run both tiers"
 	@echo "make coverage  - run luacov over the port specs (best-effort)"
 
@@ -28,6 +29,10 @@ test:
 # kernel and runs the vendored ShenOSKernel acceptance tests under tests/.
 certify:
 	$(LUA) run-kernel-tests.lua
+
+# golden: 27 typecheck and Prolog results, and the y-combinator's inference count.
+golden:
+	$(LUA) bench/golden_typecheck.lua compare
 
 # test-all: both tiers — our specs plus the canonical certification.
 test-all: test certify

@@ -5,6 +5,71 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ## [Unreleased]
 
+### Changed
+
+- **Startup and compile cost.** `variable?` no longer throws on a non-symbol; the
+  fasl records a global push as a delta (SHENFASL9), the reader has native paths for
+  plain tokens, macroexpansion keeps unchanged cells, the stdlib datatypes replay from
+  the signature sidecar (SHENSIG2), and a replayed `declare` skips the variancy query
+  when the compile run found no old type. The GC pause adapts past a small live heap
+  and stops adapting once the host sets its own; the default stepmul is 1000, which
+  trades work for memory (a string-building loop: +7% instructions, 78 to 47 MB).
+- **Calls and closures.** Fixed-arity `APPn`/`CURn` helpers, uncurried lambda groups,
+  closed lambdas built once, hot helpers bound as locals, count sinking. `(= F G)` can
+  now be true for two evaluations of the same closed lambda.
+- **Lists, vectors, strings, Prolog.** `hd`/`tl` read directly where `(cons? E)`
+  proves a cons; `address->` stores with `rawset`; a self-tail accumulator is a double
+  from the start; native `shen.mod` below 2^53; the Prolog engine reuses stack
+  segments and has loop-free deref and unify.
+- **Kernel cache key** covers every codegen switch: `SHEN_UNCURRY`,
+  `SHEN_HOIST_LAMBDA`, `SHEN_SINK_COUNT` and `SHEN_FREEZE_CONT` as well as `SHEN_TRMC`.
+- **Calling a function value from Lua.** A compiled lambda called with fewer arguments
+  than it takes returns the partial application over the ones it got, wherever the host
+  got it (`shen.eval`, `shen.value`, a callback argument, an element of a list): `f(1)(2)`
+  and `f(1, 2)` are the same. It tests its last parameter for nil on entry, since nil is
+  never a Shen value. **Edge:** a host function that returns nothing (nil) into Shen,
+  whose result is then passed as a lambda's last argument, gets that lambda's partial
+  application rather than a call. Through the Lua bridge (`lua.call` and the
+  marshalers) this cannot happen, since a nil result becomes `()`; only a function
+  installed directly in `shen.prims.F` could do it. `shen.prims.F[name]`, a defun's own
+  function, still takes exactly its arity when called raw, as before.
+  Also deliberate, from the host only: a raw call with too many arguments,
+  `add(1, 2, 3)` for a two-parameter lambda, ignores the extra and gives 3, where 0.12.0
+  returned a function.
+- **CI and gates.** `make certify` fails when a test fails, the suite stops early or
+  fewer tests run than the kernel release has (154 for 43.2); it used to exit 0 whatever
+  happened. CI runs it with `SHEN_TYPECHECK_NATIVE=require`, and runs the new
+  `make golden` (typechecker and Prolog results, y-combinator inference count). A spec
+  file missing from `scripts/run-tests.lua` fails the run.
+- **Lua 5.5** boots: its collector options changed.
+
+### Fixed (behaviour changes)
+
+- A test that is not a boolean raises: the test of `if` and `cond`, both operands of
+  `and`/`or`, and the argument of `not`. `(if 1 a b)` used to give `a`, and `(not 5)`
+  compiled gave `false`. A predicate with too few arguments is not a boolean.
+  **Limit:** a call in tail position as the last operand of `and`/`or`, in a defun or a
+  lambda, stays a tail call and is not checked itself; a test of the function's result
+  is what raises. So `(define f X -> (and true (g X)))` with `g` returning 5 gives
+  `(f 5)` = 5 unless the caller tests it. shen-go does the same; Shen/JIT and
+  Shen/Scheme raise.
+- `(str "a")` gives `"\"a\""`, quoted, as on the other ports.
+- `absvector` rejects a length that is not a non-negative integer; `address->` and
+  `<-address` reject an index outside the vector; `set`/`value` raise on a non-symbol;
+  `hash` raises on a bound that is not a positive integer; `close` is idempotent;
+  `(get-time unix)` is the Unix time; `(eval-kl sym)` gives the symbol.
+- `(thaw F)` for a compiled lambda that takes arguments gives a partial application, as
+  before uncurrying; it no longer runs the body with nil. For a one-parameter lambda that
+  is the lambda itself; 0.12.0 ran its body with nil.
+- A compile that raises, or a compile attempt the compiler throws away, leaves no state
+  behind for later code. One such case read an undeclared local as nil and returned a
+  wrong answer with no error (count sinking on a branch compiled twice).
+- A host's own Lua function is called as given whatever its chunk is named; a host's
+  yield through a stack segment keeps its exact values; on PUC Lua a hook set during a
+  job does not leak into the next.
+- A fasl replays a macro's `(set ...)` even when the global already held that value
+  when the file was compiled.
+
 ## [0.12.0] - 2026-11-05
 
 ### Changed

@@ -32,7 +32,11 @@ jobs:
 
       # Tier 2: canonical kernel certification. Always run for real.
       - name: Kernel certification (make certify)
-        run: make certify LUA=luajit
+        run: SHEN_TYPECHECK_NATIVE=require make certify LUA=luajit
+
+      # The native typechecker and Prolog engine against recorded results.
+      - name: Golden typecheck corpus (make golden)
+        run: SHEN_TYPECHECK_NATIVE=require make golden LUA=luajit
 
   coverage:
     name: Coverage (best-effort)
