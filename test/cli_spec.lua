@@ -8,6 +8,7 @@
 --   * mixed FILE + -e run in command-line order;
 --   * stdin EOF exits the REPL cleanly (echo '(+ 1 2)' | bin/shen prints 3 and
 --     exits 0) — the guard against the historical infinite-EOF loop;
+--   * the 11-shape REPL EOF contract (Shen/JIT parity);
 --   * the REPL survives adversarial input (apply-non-function) and keeps going;
 --   * an adversarial `-e` exits nonzero with a clean error (no Lua traceback);
 --   * unknown option exits 2;
@@ -136,6 +137,35 @@ do
   check(code == 0, "piped stdin EOF exits cleanly (exit 0, no infinite loop)")
   -- a timeout-kill exit (124) would mean the EOF loop regressed
   check(code ~= 124, "piped stdin did NOT hit the timeout (no EOF loop)")
+end
+
+-- ---------------------------------------------------------------------------
+-- The REPL EOF contract (the 11 stdin shapes Shen/JIT passes). Only the REPL's
+-- own read treats EOF as "exit"; a program evaluated at the REPL that reads
+-- (stinput) sees what any program sees: read-byte gives -1, read and lineread
+-- raise "empty stream". Every shape must exit 0.
+-- ---------------------------------------------------------------------------
+do
+  local shapes = {
+    -- { label, stdin, must contain, must not contain }
+    { "empty stdin",                        "",                          nil,            "empty stream" },
+    { "final line without newline",         "(+ 40 2)",                  "42",           "empty stream" },
+    { "line with newline",                  "(+ 40 2)\n",                "42",           "empty stream" },
+    { "multi-line form",                    "(+ 40\n2)",                 "42",           "empty stream" },
+    { "two lines, last unterminated",       "(+ 1 2)\n(* 6 7)",          "42",           "empty stream" },
+    { "trailing spaces after a form",       "(+ 40 2)\n   ",             "42",           "empty stream" },
+    { "program read-byte gets -1",          "(read-byte (stinput))\n",   "-1",           nil },
+    { "program read reports empty stream",  "(read (stinput))\n",        "empty stream", nil },
+    { "program lineread reports empty stream", "(lineread (stinput))\n", "empty stream", nil },
+    { "program catches its own read",       "(trap-error (read (stinput)) (/. E caught))\n", "caught", nil },
+    { "unterminated form does not hang",    "(+ 1",                      nil,            nil },
+  }
+  for _, sh in ipairs(shapes) do
+    local out, code = run_stdin(sh[2], SHEN)
+    check(code == 0, "EOF contract: " .. sh[1] .. ": exit 0 (got " .. tostring(code) .. ")")
+    if sh[3] then check(out:find(sh[3], 1, true) ~= nil, "EOF contract: " .. sh[1] .. ": output has " .. sh[3]) end
+    if sh[4] then check(out:find(sh[4], 1, true) == nil, "EOF contract: " .. sh[1] .. ": output lacks " .. sh[4]) end
+  end
 end
 
 -- empty stdin (immediate EOF) also exits cleanly
