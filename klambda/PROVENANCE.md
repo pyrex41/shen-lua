@@ -1,16 +1,24 @@
 # Provenance of the vendored KLambda kernel
 
-## Current: ShenOSKernel 43.2
+## Current: ShenOSKernel 43.4
 
-- **Repository**: `Shen-Language/shen-sources`, tag `shen-43.2`
-  (tag object `7b7563e5`), commit `e6947f507ebc`
-- **Release asset**: `ShenOSKernel-43.2.tar.gz`
-  - SHA-256: `23c71508f0de24785e1f127ea4fab440081904d81c463090bc642ee840417f32`
+- **Repository**: `Shen-Language/shen-sources`, tag `shen-43.4`
+  (tag object `40fd335893cf7caf4c3a285e122ea0de06696430`), commit
+  `f34b307b490880eedcfe1f5e5d3cc24ca3d2602e`
+- **Release asset**: `ShenOSKernel-43.4.tar.gz`
+  - SHA-256: `15e7972e6bf0cd65d37c2eba85750b8839d2dbadda41027eae0c88e5017a2756`
   - All 23 `.kl` files and `tests/` are byte-identical to the extracted archive.
-- `(version)` reports `"43.2"` (set in `init.kl`).
-- Relative to the previous vendoring (43.1 at `ec16a9f`, below) only `init.kl`
-  (version) and `extension-type-annotations.kl` (renumbered generated names)
-  differ; `t-star.kl` is identical. `tests/` adds `benchmark-coverage.shen`.
+- `(version)` reports `"43.4"` (set in `init.kl`).
+- Against 43.2, 17 of 23 `.kl` files differ. `kernel` and `stlib.kl` must move
+  together: stlib's initialiser now calls `shen.declare-with-signature` (43.3)
+  and `shen.update-lambda-table/precompiled` (43.4). `t-star.kl` differs but the
+  native typechecker's fingerprints (`scripts/kernel-fingerprints.lua`) are all
+  unchanged. `tests/` adds `regressions/` and `extensions/expand-dynamic/`.
+
+## Previous: ShenOSKernel 43.2
+
+- Tag `shen-43.2`, commit `e6947f507ebc`; asset SHA-256
+  `23c71508f0de24785e1f127ea4fab440081904d81c463090bc642ee840417f32`.
 
 The records of the earlier imports follow.
 
@@ -111,9 +119,11 @@ the `lua.*` interop entries, then runs `(stlib.initialise)`. The resulting
 ### Standard library
 
 `klambda/stlib.kl` loads with the kernel and `(stlib.initialise)` registers
-it (port-upgrades.md, 41.1). Its 290 `declare`s are cached next to the kernel
-bytecode cache (`<kernel cache>.stlib`, keyed on the kernel cache key); see
-`boot.lua` `stlib_types`. `SHEN_NO_STDLIB=1` skips `(stlib.initialise)`.
+it (port-upgrades.md, 41.1). Since 43.3 its 290 signatures are precompiled
+`shen.declare-with-signature` forms, so there is no signature sidecar. The two
+datatype rule compiles are cached next to the kernel bytecode cache
+(`<kernel cache>.stlibdt`); see `boot.lua` `stlib_datatypes`.
+`SHEN_NO_STDLIB=1` skips `(stlib.initialise)`.
 
 ## Overriding
 

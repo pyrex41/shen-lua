@@ -1,8 +1,8 @@
-# Vendored KLambda for ShenOSKernel 43.2
+# Vendored KLambda for ShenOSKernel 43.4
 
-These are the KLambda sources of **ShenOSKernel 43.2** (community
+These are the KLambda sources of **ShenOSKernel 43.4** (community
 [`shen-sources`](https://github.com/Shen-Language/shen-sources) release
-`shen-43.2`, commit `e6947f507ebc`),
+`shen-43.4`, commit `f34b307b490880eedcfe1f5e5d3cc24ca3d2602e`),
 vendored byte-identical so that `shen-lua` is self-contained:
 you can `git clone` and run without a separate kernel checkout. See
 [PROVENANCE.md](PROVENANCE.md) for the exact source, checksum and the lineage
@@ -11,12 +11,12 @@ interfaces are implemented by the native Lua stream layer.
 
 ## Files
 
-There are 23 official ShenOSKernel 43.2 `.kl` files.
+There are 23 official ShenOSKernel 43.4 `.kl` files.
 
 **Kernel (16):** core, declarations, dict, init, load, macros, prolog, reader,
 sequent, sys, t-star, toplevel, track, types, writer, yacc
 
-**Standard library (1):** stlib — precompiled from 43.2's `lib/stlib`, registered
+**Standard library (1):** stlib — precompiled from 43.4's `lib/stlib`, registered
 at boot by `(stlib.initialise)`.
 
 **Extensions (6):**

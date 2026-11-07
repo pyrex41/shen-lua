@@ -718,8 +718,7 @@ function M.install(Pmod, Emod)
   --    boot.lua installs the engine before initialise(), so every kernel
   --    declare is captured. Delegates unconditionally (legacy *sigf* stays
   --    the source of truth for the legacy engine).
-  -- boot.lua replays cached stdlib signatures without calling `declare`;
-  -- this keeps the native signature table in step with shen.*sigf*.
+  -- record_sig: a hook for embedders to feed the native signature table.
   M.record_sig = function(name, type_) NativeSig[name] = type_ end
   local orig_declare = F["declare"]
   if orig_declare then
@@ -728,6 +727,18 @@ function M.install(Pmod, Emod)
       return orig_declare(name, type_)
     end
     P.FA[F["declare"]] = 2
+  end
+
+  -- 43.3+: `declare` is (shen.declare-with-signature Name Type (freeze ...)),
+  -- and the precompiled stlib.kl calls shen.declare-with-signature directly,
+  -- bypassing the `declare` wrapper above. Record there too (idempotent).
+  local orig_dws = F["shen.declare-with-signature"]
+  if orig_dws then
+    F["shen.declare-with-signature"] = function(name, type_, frozen)
+      NativeSig[name] = type_
+      return orig_dws(name, type_, frozen)
+    end
+    P.FA[F["shen.declare-with-signature"]] = 3
   end
 
   -- destroy (sys.kl:246) unassocs from *sigf*; mirror in NativeSig so the

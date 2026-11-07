@@ -7,10 +7,22 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ### Changed
 
+- **Kernel: ShenOSKernel 43.4** (community `Shen-Language/shen-sources`, tag
+  `shen-43.4`, commit `f34b307b490880eedcfe1f5e5d3cc24ca3d2602e`, release
+  tarball SHA-256 `15e7972e...a2756`). Vendored byte-identical; `(version)` is
+  `"43.4"`. `tests/` is the 43.4 suite. The native typechecker's fingerprints
+  are unchanged (verified with `scripts/kernel-fingerprints.lua`).
+- stlib.kl now declares its 290 signatures with
+  `shen.declare-with-signature` and a precompiled abstraction, so the
+  `<kernel cache>.stlib` signature sidecar is gone. `typecheck_native.lua`
+  wraps `shen.declare-with-signature`; without that its native signature
+  table silently lacked the stdlib signatures (171 instead of 465 entries).
+  The two stdlib datatypes still run the rule compiler; their fasl records
+  stay in `<kernel cache>.stlibdt`.
 - **Startup and compile cost.** `variable?` no longer throws on a non-symbol; the
   fasl records a global push as a delta (SHENFASL9), the reader has native paths for
   plain tokens, macroexpansion keeps unchanged cells, the stdlib datatypes replay from
-  the signature sidecar (SHENSIG2), and a replayed `declare` skips the variancy query
+  `<kernel cache>.stlibdt`, and a replayed `declare` skips the variancy query
   when the compile run found no old type. The GC pause adapts past a small live heap
   and stops adapting once the host sets its own; the default stepmul is 1000, which
   trades work for memory (a string-building loop: +7% instructions, 78 to 47 MB).
