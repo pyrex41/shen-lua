@@ -30,7 +30,10 @@ Notable changes to shen-lua. Release notes for earlier versions are under
   closed lambdas built once, hot helpers bound as locals, count sinking. `(= F G)` can
   now be true for two evaluations of the same closed lambda.
 - **Lists, vectors, strings, Prolog.** `hd`/`tl` read directly where `(cons? E)`
-  proves a cons; `address->` stores with `rawset`; a self-tail accumulator is a double
+  proves a cons, and a `let` bound to a cons keeps that fact. `+`/`-`/`*` and
+  the comparisons are Lua operators once both sides are numbers; `/` stays
+  checked, because Lua division by zero does not raise. `address->` stores with
+  `rawset`; a self-tail accumulator is a double
   from the start; native `shen.mod` below 2^53; the Prolog engine reuses stack
   segments and has loop-free deref and unify.
 - **Kernel cache key** covers every codegen switch: `SHEN_UNCURRY`,

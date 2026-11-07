@@ -712,13 +712,22 @@ end
 -- immutable as to being conses, and HD/TL ignore a redefined hd/tl on a cons
 -- already, so nothing observable changes. Keys are chain_key's.
 local PROVEN = {}
+-- Same keys, a different table: a chain proved a number. Cons and number are
+-- not the same fact. Division is never raw: Lua `/` of zero is inf, and KL
+-- raises. Comparisons and + - * become Lua operators only when both sides are
+-- numbers, which does not coerce strings.
+local PROVEN_NUM = {}
+local NUM_BIN = { ["+"] = true, ["-"] = true, ["*"] = true }
 local function add_cons_facts(test, env, into)
   if not is_cons(test) then return end
   local h = test[1]
   if not (is_symbol(h) and not env[h.name]) then return end
   local rest = test[2]
   if not (is_cons(rest)) then return end
-  if h.name == "cons?" and rest[2] == NIL and C.ARITY["cons?"] == 1 then
+  if h.name == "type" and rest[2] and is_cons(rest[2]) and rest[2][2] == NIL
+     and C.ARITY["type"] == 2 then
+    add_cons_facts(rest[1], env, into)
+  elseif h.name == "cons?" and rest[2] == NIL and C.ARITY["cons?"] == 1 then
     local k = chain_key(rest[1], env)
     if k then into[k] = true end
   elseif h.name == "and" and is_cons(rest[2]) and rest[2][2] == NIL then
@@ -726,17 +735,48 @@ local function add_cons_facts(test, env, into)
     add_cons_facts(rest[2][1], env, into)
   end
 end
--- f(...) with test's facts added to PROVEN. A flat table with an undo list: a
+local function add_num_facts(test, env, into)
+  if not is_cons(test) then return end
+  local h = test[1]
+  if not (is_symbol(h) and not env[h.name]) then return end
+  local rest = test[2]
+  if not is_cons(rest) then return end
+  if h.name == "type" and rest[2] and is_cons(rest[2]) and rest[2][2] == NIL
+     and C.ARITY["type"] == 2 then
+    add_num_facts(rest[1], env, into)
+  elseif h.name == "number?" and rest[2] == NIL and C.ARITY["number?"] == 1 then
+    local k = chain_key(rest[1], env)
+    if k then into[k] = true end
+  elseif h.name == "=" and is_cons(rest[2]) and rest[2][2] == NIL
+     and C.ARITY["="] == 2 then
+    local function side(num, other)
+      if type(num) ~= "number" then return end
+      local k = chain_key(other, env)
+      if k then into[k] = true end
+    end
+    side(rest[1], rest[2][1])
+    side(rest[2][1], rest[1])
+  elseif h.name == "and" and is_cons(rest[2]) and rest[2][2] == NIL then
+    add_num_facts(rest[1], env, into)
+    add_num_facts(rest[2][1], env, into)
+  end
+end
+-- f(...) with test's facts added. A flat table with an undo list: a
 -- then-spine nests one scope per pattern test, past Lua's 100 __index links.
-local function with_cons_facts(test, env, f, ...)
-  local facts = {}
-  add_cons_facts(test, env, facts)
-  local added = {}
-  for k in pairs(facts) do
-    if not PROVEN[k] then PROVEN[k] = true; added[#added + 1] = k end
+local function with_facts(test, env, f, ...)
+  local cfacts, nfacts = {}, {}
+  add_cons_facts(test, env, cfacts)
+  add_num_facts(test, env, nfacts)
+  local added_c, added_n = {}, {}
+  for k in pairs(cfacts) do
+    if not PROVEN[k] then PROVEN[k] = true; added_c[#added_c + 1] = k end
+  end
+  for k in pairs(nfacts) do
+    if not PROVEN_NUM[k] then PROVEN_NUM[k] = true; added_n[#added_n + 1] = k end
   end
   local r = f(...)
-  for i = 1, #added do PROVEN[added[i]] = nil end
+  for i = 1, #added_c do PROVEN[added_c[i]] = nil end
+  for i = 1, #added_n do PROVEN_NUM[added_n[i]] = nil end
   return r
 end
 function C.proven_count()
@@ -747,6 +787,49 @@ end
 local function proven_cons(form, env)
   local k = chain_key(form, env)
   return k ~= nil and PROVEN[k] == true
+end
+local function known_num(form, env)
+  if type(form) == "number" then return true end
+  local k = chain_key(form, env)
+  if k and PROVEN_NUM[k] then return true end
+  if not is_cons(form) then return false end
+  local h = form[1]
+  if not (is_symbol(h) and NUM_BIN[h.name] and not env[h.name]
+          and C.ARITY[h.name] == 2) then
+    return false
+  end
+  local a = form[2]
+  if not (is_cons(a) and is_cons(a[2]) and a[2][2] == NIL) then return false end
+  return known_num(a[1], env) and known_num(a[2][1], env)
+end
+-- A value that is a cons: a (cons A B) form, or a chain already proved one.
+-- (hd X) is not a cons just because X is.
+local function known_cons_val(form, env)
+  if proven_cons(form, env) then return true end
+  if not is_cons(form) then return false end
+  local h = form[1]
+  if not (is_symbol(h) and h.name == "cons" and not env["cons"]
+          and C.ARITY["cons"] == 2) then
+    return false
+  end
+  local a = form[2]
+  return is_cons(a) and is_cons(a[2]) and a[2][2] == NIL
+end
+-- The new local `ln` inherits a fact from the value it is bound to. Read the
+-- value's fact in `env` (before the name is rebound): (let X X ...) keeps X's
+-- fact. Undo after the body is compiled.
+local function push_value_facts(val, ln, env)
+  local added_c, added_n = {}, {}
+  if known_cons_val(val, env) and not PROVEN[ln] then
+    PROVEN[ln] = true; added_c[#added_c + 1] = ln
+  end
+  if known_num(val, env) and not PROVEN_NUM[ln] then
+    PROVEN_NUM[ln] = true; added_n[#added_n + 1] = ln
+  end
+  return function()
+    for i = 1, #added_c do PROVEN[added_c[i]] = nil end
+    for i = 1, #added_n do PROVEN_NUM[added_n[i]] = nil end
+  end
 end
 -- field i of a cons-valued Lua expression
 local function cell_field(expr, i)
@@ -1198,6 +1281,13 @@ local function ccall(form, env, tail)
         end
         local helper = ARITH2[name]
         if helper and ar == 2 then
+          -- Raw + - * and the four comparisons once both sides are numbers.
+          -- `/` stays DIV: raw Lua division by zero does not raise.
+          local raw = ({ ["+"]="+", ["-"]="-", ["*"]="*",
+                          [">"]=">", ["<"]="<", [">="]=">=", ["<="]="<=" })[name]
+          if raw and known_num(args[1], env) and known_num(args[2], env) then
+            return "(" .. cargs[1] .. ")" .. raw .. "(" .. cargs[2] .. ")"
+          end
           return helper .. "(" .. argstr .. ")"
         end
         -- Inline exact-arity (cons A B) as a bare table+metatable construction
@@ -2659,12 +2749,12 @@ function ctail(form, env)
         local els = el and ctail(el, env) or ret("false")
         CCACHE = saved_cc
         return pre .. "if not (" .. testc .. ") then " .. els .. " end "
-               .. with_cons_facts(test, env, ctail, th, env)
+               .. with_facts(test, env, ctail, th, env)
       else
         -- nest then, flatten else
         local saved_cc = CCACHE
         CCACHE = child_cache()
-        local ths = with_cons_facts(test, env, ctail, th, env)
+        local ths = with_facts(test, env, ctail, th, env)
         CCACHE = saved_cc
         return pre .. "if (" .. testc .. ") then " .. ths .. " end "
                .. ctail(el, env)
@@ -2680,7 +2770,7 @@ function ctail(form, env)
         -- each result sits inside its own then-block: block-scope its chain cache
         local saved_cc = CCACHE
         CCACHE = child_cache()
-        local resc = with_cons_facts(test, env, ctail, res, env)
+        local resc = with_facts(test, env, ctail, res, env)
         CCACHE = saved_cc
         if i == 1 then
           parts[#parts+1] = "if (" .. cexpr(bc(test, env), env) .. ") then " .. resc
@@ -2702,7 +2792,10 @@ function ctail(form, env)
       local ln = gen("v")
       local pre, valc = cstmt_expr(val, env)
       local e2 = extend(env, v.name, ln)
-      return pre .. "local " .. ln .. " = " .. valc .. "; " .. ctail(body, e2)
+      local undo = push_value_facts(val, ln, env)
+      local body_s = ctail(body, e2)
+      undo()
+      return pre .. "local " .. ln .. " = " .. valc .. "; " .. body_s
     elseif op == "do" then
       local forms = to_array(cdr(form))
       local s = {}
@@ -2728,7 +2821,7 @@ function ctail(form, env)
       local a = car(cdr(form)); local b = car(cdr(cdr(form)))
       local pre, ac = cstmt_expr(bc(a, env), env)
       return pre .. "if not (" .. ac .. ") then " .. ret("false") .. " end "
-             .. with_cons_facts(a, env, ctail, bc_tail(b, env), env)
+             .. with_facts(a, env, ctail, bc_tail(b, env), env)
     elseif op == "or" then
       local a = car(cdr(form)); local b = car(cdr(cdr(form)))
       local pre, ac = cstmt_expr(bc(a, env), env)
@@ -3067,6 +3160,7 @@ local function atomic_compile(arity_name, f, ...)
   VALUE_BODY, VALUE_NEXT = s_value, false
   IN_FN_BODY = s_fn
   for k in pairs(PROVEN) do PROVEN[k] = nil end
+  for k in pairs(PROVEN_NUM) do PROVEN_NUM[k] = nil end
   if arity_name then C.ARITY[arity_name] = s_arity end
   error(res, 0)
 end

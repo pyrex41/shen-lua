@@ -194,6 +194,48 @@ do
   ev("(defun pc-i (L) (if (cons? L) (hd (tl L)) 0))")
   check(ev("(trap-error (pc-i (cons 1 2)) (lambda E caught))").name == "caught",
         "only the tested chain is proven, not its tail")
+
+  src = gensrc("(defun pc-j (A B) (let L (cons A B) (hd L)))")
+  check(not src:find("HD(", 1, true), "a let bound to (cons A B) is a cons")
+  ev("(defun pc-j (A B) (let L (cons A B) (hd L)))")
+  check(ev("(pc-j 6 7)") == 6, "hd of a let-bound cons is the car")
+end
+
+-- ---------------------------------------------------------------------------
+-- proved numbers: + - * and the comparisons are Lua operators. / stays DIV.
+-- ---------------------------------------------------------------------------
+do
+  local src = gensrc("(defun pn-a (X) (if (number? X) (+ X 2) 0))")
+  check(src:find(")+(", 1, true) ~= nil, "number? proves +")
+  check(not src:find("ADD(", 1, true), "a proved + is not ADD")
+  src = gensrc("(defun pn-b (X) (if (= X 0) (+ X 1) (+ X 1)))")
+  check(src:find(")+(", 1, true) ~= nil and src:find("ADD(", 1, true) ~= nil,
+        "(= X 0) proves the then branch only")
+  src = gensrc("(defun pn-c (X) (if (number? X) (/ X 2) 0))")
+  check(src:find("DIV(", 1, true) ~= nil and not src:find(")/(", 1, true),
+        "a proved division stays DIV")
+  src = gensrc("(defun pn-d (X) (if (number? X) (let X X (+ X 1)) 0))")
+  check(src:find(")+(", 1, true) ~= nil, "(let X X ...) keeps a number proof")
+  src = gensrc("(defun pn-e (X) (let N 1 (+ N X)))")
+  check(src:find("ADD(", 1, true) ~= nil, "a literal proves only the binding, not the other operand")
+  src = gensrc("(defun pn-f (X +) (if (number? X) (+ X 1) 0))")
+  check(not src:find(")+(", 1, true), "a parameter named + is a call")
+  src = gensrc("(defun pn-g (X) (if (and (number? X) (> X 0)) (- X 1) 0))")
+  check(src:find(")>(", 1, true) ~= nil and src:find(")-(", 1, true) ~= nil,
+        "and carries a number proof into the next test and the result")
+
+  ev("(defun pn-a (X) (if (number? X) (+ X 2) 0))")
+  check(ev("(pn-a 5)") == 7, "proved + adds")
+  ev("(defun pn-b (X) (if (= X 0) (+ X 1) (trap-error (+ X 1) (lambda E (error-to-string E)))))")
+  check(ev('(pn-b "a")'):find("not a number", 1, true) ~= nil,
+        "the else of (= X 0) still rejects a non-number")
+  ev("(defun pn-c (X) (if (number? X) (/ X 0) 0))")
+  check(ev("(trap-error (pn-c 1) (lambda E (error-to-string E)))"):find("division by zero", 1, true) ~= nil,
+        "(/ X 0) still raises")
+  ev("(defun pn-h (X) (if (number? X) (let Y X (+ Y 3)) 0))")
+  check(ev("(pn-h 4)") == 7, "a let copies a number proof")
+  ev("(defun pn-i (X) (if (cons? X) (let Y (hd X) (if (= Y 1) (+ Y 2) 0)) 0))")
+  check(ev("(pn-i (cons 1 ()))") == 3, "(= (bound) 1) proves the car is a number")
 end
 
 -- ---------------------------------------------------------------------------
