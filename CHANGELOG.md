@@ -5,6 +5,20 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ## [Unreleased]
 
+### Changed
+
+- **Kernel: ShenOSKernel 43.4** (community `Shen-Language/shen-sources`, tag
+  `shen-43.4`, commit `f34b307b490880eedcfe1f5e5d3cc24ca3d2602e`, release
+  tarball SHA-256 `15e7972e...a2756`). Vendored byte-identical; `(version)` is
+  `"43.4"`. `tests/` is the 43.4 suite. The native typechecker's fingerprints
+  are unchanged (verified with `scripts/kernel-fingerprints.lua`).
+- stlib.kl now declares its 290 signatures with
+  `shen.declare-with-signature` and a precompiled abstraction, so the
+  `<kernel cache>.stlib` signature sidecar is removed (nothing left to cache).
+  `typecheck_native.lua` now also wraps `shen.declare-with-signature`; without
+  that its native signature table silently lacked the stdlib signatures
+  (171 instead of 465 entries).
+
 ## [0.12.0] - 2026-11-05
 
 ### Changed

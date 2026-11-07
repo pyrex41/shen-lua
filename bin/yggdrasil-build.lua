@@ -108,8 +108,8 @@ end
 assert(man.kernel, MANIFEST .. ": missing kernel=")
 assert(man.init, MANIFEST .. ": missing init=")
 assert(#man.user > 0, MANIFEST .. ": no user= entries")
-if man["kernel-version"] ~= "43.2" then
-  io.stderr:write(("yggdrasil-build: warning: manifest kernel-version=%s, this port is certified against 43.2\n")
+if man["kernel-version"] ~= "43.4" then
+  io.stderr:write(("yggdrasil-build: warning: manifest kernel-version=%s, this port is certified against 43.4\n")
     :format(tostring(man["kernel-version"])))
 end
 

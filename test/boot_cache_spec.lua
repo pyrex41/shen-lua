@@ -7,9 +7,9 @@
 --   * the kernel bytecode cache (~/.cache/shen-lua/kernel-<build>.bin) holds the
 --     compiled ShenOSKernel 42.2 modules, including the precompiled stdlib
 --     (klambda/stlib.kl);
---   * its sidecar (<kernel cache>.stlib) holds the 290 standard-library type
---     signatures that (stlib.initialise-types) declares, as dumped prolog
---     abstractions, plus the gensym / inference counters `declare` advances;
+--   * (until 43.2 a sidecar, <kernel cache>.stlib, held the stdlib signatures'
+--     dumped prolog abstractions; 43.3 precompiles them into stlib.kl, so the
+--     sidecar is gone);
 --   * two kernel functions that used to run the compiler at boot,
 --     shen.lambda-entry and shen.assoc->, are native.
 --
@@ -111,7 +111,7 @@ do
   local kwarm = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d1))
   local kwarm2 = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d2))
 
-  -- ShenOSKernel 43.1 plus extensions, checked-integer, and the 290 stdlib
+  -- ShenOSKernel 43.4 plus extensions, checked-integer, and the 290 stdlib
   -- signatures. The public stream APIs add three signatures over 42.2.
   check(ref:find("sigf 465 ", 1, true) ~= nil,
         "#46: uncached boot registers kernel, extension, checked-integer and stdlib signatures")
@@ -120,21 +120,10 @@ do
   check(ref:find("arity 2", 1, true) ~= nil,
         "#46: stdlib functions are registered (arity filter = 2)")
   check(kcold == ref, "#46: cold kernel-bytecode-cache boot == uncached boot")
-  check(sidecar_data ~= nil and sidecar_data:sub(1, 8) == "SHENSIG1",
-        "#46: a cold boot writes the stdlib signature sidecar")
-  check(kwarm == ref, "#46: WARM kernel-bytecode-cache + signature sidecar boot == uncached boot")
+  check(sidecar_data == nil,
+        "#46: no stdlib signature sidecar since 43.3 (signatures are precompiled in stlib.kl)")
+  check(kwarm == ref, "#46: WARM kernel-bytecode-cache boot == uncached boot (465 signatures, native table in step)")
   check(kwarm2 == ref, "#46: warm boot with a fresh fasl dir == uncached boot")
-
-  -- A damaged sidecar must be a miss (the real declares run), never an error
-  -- or a half-applied replay.
-  do
-    local w = io.open(kcache .. ".stlib", "wb")
-    w:write((sidecar_data or "SHENSIG1\n"):sub(1, 4000)); w:close()
-    local damaged = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d1))
-    check(damaged == ref, "#46: a truncated signature sidecar falls back to the real declares")
-    local again = boot(kc .. " SHEN_FASL_DIR=" .. sh_quote(d1))
-    check(again == ref, "#46: the sidecar is rewritten after a miss")
-  end
 
   os.remove(script); os.remove(kcache); os.remove(kcache .. ".stlib")
   for _, d in ipairs({ d1, d2 }) do os.execute("rm -rf " .. sh_quote(d)) end
@@ -172,15 +161,15 @@ do
   check(out:match("3%s*$") ~= nil, "#87: boot with the default cache path works (got " .. out .. ")")
   check(ls(cwd) == "", "#87: nothing is written into the cwd (got " .. ls(cwd) .. ")")
   local files = ls(xdg .. "/shen-lua")
-  check(files:match("^kernel%-%x+%.bin kernel%-%x+%.bin%.stlib$") ~= nil,
-        "#87: kernel cache and sidecar land in $XDG_CACHE_HOME/shen-lua (got " .. files .. ")")
+  check(files:match("^kernel%-%x+%.bin$") ~= nil,
+        "#87: kernel cache lands in $XDG_CACHE_HOME/shen-lua (got " .. files .. ")")
   check(ls(home) == "", "#87: $HOME is untouched when XDG_CACHE_HOME is set")
   out = boot_in(cwd, "XDG_CACHE_HOME=" .. sh_quote(xdg) .. " HOME=" .. sh_quote(home))
   check(out:match("3%s*$") ~= nil, "#87: warm boot from the per-user cache works")
 
   out = boot_in(cwd, "HOME=" .. sh_quote(home))
   files = ls(home .. "/.cache/shen-lua")
-  check(out:match("3%s*$") ~= nil and files:match("^kernel%-%x+%.bin kernel%-%x+%.bin%.stlib$") ~= nil,
+  check(out:match("3%s*$") ~= nil and files:match("^kernel%-%x+%.bin$") ~= nil,
         "#87: without XDG_CACHE_HOME the cache lands in $HOME/.cache/shen-lua (got " .. files .. ")")
   check(ls(cwd) == "", "#87: still nothing in the cwd")
 
