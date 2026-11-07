@@ -29,8 +29,13 @@ Notable changes to shen-lua. Release notes for earlier versions are under
   and `f(1, 2)` are the same. It tests its last parameter for nil on entry, since nil is
   never a Shen value. **Edge:** a host function that returns nothing (nil) into Shen,
   whose result is then passed as a lambda's last argument, gets that lambda's partial
-  application rather than a call. `shen.prims.F[name]`, a defun's own function, still
-  takes exactly its arity when called raw, as before.
+  application rather than a call. Through the Lua bridge (`lua.call` and the
+  marshalers) this cannot happen, since a nil result becomes `()`; only a function
+  installed directly in `shen.prims.F` could do it. `shen.prims.F[name]`, a defun's own
+  function, still takes exactly its arity when called raw, as before.
+  Also deliberate, from the host only: a raw call with too many arguments,
+  `add(1, 2, 3)` for a two-parameter lambda, ignores the extra and gives 3, where 0.12.0
+  returned a function.
 - **CI and gates.** `make certify` fails when a test fails, the suite stops early or
   fewer tests run than the kernel release has (154 for 43.2); it used to exit 0 whatever
   happened. CI runs it with `SHEN_TYPECHECK_NATIVE=require`, and runs the new
@@ -54,7 +59,8 @@ Notable changes to shen-lua. Release notes for earlier versions are under
   `hash` raises on a bound that is not a positive integer; `close` is idempotent;
   `(get-time unix)` is the Unix time; `(eval-kl sym)` gives the symbol.
 - `(thaw F)` for a compiled lambda that takes arguments gives a partial application, as
-  before uncurrying; it no longer runs the body with nil.
+  before uncurrying; it no longer runs the body with nil. For a one-parameter lambda that
+  is the lambda itself; 0.12.0 ran its body with nil.
 - A compile that raises, or a compile attempt the compiler throws away, leaves no state
   behind for later code. One such case read an undeclared local as nil and returned a
   wrong answer with no error (count sinking on a branch compiled twice).
