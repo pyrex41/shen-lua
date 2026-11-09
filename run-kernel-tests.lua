@@ -136,7 +136,7 @@ print("kerneltests result:", ok2 and "ok" or e2)
 -- The suite passes only if it finished, nothing failed and every test ran. The number
 -- of tests belongs to the kernel release: a new kernel needs an entry here.
 -- SHEN_EXPECTED_TESTS is for this script's own spec.
-local EXPECTED_BY_KERNEL = { ["43.2"] = 154 }
+local EXPECTED_BY_KERNEL = { ["43.2"] = 154, ["43.4"] = 154 }
 local version = P.F["version"]()
 local EXPECTED = tonumber(os.getenv("SHEN_EXPECTED_TESTS")) or EXPECTED_BY_KERNEL[version]
 if not EXPECTED then

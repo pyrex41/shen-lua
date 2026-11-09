@@ -38,7 +38,8 @@ case("the suite stops early", '(report "t" 1 1)\n(this is not closed\n', 1, 1, "
 do
   suite(good)
   local src = assert(io.open(here .. "run-kernel-tests.lua")):read("*a")
-  src = src:gsub('%["43%.2"%] = 154', '["0.0"] = 1')
+  src = src:gsub('local EXPECTED_BY_KERNEL = %{[^}]*%}',
+                 'local EXPECTED_BY_KERNEL = { ["0.0"] = 1 }', 1)
   local copy = dir .. "/rkt.lua"
   local f = assert(io.open(copy, "w")); f:write(src); f:close()
   local cmd = "cd " .. sh_quote(here) .. " && SHEN_TESTS_DIR=" .. sh_quote(dir)

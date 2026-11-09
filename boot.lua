@@ -183,7 +183,7 @@ local function find_kldir()
 end
 local KLDIR = find_kldir() .. "/"
 P.KLDIR = KLDIR   -- resolved .kl directory (trailing /), for typecheck_native
--- Boot order for the ShenOSKernel-43.2 kernel (community shen-sources line).
+-- Boot order for the ShenOSKernel-43.4 kernel (community shen-sources line).
 -- Every 43.1 .kl file is pure defuns: no module has load-time side effects, so
 -- the order below (upstream make.shen's module order, then the booted
 -- extensions, then the precompiled standard library) is for readability only.
@@ -223,7 +223,7 @@ P.GLOBALS["*implementation*"] = rawget(_G, "jit") and "LuaJIT" or _VERSION
 P.GLOBALS["*port*"]           = "shen-lua"
 P.GLOBALS["*porters*"]        = "shen-lua contributors"
 P.GLOBALS["*os*"]             = (package.config and package.config:sub(1,1) == "\\") and "Windows" or "Unix"
-P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes from init.kl ("43.2")
+P.GLOBALS["*release*"]        = "0.1"  -- port release; kernel *version* comes from init.kl ("43.4")
 
 -- ---- kernel bytecode cache -------------------------------------------------
 -- Loading the kernel from .kl sources costs ~0.8s (read + parse + KL->Lua
@@ -537,8 +537,9 @@ end
 -- (ShenOSKernel 43.1 has no top-level forms at all — its kernel signatures are
 -- precompiled closures in init.kl's shen.initialise-signedfuncs — so on the
 -- vendored kernel hoist_tail finds nothing to hoist. The machinery stays for
--- S42-shaped trees via SHEN_KL_DIR, and record_declares / replay_declares are
--- reused for the standard library's 290 declares; see stlib_types.)
+-- S42-shaped trees via SHEN_KL_DIR. Since 43.3 the stdlib's 290 signatures are
+-- precompiled in stlib.kl and are not replayed here; the datatype rule
+-- compiles are cached separately (stlib_datatypes).)
 -- On the S42.0 kernel, klambda/types.kl ended with 161 top-level
 -- `(declare Name Type)` forms, and
 -- they are not cheap annotations: `declare` (types.kl) runs the type theory for
@@ -1517,46 +1518,26 @@ end
 -- defuns stay loaded but are not registered as Shen functions).
 local STDLIB_LOADED = false
 
--- (stlib.initialise-types) is 290 (declare Name Type) calls, and `declare`
--- runs the type theory for real on each (variancy under the Prolog machine,
--- then a KL->Lua compile of the signature's prolog abstraction): ~0.2 s, the
--- bulk of a warm boot. Everything it depends on is fixed by the kernel cache
--- key, so cache it exactly the way the S42 kernel's own types.kl signatures
--- were cached (hoist_tail / record_declares / replay_declares): a sidecar file
--- next to the kernel bytecode cache holds, per signature, its raw type and the
--- dumped abstraction chunk, plus the gensym / inference counters. A warm boot
--- replays them into shen.*sigf* (and the native typechecker's signature
--- table) in the original order. SHEN_KERNEL_CACHE=off disables it with the
--- kernel cache.
+-- ShenOSKernel 43.3 precompiles the 290 stdlib signature abstractions as
+-- (shen.declare-with-signature Name Type (freeze Abstraction)) inside
+-- stlib.kl. A warm boot no longer runs the type theory per signature, and the
+-- old <kernel cache>.stlib signature sidecar is gone. typecheck_native wraps
+-- shen.declare-with-signature, so its signature table still sees every one.
 --
--- The file also holds the record stream of (stlib.initialise-datatypes), in the
--- user fasl's format: its two datatypes run the whole rule compiler and were
--- 40% of a warm boot's instructions. The records need the fasl recorder, so a
--- boot with SHEN_FASL=off stores none and runs the phase.
-local SIGS_FORMAT = "SHENSIG2"  -- 2: datatype records after the counters
-local function stlib_sigs_path()
-  if P.KERNEL_CACHE_DATA then return nil end   -- single-file bundle
+-- The two datatypes still run the rule compiler (shen.process-datatype), which
+-- was the expensive half of a warm boot once the signatures were precompiled.
+-- Their fasl records live in <kernel cache>.stlibdt (SHENDT1), keyed on the
+-- kernel cache key. SHEN_FASL=off, SHEN_KERNEL_CACHE=off, or a bundle with no
+-- cache path runs the phase for real. A truncated file is a miss and is
+-- rewritten; a replay that raises still raises.
+local DT_FORMAT = "SHENDT1"
+local function stlib_dt_path()
+  if P.KERNEL_CACHE_DATA then return nil end
   local p = cache_path()
-  return p and (p .. ".stlib") or nil
+  return p and (p .. ".stlibdt") or nil
 end
 
-local function write_sigs(path, key, decl, counters, datatypes)
-  local parts = { SIGS_FORMAT, "\n", key, "\n", tostring(#decl), "\n" }
-  for _, e in ipairs(decl) do
-    parts[#parts+1] = e.name .. "\n" .. #e.dump .. "\n" .. e.dump
-    kdata_ser(e.typ, parts)
-  end
-  parts[#parts+1] = tostring(counters.gensym) .. "\n" .. tostring(counters.infs) .. "\n"
-  parts[#parts+1] = datatypes or ""
-  local tmp = path .. ".tmp"
-  local fh = open_for_write(tmp)
-  if not fh then return end
-  fh:write(table.concat(parts)); fh:close()
-  os.remove(path)
-  os.rename(tmp, path)
-end
-
-local function read_sigs(path, key)
+local function read_datatypes(path, key)
   local data = read_file(path)
   if not data then return nil end
   local pos = 1
@@ -1566,54 +1547,17 @@ local function read_sigs(path, key)
     local s = data:sub(pos, e - 1); pos = e + 1
     return s
   end
-  if line() ~= SIGS_FORMAT or line() ~= key then return nil end
-  local n = tonumber(line() or ""); if not n then return nil end
-  local decl = {}
-  local ok = pcall(function()
-    for i = 1, n do
-      local nm = line()
-      local len = tonumber(line() or "")
-      if not nm or not len or pos + len - 1 > #data then error("truncated") end
-      local dump = data:sub(pos, pos + len - 1)
-      pos = pos + len
-      local typ
-      typ, pos = kdata_de(data, pos)
-      decl[i] = { name = nm, typ = typ, dump = dump }
-    end
-  end)
-  if not ok then return nil end
-  local gensym = tonumber(line() or ""); if not gensym then return nil end
-  local infs = tonumber(line() or ""); if not infs then return nil end
-  local datatypes
-  if pos <= #data then
-    datatypes = fasl_parse(data, pos)
-    if not datatypes then return nil end
-  end
-  return { decl = decl, gensym = gensym, infs = infs, datatypes = datatypes }
+  if line() ~= DT_FORMAT or line() ~= key then return nil end
+  return fasl_parse(data, pos)
 end
 
--- The sidecar, read once per boot: both phases below use it.
-local STLIB_SIGS, STLIB_SIGS_READ
-local function stlib_cached()
-  if not STLIB_SIGS_READ then
-    STLIB_SIGS_READ = true
-    local path = stlib_sigs_path()
-    if path then
-      STLIB_SIGS = read_sigs(path, kernel_key() .. "|" .. SIGS_FORMAT)
-    end
-  end
-  return STLIB_SIGS
-end
-
--- (stlib.initialise-datatypes), from its records when the sidecar has them,
--- else for real, recording them for write_sigs (stlib_types, the next phase
--- that matters) when the fasl recorder is live.
-local STLIB_DT_BLOB
 local function stlib_datatypes()
   local run = P.F["stlib.initialise-datatypes"]
-  local cached = stlib_cached()
-  if cached and cached.datatypes then return fasl_replay(cached.datatypes) end
-  if cached or not FASL_INSTALLED or not stlib_sigs_path() then return run() end
+  local path = stlib_dt_path()
+  if not path or not FASL_INSTALLED then return run() end
+  local key = kernel_key() .. "|" .. DT_FORMAT
+  local cached = read_datatypes(path, key)
+  if cached then return fasl_replay(cached) end
   local rec = { n = 0, in_chunk = false }
   local arity0 = {}
   for k, v in pairs(C.ARITY) do arity0[k] = v end
@@ -1627,59 +1571,12 @@ local function stlib_datatypes()
   C.NO_KDATA = saved_nokdata
   if not ok then error(err, 0) end
   local sok, blob = pcall(fasl_serialize, rec, arity0)
-  if sok then STLIB_DT_BLOB = blob end
+  if sok then atomic_write(path, DT_FORMAT .. "\n" .. key .. "\n" .. blob) end
 end
 
 local function stlib_types(verbose)
-  local init_types = P.F["stlib.initialise-types"]
-  local path = stlib_sigs_path()
-  if not path then return init_types() end
-  local key = kernel_key() .. "|" .. SIGS_FORMAT
-  local tn = package.loaded["typecheck_native"]
-  local on_sig = tn and tn.record_sig or nil
-  local cached = stlib_cached()
-  if cached then
-    -- load every dump before running any, so a foreign-arch file falls back
-    -- to the real declares with nothing half-applied
-    local fns, lok = {}, true
-    for i, e in ipairs(cached.decl) do
-      local ok, fn = pcall(P.load_chunk, e.dump, "declare:" .. e.name)
-      if not ok then lok = false; break end
-      fns[i] = fn
-    end
-    if lok then
-      replay_declares(cached.decl, fns, on_sig)
-      if type(P.GLOBALS["shen.*gensym*"]) == "number"
-         and cached.gensym > P.GLOBALS["shen.*gensym*"] then
-        P.GLOBALS["shen.*gensym*"] = cached.gensym
-      end
-      if type(P.GLOBALS["shen.*infs*"]) == "number"
-         and cached.infs > P.GLOBALS["shen.*infs*"] then
-        P.GLOBALS["shen.*infs*"] = cached.infs
-      end
-      if verbose then io.stderr:write("  stdlib signatures (cached)\n") end
-      return
-    end
-    os.remove(path)
-  end
-  -- Cold: collect the (name, type) pairs the compiled initialiser declares,
-  -- then run the real declares through record_declares in the same order.
-  local live = P.F["declare"]
-  local decls = {}
-  P.F["declare"] = function(name, typ)
-    decls[#decls + 1] = { name = name, typ = typ }
-    return name
-  end
-  local ok, err = pcall(init_types)
-  P.F["declare"] = live
-  if not ok then error(err, 0) end
-  local out = record_declares(decls)
-  if out then
-    write_sigs(path, key, out, {
-      gensym = type(P.GLOBALS["shen.*gensym*"]) == "number" and P.GLOBALS["shen.*gensym*"] or 0,
-      infs   = type(P.GLOBALS["shen.*infs*"]) == "number" and P.GLOBALS["shen.*infs*"] or 0,
-    }, STLIB_DT_BLOB)
-  end
+  if verbose then io.stderr:write("  stdlib signatures\n") end
+  P.F["stlib.initialise-types"]()
 end
 
 local STDLIB_PHASES = { "environment", "arities", "macros", "synonyms",
@@ -1695,7 +1592,7 @@ local function load_stdlib(verbose)
   local hush0 = P.GLOBALS["*hush*"]
   local ok, err = pcall(function()
     -- (stlib.initialise) is exactly these phases in this order; run them
-    -- individually so the types phase can be served from the cache.
+    -- individually so the datatype phase can be served from the cache.
     local whole = true
     for _, ph in ipairs(STDLIB_PHASES) do
       if not P.F["stlib.initialise-" .. ph] then whole = false end
