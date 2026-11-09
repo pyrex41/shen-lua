@@ -11,7 +11,7 @@
       packages = eachSystem (_system: pkgs: rec {
         shen-lua = pkgs.stdenvNoCC.mkDerivation {
           pname = "shen-lua";
-          version = "0.12.0";
+          version = "0.13.0";
           src = self;
 
           nativeBuildInputs = [ pkgs.makeWrapper ];

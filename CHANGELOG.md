@@ -5,6 +5,8 @@ Notable changes to shen-lua. Release notes for earlier versions are under
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-09
+
 ### Changed
 
 - **Kernel: ShenOSKernel 43.4** (community `Shen-Language/shen-sources`, tag

@@ -161,7 +161,7 @@ luarocks make --local shen-scm-1.rockspec   # this tree
 ```
 
 LuaJIT required (`lua == 5.1`). This tree uses ShenOSKernel **43.4**; release
-**0.12.0** is the first on the community 43.2 kernel, **0.11.1** uses Tarver's S42 kernel; **0.9.0** was 41.1. Or grab `shen-bundle.lua` from
+**0.13.0** uses community 43.4, **0.12.0** was the first on the community 43.2 kernel, **0.11.1** uses Tarver's S42 kernel; **0.9.0** was 41.1. Or grab `shen-bundle.lua` from
 [Releases](https://github.com/pyrex41/shen-lua/releases/latest) — one file,
 `require("shen-bundle")`.
 
